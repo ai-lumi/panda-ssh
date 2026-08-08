@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>熊猫 SSH — 交互原型</title>
+<style>
+/* ============ 基础 ============ */
+* { margin:0; padding:0; box-sizing:border-box; -webkit-user-select:none; user-select:none; }
+:root {
+  --accent:#0A84FF; --accent-press:#0066d6;
+  --sidebar-bg:rgba(236,236,236,.82); --content-bg:#ffffff;
+  --border:rgba(0,0,0,.09); --text:#1d1d1f; --text-2:#6e6e73; --text-3:#aeaeb2;
+  --hover:rgba(0,0,0,.05); --sel:rgba(10,132,255,.16);
+  --red:#FF5F57; --yellow:#FEBC2E; --green:#28C840;
+  --radius:8px; --shadow:0 10px 34px rgba(0,0,0,.22);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+html,body { height:100%; }
+body {
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue","PingFang SC",sans-serif;
+  font-size:13px; color:var(--text); background:#d8d8dc; overflow:hidden;
+  display:flex; align-items:center; justify-content:center;
+}
+/* 铺满视口的窗口 */
+#window {
+  width:100vw; height:100vh; background:var(--content-bg);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+::-webkit-scrollbar { width:8px; height:8px; }
+::-webkit-scrollbar-thumb { background:rgba(0,0,0,.22); border-radius:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+
+/* ============ 标题栏 + 标签栏 ============ */
+#titlebar {
+  height:44px; flex:0 0 44px; display:flex; align-items:center;
+  background:linear-gradient(#f6f6f6,#ececec); border-bottom:1px solid var(--border);
+  padding:0 12px; gap:12px; -webkit-app-region:drag;
+}
+#traffic { display:flex; gap:8px; flex:0 0 auto; }
+#traffic span { width:12px; height:12px; border-radius:50%; display:block; box-shadow:inset 0 0 1px rgba(0,0,0,.25); }
+#traffic .r { background:var(--red); } #traffic .y { background:var(--yellow); } #traffic .g { background:var(--green); }
+#appname { font-weight:600; font-size:13px; color:var(--text-2); flex:0 0 auto; }
+#tabstrip {
+  flex:1; display:flex; align-items:stretch; gap:4px; overflow-x:auto; overflow-y:hidden;
+  height:32px; scrollbar-width:none;
+}
+#tabstrip::-webkit-scrollbar { display:none; }
+.tab {
+  display:flex; align-items:center; gap:6px; padding:0 10px; height:28px; margin-top:2px;
+  border-radius:7px; cursor:default; white-space:nowrap; max-width:200px;
+  color:var(--text-2); border:1px solid transparent; font-size:12.5px;
+}
+.tab:hover { background:var(--hover); }
+.tab.active { background:#fff; color:var(--text); border-color:var(--border); box-shadow:0 1px 3px rgba(0,0,0,.1); }
+.tab .ticon { flex:0 0 auto; display:flex; }
+.tab .tname { overflow:hidden; text-overflow:ellipsis; }
+.tab .tclose {
+  width:16px; height:16px; border-radius:4px; display:flex; align-items:center; justify-content:center;
+  color:var(--text-3); font-size:12px; flex:0 0 auto; line-height:1;
+}
+.tab .tclose:hover { background:rgba(0,0,0,.12); color:var(--text); }
+#tabplus {
+  flex:0 0 auto; width:26px; height:26px; margin-top:3px; border-radius:6px; border:none;
+  background:transparent; color:var(--text-2); font-size:15px; cursor:pointer;
+}
+#tabplus:hover { background:var(--hover); color:var(--text); }
+
+/* ============ 中间区 ============ */
+#middle { flex:1; display:flex; min-height:0; }
+
+/* ---- 侧栏 ---- */
+#sidebar {
+  width:232px; flex:0 0 232px; display:flex; flex-direction:column;
+  background:var(--sidebar-bg); backdrop-filter:blur(24px); -webkit-backdrop-filter:blur(24px);
+  border-right:1px solid var(--border);
+}
+#searchbox { padding:10px 10px 6px; }
+#searchbox input {
+  width:100%; height:26px; border:1px solid var(--border); border-radius:6px;
+  background:rgba(255,255,255,.75); padding:0 8px 0 24px; font-size:12.5px; outline:none; color:var(--text);
+}
+#searchbox input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,132,255,.25); background:#fff; }
+#searchbox { position:relative; }
+#searchbox svg { position:absolute; left:18px; top:17px; pointer-events:none; opacity:.5; }
+#toolbar { display:flex; gap:4px; padding:2px 10px 6px; border-bottom:1px solid var(--border); }
+.toolbtn {
+  height:24px; padding:0 8px; border-radius:6px; border:none; background:transparent;
+  font-size:12px; color:var(--text-2); cursor:pointer; display:flex; align-items:center; gap:4px;
+}
+.toolbtn:hover { background:var(--hover); color:var(--text); }
+#tree { flex:1; overflow-y:auto; padding:4px 6px; }
+.grow, .hrow {
+  display:flex; align-items:center; gap:5px; padding:3px 6px; border-radius:6px;
+  cursor:default; position:relative; min-height:24px;
+}
+.grow:hover, .hrow:hover { background:var(--hover); }
+.hrow.sel { background:var(--sel); }
+.grow .tri { width:12px; text-align:center; color:var(--text-2); font-size:10px; flex:0 0 12px; }
+.grow .gname { font-weight:600; font-size:12.5px; }
+.hrow .hmain { flex:1; min-width:0; }
+.hrow .hname { font-weight:600; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hrow .haddr { color:var(--text-2); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hrow .dot { width:7px; height:7px; border-radius:50%; flex:0 0 7px; }
+.dot.ok { background:#30d158; } .dot.unknown { background:#ffd60a; } .dot.mismatch { background:#ff453a; } .dot.plain { background:#c7c7cc; }
+.morebtn {
+  position:absolute; right:4px; top:50%; transform:translateY(-50%);
+  width:20px; height:20px; border:none; border-radius:5px; background:transparent;
+  color:var(--text-2); font-size:13px; cursor:pointer; display:none; align-items:center; justify-content:center;
+}
+.grow:hover .morebtn, .hrow:hover .morebtn { display:flex; }
+.morebtn:hover { background:rgba(0,0,0,.12); color:var(--text); }
+#sidebottom { border-top:1px solid var(--border); padding:6px; display:flex; flex-direction:column; gap:2px; }
+.sidebtn {
+  display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:6px; border:none;
+  background:transparent; font-size:12.5px; color:var(--text); cursor:pointer; text-align:left; width:100%;
+}
+.sidebtn:hover { background:var(--hover); }
+.sidebtn.active { background:var(--sel); }
+.badge-plan {
+  font-size:10px; color:#fff; background:#bf5af2; border-radius:4px; padding:1px 5px; margin-left:auto;
+}
+
+/* ---- 内容区 ---- */
+#content { flex:1; min-width:0; display:flex; flex-direction:column; background:var(--content-bg); }
+.page { flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+
+/* 空态 / 主机详情 */
+.centerfill { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:var(--text-2); padding:24px; overflow-y:auto; }
+.emptyicon { opacity:.28; }
+.detail-card { display:flex; flex-direction:column; align-items:center; gap:8px; max-width:520px; width:100%; }
+.detail-card h2 { font-size:20px; font-weight:700; color:var(--text); }
+.detail-card .addr { color:var(--text-2); font-family:var(--mono); font-size:12.5px; }
+.chips { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; margin:4px 0; }
+.chip { font-size:11px; padding:2px 8px; border-radius:10px; background:rgba(0,0,0,.06); color:var(--text-2); }
+.chip.warn { background:rgba(255,69,58,.14); color:#d70015; }
+.chip.ok { background:rgba(48,209,88,.16); color:#1f8a3b; }
+.fingerprint {
+  font-family:var(--mono); font-size:11.5px; background:#f5f5f7; border:1px solid var(--border);
+  border-radius:8px; padding:10px 14px; text-align:center; word-break:break-all; color:var(--text);
+  line-height:1.7; width:100%;
+}
+.fingerprint .alg { color:var(--text-2); }
+.btnrow { display:flex; gap:10px; margin-top:10px; }
+.btn {
+  height:30px; padding:0 16px; border-radius:7px; border:1px solid var(--border);
+  background:#fff; font-size:13px; cursor:pointer; color:var(--text);
+  display:inline-flex; align-items:center; gap:6px; justify-content:center;
+}
+.btn:hover { background:#f5f5f7; }
+.btn:active { transform:scale(.98); }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+.btn.primary:hover { background:#1a8fff; }
+.btn.primary:active { background:var(--accent-press); }
+.btn.danger { background:#ff453a; border-color:#ff453a; color:#fff; }
+.btn.danger:hover { background:#ff5f55; }
+.btn:disabled { opacity:.45; pointer-events:none; }
+.note-text { color:var(--text-2); font-size:12px; max-width:420px; text-align:center; line-height:1.6; }
+
+/* ---- 终端 ---- */
+.term {
+  flex:1; background:#1e1e24; color:#e8e8ea; font-family:var(--mono); font-size:12.5px;
+  display:flex; flex-direction:column; min-height:0;
+}
+.term-head {
+  height:30px; flex:0 0 30px; display:flex; align-items:center; justify-content:center;
+  color:#98989f; font-size:12px; border-bottom:1px solid rgba(255,255,255,.08); position:relative;
+}
+.term-body { flex:1; overflow-y:auto; padding:8px 10px; cursor:text; -webkit-user-select:text; user-select:text; }
+.term-body .line { white-space:pre-wrap; word-break:break-all; line-height:1.45; }
+.term-body .dim { color:#8e8e96; }
+.term-body .grn { color:#30d158; } .term-body .red { color:#ff6b63; } .term-body .ylw { color:#ffd60a; }
+.term-input-row { display:flex; align-items:center; }
+.term-input-row .prompt { white-space:pre; }
+.term-input-row input {
+  flex:1; background:transparent; border:none; outline:none; color:#e8e8ea;
+  font-family:var(--mono); font-size:12.5px; caret-color:#30d158; padding:0 0 0 1px;
+}
+.cursor { display:inline-block; width:7px; height:14px; background:#30d158; vertical-align:-2px; animation:blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity:0; } }
+.conn-status { display:flex; flex-direction:column; gap:6px; }
+.spinner { display:inline-block; width:12px; height:12px; border:2px solid #55555e; border-top-color:#30d158; border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.errbox {
+  margin:24px auto; max-width:460px; background:rgba(255,69,58,.08); border:1px solid rgba(255,69,58,.35);
+  border-radius:10px; padding:18px; text-align:center; display:flex; flex-direction:column; gap:8px; align-items:center;
+}
+.errbox h3 { color:#ff6b63; font-size:14px; }
+.errbox .detail { color:#b8b8c0; font-size:12px; font-family:var(--mono); }
+.errbox .btnrow .btn { background:#2c2c33; color:#e8e8ea; border-color:rgba(255,255,255,.15); }
+.errbox .btnrow .btn:hover { background:#3a3a42; }
+
+/* ---- SFTP ---- */
+.sftp { flex:1; display:flex; min-height:0; position:relative; }
+.sftp-panes { flex:1; display:flex; min-width:0; }
+.pane { flex:1; display:flex; flex-direction:column; min-width:0; }
+.pane + .pane { border-left:1px solid var(--border); }
+.pane-head {
+  flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:6px 8px;
+  border-bottom:1px solid var(--border); background:#fafafa;
+}
+.pane-head .ptitle { font-weight:700; font-size:12px; margin-right:4px; }
+.crumbs { display:flex; align-items:center; gap:2px; overflow:hidden; flex:1; font-size:12px; color:var(--text-2); }
+.crumbs b { color:var(--text); font-weight:600; cursor:pointer; }
+.crumbs b:hover { color:var(--accent); }
+.iconbtn {
+  width:24px; height:24px; border-radius:6px; border:none; background:transparent;
+  color:var(--text-2); cursor:pointer; display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+}
+.iconbtn:hover:not(:disabled) { background:var(--hover); color:var(--text); }
+.iconbtn:disabled { opacity:.3; cursor:default; }
+.flist { flex:1; overflow-y:auto; }
+.frow {
+  display:grid; grid-template-columns:20px 1fr 80px 140px; gap:6px; align-items:center;
+  padding:4px 10px; font-size:12.5px; cursor:default;
+}
+.frow:hover { background:var(--hover); }
+.frow.sel { background:var(--sel); }
+.frow .fname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.frow .fsize, .frow .ftime { color:var(--text-2); font-size:11.5px; text-align:right; }
+.frow .ftime { font-family:var(--mono); font-size:11px; }
+.pane-foot {
+  flex:0 0 auto; border-top:1px solid var(--border); padding:6px 10px; display:flex;
+  align-items:center; gap:8px; background:#fafafa; min-height:36px; font-size:12px; color:var(--text-2);
+}
+.sftp-toolbar {
+  flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:6px 10px;
+  border-bottom:1px solid var(--border); background:#f5f5f7;
+}
+.sftp-toolbar .spacer { flex:1; }
+.countbadge { background:var(--accent); color:#fff; border-radius:9px; font-size:10.5px; padding:1px 6px; }
+/* 传输面板 */
+.xfer {
+  width:340px; flex:0 0 340px; border-left:1px solid var(--border); background:#fafafa;
+  display:flex; flex-direction:column; min-height:0;
+}
+.xfer-head { flex:0 0 auto; padding:8px 12px; font-weight:700; font-size:12.5px; border-bottom:1px solid var(--border); display:flex; align-items:center; }
+.xfer-list { flex:1; overflow-y:auto; padding:6px; display:flex; flex-direction:column; gap:6px; }
+.xfer-empty { color:var(--text-3); text-align:center; margin-top:30px; font-size:12px; }
+.xfer-item { background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px 10px; display:flex; flex-direction:column; gap:5px; }
+.xfer-top { display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; }
+.xfer-top .fname { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.xfer-route { font-size:11px; color:var(--text-2); font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pbar { height:5px; background:rgba(0,0,0,.08); border-radius:3px; overflow:hidden; }
+.pbar > div { height:100%; background:var(--accent); border-radius:3px; transition:width .12s linear; }
+.pbar.done > div { background:#30d158; } .pbar.fail > div { background:#ff453a; }
+.xfer-meta { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-2); }
+.xfer-meta .mono { font-family:var(--mono); }
+.st { font-size:10.5px; padding:1px 7px; border-radius:9px; font-weight:600; }
+.st.queued { background:rgba(174,174,178,.25); color:#6e6e73; }
+.st.running { background:rgba(10,132,255,.15); color:#0A84FF; }
+.st.done { background:rgba(48,209,88,.16); color:#1f8a3b; }
+.st.failed { background:rgba(255,69,58,.14); color:#d70015; }
+.st.cancelled { background:rgba(142,142,147,.2); color:#636366; }
+.xfer-ops { margin-left:auto; display:flex; gap:4px; }
+.mini { font-size:11px; padding:2px 8px; border-radius:5px; border:1px solid var(--border); background:#fff; cursor:pointer; color:var(--text); }
+.mini:hover { background:#f0f0f2; }
+
+/* ---- 代码片段 / 设置页 ---- */
+.subpage-head { flex:0 0 auto; padding:14px 20px 10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+.subpage-head h2 { font-size:17px; font-weight:700; }
+.snip-layout { flex:1; display:flex; min-height:0; }
+.snip-list { width:280px; flex:0 0 280px; border-right:1px solid var(--border); overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:4px; }
+.snip-item { padding:8px 10px; border-radius:8px; cursor:default; }
+.snip-item:hover { background:var(--hover); }
+.snip-item.sel { background:var(--sel); }
+.snip-item .stitle { font-weight:600; font-size:13px; }
+.snip-item .sdesc { font-size:11.5px; color:var(--text-2); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.snip-detail { flex:1; padding:16px 20px; overflow-y:auto; display:flex; flex-direction:column; gap:10px; }
+.codeblock {
+  font-family:var(--mono); font-size:12px; background:#1e1e24; color:#e8e8ea; border-radius:8px;
+  padding:12px 14px; white-space:pre; overflow-x:auto; -webkit-user-select:text; user-select:text; line-height:1.55;
+}
+.set-body { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:14px; max-width:640px; }
+.set-card { background:#f5f5f7; border:1px solid var(--border); border-radius:10px; padding:4px 14px; }
+.set-row { display:flex; align-items:center; gap:10px; padding:10px 0; }
+.set-row + .set-row { border-top:1px solid var(--border); }
+.set-row .lab { flex:1; }
+.set-row .lab .sub { font-size:11px; color:var(--text-2); margin-top:1px; }
+/* 开关 */
+.switch { width:38px; height:22px; border-radius:11px; background:rgba(120,120,128,.32); position:relative; cursor:pointer; transition:background .2s; flex:0 0 auto; border:none; }
+.switch::after { content:""; position:absolute; width:18px; height:18px; border-radius:50%; background:#fff; top:2px; left:2px; transition:left .2s; box-shadow:0 1px 3px rgba(0,0,0,.3); }
+.switch.on { background:#30d158; }
+.switch.on::after { left:18px; }
+
+/* ============ 状态栏 ============ */
+#statusbar {
+  height:24px; flex:0 0 24px; display:flex; align-items:center; padding:0 12px; gap:14px;
+  background:#f6f6f6; border-top:1px solid var(--border); font-size:11px; color:var(--text-2);
+}
+#statusbar .mid { flex:1; text-align:center; }
+#sync { display:flex; align-items:center; gap:5px; cursor:pointer; border:none; background:none; font-size:11px; color:var(--text-2); padding:2px 4px; border-radius:4px; }
+#sync:hover { background:var(--hover); }
+
+/* ============ 上下文菜单 ============ */
+#ctxmenu {
+  position:fixed; z-index:900; min-width:180px; background:rgba(248,248,248,.92);
+  backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+  border:1px solid rgba(0,0,0,.12); border-radius:8px; box-shadow:var(--shadow);
+  padding:4px; display:none; font-size:13px;
+}
+#ctxmenu .mi { display:flex; align-items:center; gap:8px; padding:4px 10px; border-radius:5px; cursor:default; position:relative; }
+#ctxmenu .mi:hover { background:var(--accent); color:#fff; }
+#ctxmenu .mi.danger:hover { background:#ff453a; }
+#ctxmenu .mi .arrow { margin-left:auto; font-size:10px; }
+#ctxmenu .sep { height:1px; background:var(--border); margin:4px 8px; }
+#ctxmenu .sub {
+  display:none; position:absolute; left:calc(100% - 4px); top:-5px; min-width:150px;
+  background:rgba(248,248,248,.96); backdrop-filter:blur(20px); border:1px solid rgba(0,0,0,.12);
+  border-radius:8px; box-shadow:var(--shadow); padding:4px; color:var(--text);
+}
+#ctxmenu .mi:hover > .sub { display:block; }
+#ctxmenu .sub .mi:hover { background:var(--accent); color:#fff; }
+
+/* ============ Modal ============ */
+#overlay {
+  position:fixed; inset:0; z-index:800; background:rgba(0,0,0,.28);
+  backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+  display:none; align-items:flex-start; justify-content:center;
+}
+#overlay.show { display:flex; }
+.sheet {
+  margin-top:60px; background:#f5f5f7; border-radius:12px; box-shadow:var(--shadow);
+  width:480px; max-width:92vw; max-height:82vh; overflow-y:auto; padding:20px;
+  animation:sheetin .18s ease-out;
+}
+@keyframes sheetin { from { transform:scale(.96) translateY(-8px); opacity:0; } to { transform:scale(1) translateY(0); opacity:1; } }
+.sheet h3 { font-size:15px; font-weight:700; margin-bottom:4px; }
+.sheet .desc { font-size:12.5px; color:var(--text-2); line-height:1.6; margin-bottom:10px; }
+.formcard { background:#fff; border:1px solid var(--border); border-radius:10px; padding:2px 12px; margin-bottom:12px; }
+.formcard .fsec { font-size:11px; font-weight:700; color:var(--text-2); text-transform:none; padding:8px 0 2px; }
+.frow2 { display:flex; align-items:center; gap:10px; padding:7px 0; }
+.frow2 + .frow2 { border-top:1px solid #eee; }
+.frow2 label { width:88px; flex:0 0 88px; font-size:12.5px; color:var(--text); }
+.frow2 input[type=text], .frow2 input[type=password], .frow2 input[type=number], .frow2 select, .frow2 textarea {
+  flex:1; height:26px; border:1px solid var(--border); border-radius:6px; padding:0 8px;
+  font-size:12.5px; outline:none; background:#fff; color:var(--text); font-family:inherit;
+}
+.frow2 textarea { height:auto; padding:6px 8px; resize:vertical; }
+.frow2 input:focus, .frow2 select:focus, .frow2 textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,132,255,.22); }
+.seg { display:flex; background:rgba(118,118,128,.14); border-radius:7px; padding:2px; gap:2px; }
+.seg button { flex:1; height:24px; border:none; border-radius:5px; background:transparent; font-size:12px; cursor:pointer; color:var(--text); }
+.seg button.on { background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.15); font-weight:600; }
+.sheet .btnrow { justify-content:flex-end; margin-top:4px; }
+.fp-compare { display:flex; flex-direction:column; gap:8px; margin:10px 0; }
+.fp-line { background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+.fp-line .k { font-size:11px; font-weight:700; color:var(--text-2); margin-bottom:3px; }
+.fp-line .v { font-family:var(--mono); font-size:11px; word-break:break-all; line-height:1.5; }
+.fp-line.bad { border-color:rgba(255,69,58,.5); background:rgba(255,69,58,.05); }
+.alerticon { display:flex; justify-content:center; margin-bottom:8px; }
+.sheet.danger-sheet h3 { color:#d70015; text-align:center; }
+.sheet .desc.center { text-align:center; }
+.filepick-item { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:6px; font-family:var(--mono); font-size:12.5px; cursor:default; }
+.filepick-item:hover { background:var(--hover); }
+.filepick-item.sel { background:var(--sel); }
+
+/* ============ Toast ============ */
+#toast {
+  position:fixed; top:56px; left:50%; transform:translateX(-50%) translateY(-16px);
+  background:rgba(40,40,42,.92); color:#fff; font-size:12.5px; padding:7px 16px;
+  border-radius:18px; box-shadow:0 4px 16px rgba(0,0,0,.3); opacity:0; pointer-events:none;
+  transition:opacity .2s, transform .2s; z-index:1000;
+}
+#toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+/* 确认框 */
+.confirm-sheet { width:400px; }
+</style>
+</head>
+<body>
+<div id="window">
+  <!-- 标题栏 -->
+  <div id="titlebar">
+    <div id="traffic"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+    <div id="appname">熊猫 SSH</div>
+    <div id="tabstrip"></div>
+    <button id="tabplus" title="新建标签">＋</button>
+  </div>
+  <!-- 中间 -->
+  <div id="middle">
+    <div id="sidebar">
+      <div id="searchbox">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="#6e6e73" stroke-width="1.6"/><path d="M11 11l3.2 3.2" stroke="#6e6e73" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <input id="search" type="text" placeholder="搜索主机">
+      </div>
+      <div id="toolbar">
+        <button class="toolbtn" id="btn-add-host">＋ 添加主机</button>
+        <button class="toolbtn" id="btn-add-group">新建分组</button>
+      </div>
+      <div id="tree"></div>
+      <div id="sidebottom">
+        <button class="sidebtn" id="btn-snippets"><span>📝</span>代码片段<span class="badge-plan">规划中</span></button>
+        <button class="sidebtn" id="btn-settings"><span>⚙️</span>设置</button>
+      </div>
+    </div>
+    <div id="content"></div>
+  </div>
+  <!-- 状态栏 -->
+  <div id="statusbar">
+    <button id="sync"></button>
+    <div class="mid" id="hostcount"></div>
+    <div>Rust core v0.1 · 原型演示</div>
+  </div>
+</div>
+
+<div id="ctxmenu"></div>
+<div id="overlay"><div id="sheet-holder" style="display:contents"></div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* =========================================================
+ * 熊猫 SSH — 高保真交互原型（纯前端模拟，无外部依赖）
+ * 状态驱动：全局 state + render 函数
+ * ========================================================= */
+
+/* ---------- 内联 SVG 图标 ---------- */
+const IC = {
+  monitor: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 14h5M8 11.5V14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  folder: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.5 1.8h5.7c.7 0 1.2.5 1.2 1.2v5.8c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2V4.2z" stroke="currentColor" stroke-width="1.2"/></svg>',
+  folderFill: '<svg width="15" height="15" viewBox="0 0 16 16"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.5 1.8h5.7c.7 0 1.2.5 1.2 1.2v5.8c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2V4.2z" fill="#5ac8fa"/></svg>',
+  file: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L12.5 4.5v10H4v-13z" stroke="#8e8e93" stroke-width="1.2"/><path d="M9.5 1.5v3h3" stroke="#8e8e93" stroke-width="1.2"/></svg>',
+  server: '<svg width="52" height="52" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="7" rx="2" stroke="#0A84FF" stroke-width="1.6"/><rect x="3" y="13" width="18" height="7" rx="2" stroke="#0A84FF" stroke-width="1.6"/><circle cx="7" cy="7.5" r="1.2" fill="#0A84FF"/><circle cx="7" cy="16.5" r="1.2" fill="#0A84FF"/><path d="M11 7.5h6M11 16.5h6" stroke="#0A84FF" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  warn: '<svg width="44" height="44" viewBox="0 0 24 24" fill="none"><path d="M12 3L22 20H2L12 3z" stroke="#ff9f0a" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.5v5" stroke="#ff9f0a" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="17.2" r="1" fill="#ff9f0a"/></svg>',
+  alertRed: '<svg width="44" height="44" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9.2" stroke="#ff453a" stroke-width="1.8"/><path d="M12 7.5v6" stroke="#ff453a" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="#ff453a"/></svg>',
+  up: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" stroke="#0A84FF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  down: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5" stroke="#30d158" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  back: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  cloud: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M4.5 12.5a3 3 0 01-.4-6 4.2 4.2 0 018.2 1 2.8 2.8 0 01-.8 5H4.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  lock: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="currentColor" stroke-width="1.3"/></svg>',
+  key: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="10.5" r="3" stroke="currentColor" stroke-width="1.3"/><path d="M7.8 8.2L13 3M11 5l2 2M9.5 6.5l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+};
+
+/* ---------- 工具 ---------- */
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function uid() { return "id" + Math.random().toString(36).slice(2, 9); }
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+  return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+}
+let toastTimer = null;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+/* ---------- 预置演示数据 ---------- */
+const FP = {
+  webprod: "SHA256:9c:4e:ab:12:77:f0:3d:58:aa:21:6b:90:e4:18:c2:05:7a:33:d9:01:84:5f:26:b8:1c:7d:40:e3:59:0a:6d:11",
+  webbackup: "SHA256:1a:2b:3c:4d:5e:6f:70:81:92:a3:b4:c5:d6:e7:f8:09:1b:2c:3d:4e:5f:60:71:82:93:a4:b5:c6:d7:e8:f9",
+  legacyOld: "SHA256:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+  legacyNew: "SHA256:de:ad:be:ef:12:34:56:78:9a:bc:de:f0:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55",
+  newtoy: "SHA256:f0:e1:d2:c3:b4:a5:96:87:78:69:5a:4b:3c:2d:1e:0f:aa:bb:cc:dd:ee:ff:11:22:33:44:55:66:77:88:99:00",
+  staging: "SHA256:55:44:33:22:11:00:ff:ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00:ff:ee:dd:cc:bb:aa:99:88:77:66",
+  manual: "SHA256:77:66:55:44:33:22:11:00:aa:bb:cc:dd:ee:ff:99:88:77:66:55:44:33:22:11:00:aa:bb:cc:dd:ee:ff:99:88",
+};
+
+const state = {
+  groups: [
+    { id: "g-prod", name: "生产环境", parent: null, open: true },
+    { id: "g-east", name: "华东", parent: "g-prod", open: true },
+    { id: "g-test", name: "测试环境", parent: null, open: true },
+  ],
+  hosts: [
+    { id: "h-webprod", name: "web-prod", addr: "203.0.113.10", port: 22, user: "luowenqiang", auth: "key", keyPath: "~/.ssh/id_ed25519", passSaved: false, note: "线上主 Web 服务器，Nginx + Node", groupId: "g-east", fp: FP.webprod, fpAlg: "ssh-ed25519", demo: null },
+    { id: "h-webbackup", name: "web-backup", addr: "203.0.113.11", port: 22, user: "luowenqiang", auth: "password", passSaved: true, note: "备用节点", groupId: "g-east", fp: FP.webbackup, fpAlg: "ssh-ed25519", demo: null },
+    { id: "h-legacy", name: "legacy-db", addr: "192.0.2.55", port: 22, user: "dba", auth: "password", passSaved: true, note: "老旧数据库，疑似被重装过", groupId: "g-prod", fp: FP.legacyOld, fpAlg: "ssh-rsa", demo: "mismatch" },
+    { id: "h-staging", name: "staging-01", addr: "198.51.100.20", port: 2222, user: "deploy", auth: "key", keyPath: "~/.ssh/id_rsa", passSaved: false, note: "预发环境", groupId: "g-test", fp: FP.staging, fpAlg: "ssh-ed25519", demo: null },
+    { id: "h-newtoy", name: "new-toy", addr: "10.8.0.6", port: 22, user: "pi", auth: "password", passSaved: true, note: "新入手的开发板，从未连接", groupId: null, fp: null, fpAlg: "ssh-ed25519", demo: "unknown" },
+    { id: "h-offline", name: "offline-srv", addr: "10.255.255.1", port: 22, user: "ops", auth: "key", keyPath: "~/.ssh/id_ed25519", passSaved: false, note: "已下线的机器，演示超时", groupId: null, fp: FP.staging, fpAlg: "ssh-ed25519", demo: "offline" },
+    { id: "h-manual", name: "manual-auth", addr: "172.16.9.9", port: 22, user: "luowenqiang", auth: "password", passSaved: false, note: "密码未存钥匙串，每次手动输入", groupId: null, fp: FP.manual, fpAlg: "ssh-ed25519", demo: "manual" },
+  ],
+  snippets: [
+    { id: "s1", title: "查看磁盘占用 Top 10", tags: ["运维", "磁盘"], desc: "递归统计当前目录并按大小排序，快速定位占空间的大户。", code: "du -ah . | sort -rh | head -n 10" },
+    { id: "s2", title: "实时跟踪 Nginx 错误日志", tags: ["日志", "Nginx"], desc: "跟踪错误日志并高亮 5xx。", code: "tail -f /var/log/nginx/error.log | grep --line-buffered ' 5[0-9][0-9] '" },
+    { id: "s3", title: "批量重启 systemd 服务", tags: ["systemd"], desc: "一次性重启多个服务并查看状态。", code: "for s in nginx php-fpm redis; do\n  sudo systemctl restart $s\n  systemctl is-active $s\ndone" },
+  ],
+  selHostId: null,       // 侧栏选中的主机
+  view: "hosts",         // hosts | snippets | settings
+  tabs: [],              // {id,type:'terminal'|'sftp',hostId,title}
+  activeTab: null,
+  search: "",
+  icloud: true,
+  sessions: {},          // tabId -> 终端/SFTP 会话状态
+  transfers: [],         // 传输任务
+  xferOpen: {},          // tabId -> bool
+  nextId: 100,
+};
+
+/* 假文件系统：本地 & 各主机远程 */
+const LOCAL_FS = {
+  "/Users/luowenqiang": [
+    { name: "Documents", dir: true, size: 0, mtime: "2026-07-30 14:02" },
+    { name: "Downloads", dir: true, size: 0, mtime: "2026-08-04 09:41" },
+    { name: "deploy.tar.gz", dir: false, size: 18432000, mtime: "2026-08-03 22:15" },
+    { name: "notes.md", dir: false, size: 4096, mtime: "2026-08-01 11:20" },
+    { name: "id_ed25519.pub", dir: false, size: 102, mtime: "2026-05-12 16:00" },
+  ],
+  "/Users/luowenqiang/Documents": [
+    { name: "spec-drafts", dir: true, size: 0, mtime: "2026-07-28 10:00" },
+    { name: "roadmap.pdf", dir: false, size: 2355200, mtime: "2026-07-29 18:30" },
+    { name: "budget.xlsx", dir: false, size: 51200, mtime: "2026-06-15 09:00" },
+  ],
+  "/Users/luowenqiang/Downloads": [
+    { name: "panda-ssh-v0.1.dmg", dir: false, size: 8920000, mtime: "2026-08-04 09:41" },
+    { name: "wallpaper.heic", dir: false, size: 3145728, mtime: "2026-08-02 20:05" },
+  ],
+  "/Users/luowenqiang/Documents/spec-drafts": [
+    { name: "sftp-spec.md", dir: false, size: 12288, mtime: "2026-07-28 10:12" },
+  ],
+};
+function remoteFS(hostId) {
+  const base = "/home/" + (hostById(hostId) || { user: "user" }).user;
+  if (!remoteFS._cache) remoteFS._cache = {};
+  if (!remoteFS._cache[hostId]) {
+    const u = base;
+    remoteFS._cache[hostId] = {};
+    remoteFS._cache[hostId][u] = [
+      { name: "app", dir: true, size: 0, mtime: "2026-08-01 03:12" },
+      { name: "logs", dir: true, size: 0, mtime: "2026-08-05 06:00" },
+      { name: ".bashrc", dir: false, size: 3526, mtime: "2025-11-20 12:00" },
+      { name: "backup-2026-08-01.sql.gz", dir: false, size: 52428800, mtime: "2026-08-01 03:30" },
+    ];
+    remoteFS._cache[hostId][u + "/app"] = [
+      { name: "current", dir: true, size: 0, mtime: "2026-08-01 03:12" },
+      { name: "releases", dir: true, size: 0, mtime: "2026-07-20 03:12" },
+      { name: ".env.example", dir: false, size: 512, mtime: "2026-06-01 09:00" },
+    ];
+    remoteFS._cache[hostId][u + "/app/current"] = [
+      { name: "server.js", dir: false, size: 20480, mtime: "2026-08-01 03:12" },
+      { name: "package.json", dir: false, size: 1024, mtime: "2026-07-31 22:00" },
+    ];
+    remoteFS._cache[hostId][u + "/logs"] = [
+      { name: "app.log", dir: false, size: 10485760, mtime: "2026-08-05 06:00" },
+      { name: "access.log", dir: false, size: 8388608, mtime: "2026-08-05 05:58" },
+    ];
+  }
+  return { fs: remoteFS._cache[hostId], home: base };
+}
+function hostById(id) { return state.hosts.find(h => h.id === id); }
+function groupById(id) { return state.groups.find(g => g.id === id); }
+function groupPath(id) {
+  const names = [];
+  let g = groupById(id);
+  while (g) { names.unshift(g.name); g = groupById(g.parent); }
+  return names.join(" / ");
+}
+</script>
+<script>
+"use strict";
+/* =========================================================
+ * 第二部分：侧栏 / 标签栏 / 主区渲染
+ * ========================================================= */
+
+function statusDot(h) {
+  if (h.demo === "mismatch") return '<span class="dot mismatch" title="主机密钥不匹配"></span>';
+  if (h.demo === "unknown") return '<span class="dot unknown" title="未验证过的主机"></span>';
+  if (h.fp) return '<span class="dot ok" title="已记录主机密钥"></span>';
+  return '<span class="dot plain"></span>';
+}
+
+function renderSidebar() {
+  const q = state.search.trim().toLowerCase();
+  const tree = $("#tree");
+  let html = "";
+
+  function hostRow(h, indent) {
+    return `<div class="hrow ${state.selHostId === h.id ? "sel" : ""}" data-host="${h.id}" style="padding-left:${6 + indent * 14}px">
+      ${statusDot(h)}
+      <div class="hmain"><div class="hname">${esc(h.name)}</div><div class="haddr">${esc(h.user)}@${esc(h.addr)}:${h.port}</div></div>
+      <button class="morebtn" data-more-host="${h.id}" title="更多">⋯</button>
+    </div>`;
+  }
+  function groupRow(g, indent) {
+    return `<div class="grow" data-group="${g.id}" style="padding-left:${6 + indent * 14}px">
+      <span class="tri">${g.open ? "▾" : "▸"}</span>${IC.folder}<span class="gname">${esc(g.name)}</span>
+      <button class="morebtn" data-more-group="${g.id}" title="分组操作">⋯</button>
+    </div>`;
+  }
+  function renderGroup(gid, indent) {
+    const g = groupById(gid);
+    html += groupRow(g, indent);
+    if (!g.open) return;
+    state.groups.filter(x => x.parent === gid).forEach(sg => renderGroup(sg.id, indent + 1));
+    state.hosts.filter(h => h.groupId === gid && matchQ(h)).forEach(h => { html += hostRow(h, indent + 1); });
+  }
+  function matchQ(h) {
+    return !q || h.name.toLowerCase().includes(q) || h.addr.includes(q) || h.user.toLowerCase().includes(q);
+  }
+
+  if (q) {
+    // 搜索模式：平铺匹配主机
+    const hits = state.hosts.filter(matchQ);
+    html = hits.length ? hits.map(h => hostRow(h, 0)).join("") :
+      `<div style="padding:16px;color:var(--text-3);text-align:center;font-size:12px">无匹配主机</div>`;
+  } else {
+    state.groups.filter(g => !g.parent).forEach(g => renderGroup(g.id, 0));
+    state.hosts.filter(h => !h.groupId).forEach(h => { html += hostRow(h, 0); });
+  }
+  tree.innerHTML = html;
+
+  // 事件
+  $$(".hrow", tree).forEach(el => {
+    el.addEventListener("click", e => {
+      if (e.target.closest(".morebtn")) return;
+      state.selHostId = el.dataset.host;
+      state.view = "hosts";
+      renderAll();
+    });
+    el.addEventListener("dblclick", () => { openTerminal(el.dataset.host); });
+    el.addEventListener("contextmenu", e => { e.preventDefault(); hostMenu(el.dataset.host, e.clientX, e.clientY); });
+  });
+  $$(".grow", tree).forEach(el => {
+    el.addEventListener("click", e => {
+      if (e.target.closest(".morebtn")) return;
+      const g = groupById(el.dataset.group);
+      g.open = !g.open;
+      renderSidebar();
+    });
+    el.addEventListener("contextmenu", e => { e.preventDefault(); groupMenu(el.dataset.group, e.clientX, e.clientY); });
+  });
+  $$("[data-more-host]", tree).forEach(b => b.addEventListener("click", e => {
+    e.stopPropagation();
+    const r = b.getBoundingClientRect();
+    hostMenu(b.dataset.moreHost, r.left, r.bottom + 2);
+  }));
+  $$("[data-more-group]", tree).forEach(b => b.addEventListener("click", e => {
+    e.stopPropagation();
+    const r = b.getBoundingClientRect();
+    groupMenu(b.dataset.moreGroup, r.left, r.bottom + 2);
+  }));
+
+  // 状态栏
+  $("#hostcount").textContent = state.hosts.length + " 台主机";
+  const sync = $("#sync");
+  sync.innerHTML = state.icloud
+    ? `<span class="dot ok" style="display:inline-block"></span>${IC.cloud} iCloud 已同步`
+    : `<span class="dot plain" style="display:inline-block"></span>${IC.cloud} 同步已暂停`;
+  // 侧栏底部按钮高亮
+  $("#btn-snippets").classList.toggle("active", state.view === "snippets");
+  $("#btn-settings").classList.toggle("active", state.view === "settings");
+}
+
+/* ---------- 标签栏 ---------- */
+function renderTabs() {
+  const strip = $("#tabstrip");
+  strip.innerHTML = state.tabs.map(t => `
+    <div class="tab ${state.activeTab === t.id ? "active" : ""}" data-tab="${t.id}">
+      <span class="ticon">${t.type === "terminal" ? IC.monitor : IC.folder}</span>
+      <span class="tname">${esc(t.title)}</span>
+      <span class="tclose" data-close="${t.id}">×</span>
+    </div>`).join("");
+  $$(".tab", strip).forEach(el => el.addEventListener("click", e => {
+    if (e.target.closest(".tclose")) return;
+    state.activeTab = el.dataset.tab;
+    state.view = "hosts";
+    renderAll();
+  }));
+  $$("[data-close]", strip).forEach(el => el.addEventListener("click", e => {
+    e.stopPropagation();
+    closeTab(el.dataset.close);
+  }));
+  const act = $(".tab.active", strip);
+  if (act) act.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function openTab(type, hostId, pw) {
+  const h = hostById(hostId);
+  // 决策：总是新建标签，不去重；同一主机的多个标签各持独立会话
+  const id = uid();
+  state.tabs.push({ id, type, hostId, title: h.name, pw: pw || null }); // pw 仅本标签内存持有，关闭即销毁
+  retitleTabs();
+  state.activeTab = id;
+  state.view = "hosts";
+  if (type === "terminal") initTermSession(id, h);
+  else initSftpSession(id, h);
+  renderAll();
+}
+/* 同一主机的标签标题按稳定顺序加序号消歧（「web-prod」「web-prod (2)」），关闭后重算 */
+function retitleTabs() {
+  const seen = {};
+  state.tabs.forEach(t => {
+    const h = hostById(t.hostId);
+    const base = h ? h.name : "未知主机";
+    seen[t.hostId] = (seen[t.hostId] || 0) + 1;
+    t.title = seen[t.hostId] === 1 ? base : base + " (" + seen[t.hostId] + ")";
+  });
+}
+function closeTab(id) {
+  const i = state.tabs.findIndex(t => t.id === id);
+  if (i < 0) return;
+  const sess = state.sessions[id];
+  if (sess && sess.timers) sess.timers.forEach(clearTimeout);
+  delete state.sessions[id];
+  state.tabs.splice(i, 1); // 标签销毁，随之丢弃该标签内存中的密码
+  retitleTabs();
+  if (state.activeTab === id) {
+    state.activeTab = state.tabs.length ? state.tabs[Math.max(0, i - 1)].id : null;
+  }
+  renderAll();
+}
+/* 连接前检查（终端/SFTP 共用）：未知主机 → TOFU（同主机仅确认一次）；密钥变更 → 告警；未存密码 → 逐标签输入 */
+function preConnect(h, type) {
+  if (!h.fp && h.demo === "unknown") { showTofuModal(h, () => openTab(type, h.id)); return; }
+  if (h.demo === "mismatch") { showMismatchModal(h); return; }
+  if (h.demo === "manual") { showPasswordModal(h, pw => openTab(type, h.id, pw)); return; } // 每个标签各自询问，不共享
+  openTab(type, h.id);
+}
+function openTerminal(hostId) { preConnect(hostById(hostId), "terminal"); }
+function openSftp(hostId) { preConnect(hostById(hostId), "sftp"); }
+
+/* ---------- 主区 ---------- */
+function renderMain() {
+  const c = $("#content");
+  if (state.view === "snippets") { renderSnippets(c); return; }
+  if (state.view === "settings") { renderSettings(c); return; }
+  const tab = state.tabs.find(t => t.id === state.activeTab);
+  if (!tab) {
+    if (state.selHostId && hostById(state.selHostId)) renderHostDetail(c, hostById(state.selHostId));
+    else renderEmpty(c);
+    return;
+  }
+  if (tab.type === "terminal") renderTerminal(c, tab);
+  else renderSftp(c, tab);
+}
+
+function renderEmpty(c) {
+  c.innerHTML = `<div class="page"><div class="centerfill">
+    <div class="emptyicon">${IC.server}</div>
+    <div style="font-size:15px;font-weight:600">未选择主机</div>
+    <div class="note-text">从左侧选择一台主机，或点击「＋ 添加主机」新建。</div>
+    <div class="btnrow"><button class="btn primary" id="empty-add">＋ 添加主机</button></div>
+  </div></div>`;
+  $("#empty-add").addEventListener("click", () => showHostForm(null));
+}
+
+function renderHostDetail(c, h) {
+  const authLabel = h.auth === "key" ? `${IC.key} 密钥 ${esc(h.keyPath || "")}` : `${IC.lock} 密码${h.passSaved ? "（已存钥匙串）" : "（未保存）"}`;
+  c.innerHTML = `<div class="page"><div class="centerfill"><div class="detail-card">
+    ${IC.server}
+    <h2>${esc(h.name)}</h2>
+    <div class="addr">${esc(h.user)}@${esc(h.addr)}:${h.port}</div>
+    ${h.note ? `<div class="note-text">${esc(h.note)}</div>` : ""}
+    <div class="chips">
+      <span class="chip">分组：${h.groupId ? esc(groupPath(h.groupId)) : "根级"}</span>
+      <span class="chip">${authLabel}</span>
+      ${h.demo === "mismatch" ? '<span class="chip warn">⚠ 主机密钥不匹配</span>' : ""}
+      ${h.fp ? '<span class="chip ok">✓ 主机密钥已记录</span>' : '<span class="chip">主机密钥未验证</span>'}
+    </div>
+    ${h.fp ? `<div class="fingerprint"><span class="alg">${esc(h.fpAlg)}</span><br>${esc(h.fp)}</div>` : ""}
+    <div class="btnrow">
+      <button class="btn primary" id="d-term">${IC.monitor} 打开终端</button>
+      <button class="btn" id="d-sftp">${IC.folder} 浏览文件 (SFTP)</button>
+    </div>
+  </div></div></div>`;
+  $("#d-term").addEventListener("click", () => openTerminal(h.id));
+  $("#d-sftp").addEventListener("click", () => openSftp(h.id));
+}
+
+/* ---------- 终端 ---------- */
+function initTermSession(tabId, h) {
+  const sess = {
+    kind: "term", phase: "connecting", timers: [],
+    lines: [], history: [], histIdx: -1, input: "",
+    cwd: "/home/" + h.user,
+  };
+  state.sessions[tabId] = sess;
+  sess.lines.push({ html: `<span class="dim">正在连接 ${esc(h.addr)}:${h.port} …</span> <span class="spinner"></span>` });
+  const t = setTimeout(() => {
+    if (h.demo === "offline") {
+      sess.phase = "failed";
+    } else {
+      sess.phase = "shell";
+      sess.lines = [
+        { html: `<span class="grn">✓</span> <span class="dim">已建立连接（${esc(h.fpAlg)}，密钥已验证）</span>` },
+        { html: `<span class="dim">Last login: Wed Aug  5 07:58:12 2026 from 10.0.0.2</span>` },
+        { html: `Welcome to <span class="ylw">${esc(h.name)}</span> — Ubuntu 24.04.2 LTS` },
+      ];
+    }
+    if (state.activeTab === tabId) renderMain();
+  }, 800);
+  sess.timers.push(t);
+}
+function termPrompt(tabId, sess, h) {
+  return `${h.user}@${h.name}:${sess.cwd.replace("/home/" + h.user, "~")}$`;
+}
+function renderTerminal(c, tab) {
+  const h = hostById(tab.hostId);
+  const sess = state.sessions[tab.id];
+  let body = "";
+  if (sess.phase === "failed") {
+    body = `<div class="errbox">
+      ${IC.alertRed}
+      <h3>连接超时</h3>
+      <div class="detail">dial tcp ${esc(h.addr)}:${h.port}: i/o timeout<br>无法连接到远程主机，请检查网络或主机是否在线。</div>
+      <div class="btnrow">
+        <button class="btn" id="t-retry">重试</button>
+        <button class="btn" id="t-close">关闭标签</button>
+      </div>
+    </div>`;
+  } else {
+    body = sess.lines.map(l => `<div class="line">${l.html}</div>`).join("");
+    if (sess.phase === "shell") {
+      body += `<div class="line term-input-row"><span class="prompt"><span class="grn">${esc(termPrompt(tab.id, sess, h))}</span>&nbsp;</span><input id="term-input" autocomplete="off" spellcheck="false"><span class="cursor" id="term-cursor"></span></div>`;
+    }
+  }
+  c.innerHTML = `<div class="page"><div class="term">
+    <div class="term-head">${esc(h.name)} — ${esc(h.user)}@${esc(h.addr)}:${h.port} · ${sess.phase === "connecting" ? "连接中…" : sess.phase === "failed" ? "连接失败" : "已连接"}</div>
+    <div class="term-body" id="term-body">${body}</div>
+  </div></div>`;
+
+  const bodyEl = $("#term-body");
+  bodyEl.scrollTop = bodyEl.scrollHeight;
+  if (sess.phase === "failed") {
+    $("#t-retry").addEventListener("click", () => {
+      initTermSession(tab.id, h); // 重试：再模拟一次连接（offline-srv 仍失败）
+      renderMain();
+    });
+    $("#t-close").addEventListener("click", () => closeTab(tab.id));
+    return;
+  }
+  const inp = $("#term-input");
+  if (!inp) return;
+  bodyEl.addEventListener("click", () => inp.focus());
+  inp.focus();
+  inp.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      const cmd = inp.value.trim();
+      runTermCommand(tab.id, cmd);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (sess.history.length && sess.histIdx < sess.history.length - 1) {
+        sess.histIdx++;
+        inp.value = sess.history[sess.history.length - 1 - sess.histIdx];
+      }
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (sess.histIdx > 0) { sess.histIdx--; inp.value = sess.history[sess.history.length - 1 - sess.histIdx]; }
+      else { sess.histIdx = -1; inp.value = ""; }
+    }
+  });
+}
+function runTermCommand(tabId, cmd) {
+  const tab = state.tabs.find(t => t.id === tabId);
+  const h = hostById(tab.hostId);
+  const sess = state.sessions[tabId];
+  const prompt = `<span class="grn">${esc(termPrompt(tabId, sess, h))}</span>`;
+  sess.lines.push({ html: `${prompt} ${esc(cmd)}` });
+  if (cmd) { sess.history.push(cmd); sess.histIdx = -1; }
+  const out = (html) => sess.lines.push({ html });
+
+  if (cmd === "") { /* 空命令 */ }
+  else if (cmd === "exit") { closeTab(tabId); return; }
+  else if (cmd === "clear") { sess.lines = []; renderMain(); return; }
+  else if (cmd === "help") {
+    out(`可用命令：<span class="ylw">help</span>、<span class="ylw">ls</span>、<span class="ylw">pwd</span>、<span class="ylw">whoami</span>、<span class="ylw">uname -a</span>、<span class="ylw">date</span>、<span class="ylw">echo</span>、<span class="ylw">clear</span>、<span class="ylw">exit</span>`);
+  }
+  else if (cmd === "ls" || cmd === "ls -la" || cmd === "ll") {
+    out(`<span style="color:#5ac8fa">app</span>  <span style="color:#5ac8fa">logs</span>  backup-2026-08-01.sql.gz  .bashrc`);
+  }
+  else if (cmd === "pwd") { out(esc(sess.cwd)); }
+  else if (cmd === "whoami") { out(esc(h.user)); }
+  else if (cmd === "uname -a") { out(`Linux ${esc(h.name)} 6.8.0-71-generic #71-Ubuntu SMP x86_64 GNU/Linux`); }
+  else if (cmd === "date") { out(new Date().toString()); }
+  else if (cmd.startsWith("echo ")) { out(esc(cmd.slice(5).replace(/^["']|["']$/g, ""))); }
+  else {
+    out(`<span class="red">zsh: command not found: ${esc(cmd.split(/\s+/)[0])}</span> <span class="dim">（输入 help 查看可用命令）</span>`);
+  }
+  renderMain();
+}
+</script>
+<script>
+"use strict";
+/* =========================================================
+ * 第三部分：SFTP 双栏 + 传输任务
+ * ========================================================= */
+
+function initSftpSession(tabId, h) {
+  const r = remoteFS(h.id);
+  state.sessions[tabId] = {
+    kind: "sftp",
+    localPath: "/Users/luowenqiang",
+    remoteHome: r.home,
+    remotePath: r.home,
+    selLocal: null, selRemote: null,
+  };
+}
+function sftpList(kind, sess, tab) {
+  const fs = kind === "local" ? LOCAL_FS : remoteFS(tab.hostId).fs;
+  const path = kind === "local" ? sess.localPath : sess.remotePath;
+  return fs[path] || [];
+}
+function sftpGoUp(kind, tabId) {
+  const sess = state.sessions[tabId];
+  const key = kind === "local" ? "localPath" : "remotePath";
+  const cur = sess[key];
+  const root = kind === "local" ? "/Users/luowenqiang" : sess.remoteHome;
+  if (cur === root) return;
+  sess[key] = cur.replace(/\/[^/]+$/, "") || "/";
+  if (kind === "local") sess.selLocal = null; else sess.selRemote = null;
+  renderMain();
+}
+function sftpEnter(kind, tabId, name) {
+  const sess = state.sessions[tabId];
+  const key = kind === "local" ? "localPath" : "remotePath";
+  sess[key] = sess[key] + "/" + name;
+  if (kind === "local") sess.selLocal = null; else sess.selRemote = null;
+  renderMain();
+}
+function crumbs(kind, sess) {
+  const path = kind === "local" ? sess.localPath : sess.remotePath;
+  const root = kind === "local" ? "/Users/luowenqiang" : sess.remoteHome;
+  let rel = path === root ? [] : path.slice(root.length + 1).split("/");
+  let html = `<b data-crumb="${kind}|${esc(root)}">${kind === "local" ? "本地" : "远程"}</b>`;
+  let acc = root;
+  rel.forEach(seg => {
+    acc += "/" + seg;
+    html += `<span>›</span><b data-crumb="${kind}|${esc(acc)}">${esc(seg)}</b>`;
+  });
+  return html;
+}
+function renderSftp(c, tab) {
+  const h = hostById(tab.hostId);
+  const sess = state.sessions[tab.id];
+  const xopen = !!state.xferOpen[tab.id];
+  const activeCount = state.transfers.filter(t => t.status === "running" || t.status === "queued").length;
+
+  function pane(kind) {
+    const isLocal = kind === "local";
+    const path = isLocal ? sess.localPath : sess.remotePath;
+    const root = isLocal ? "/Users/luowenqiang" : sess.remoteHome;
+    const sel = isLocal ? sess.selLocal : sess.selRemote;
+    const items = sftpList(kind, sess, tab);
+    const rows = items.map(f => `
+      <div class="frow ${sel === f.name ? "sel" : ""}" data-side="${kind}" data-name="${esc(f.name)}" data-dir="${f.dir ? 1 : 0}">
+        <span>${f.dir ? IC.folderFill : IC.file}</span>
+        <span class="fname">${esc(f.name)}</span>
+        <span class="fsize">${f.dir ? "—" : fmtBytes(f.size)}</span>
+        <span class="ftime">${esc(f.mtime)}</span>
+      </div>`).join("");
+    return `<div class="pane">
+      <div class="pane-head">
+        <span class="ptitle">${isLocal ? "本地" : "远程 — " + esc(h.name)}</span>
+        <button class="iconbtn" data-up="${kind}" title="返回上级" ${path === root ? "disabled" : ""}>${IC.back}</button>
+        <div class="crumbs">${crumbs(kind, sess)}</div>
+      </div>
+      <div class="flist" data-list="${kind}">${rows || '<div style="padding:20px;color:var(--text-3);text-align:center;font-size:12px">空目录</div>'}</div>
+      <div class="pane-foot" data-foot="${kind}"></div>
+    </div>`;
+  }
+
+  c.innerHTML = `<div class="page">
+    <div class="sftp-toolbar">
+      <span style="font-weight:600">${IC.folder} SFTP · ${esc(h.user)}@${esc(h.addr)}</span>
+      <span class="spacer"></span>
+      <button class="btn" id="xfer-toggle" style="height:26px;padding:0 12px;font-size:12px">传输 ${activeCount ? `<span class="countbadge">${activeCount}</span>` : ""}</button>
+    </div>
+    <div class="sftp">
+      <div class="sftp-panes">${pane("local")}${pane("remote")}</div>
+      ${xopen ? renderXferPanel() : ""}
+    </div>
+  </div>`;
+
+  // 事件绑定
+  $("#xfer-toggle").addEventListener("click", () => {
+    state.xferOpen[tab.id] = !xopen;
+    renderMain();
+  });
+  $$("[data-up]").forEach(b => b.addEventListener("click", () => sftpGoUp(b.dataset.up, tab.id)));
+  $$("[data-crumb]").forEach(b => b.addEventListener("click", () => {
+    const [kind, path] = b.dataset.crumb.split("|");
+    const s = state.sessions[tab.id];
+    if (kind === "local") { s.localPath = path; s.selLocal = null; } else { s.remotePath = path; s.selRemote = null; }
+    renderMain();
+  }));
+  $$(".frow").forEach(row => {
+    row.addEventListener("click", () => {
+      const s = state.sessions[tab.id];
+      if (row.dataset.side === "local") { s.selLocal = row.dataset.name; }
+      else { s.selRemote = row.dataset.name; }
+      renderMain();
+    });
+    row.addEventListener("dblclick", () => {
+      if (row.dataset.dir === "1") sftpEnter(row.dataset.side, tab.id, row.dataset.name);
+    });
+  });
+  renderSftpFooters(tab.id);
+  bindXferOps(tab.id);
+}
+function renderSftpFooters(tabId) {
+  const sess = state.sessions[tabId];
+  const lf = $('[data-foot="local"]');
+  const rf = $('[data-foot="remote"]');
+  if (!lf || !rf) return;
+  const lSel = sess.selLocal, rSel = sess.selRemote;
+  lf.innerHTML = lSel
+    ? `<span>已选：<b>${esc(lSel)}</b></span><span class="spacer" style="flex:1"></span><button class="mini" id="do-upload">上传 →</button>`
+    : `<span>双击文件夹进入 · 选中文件后可上传</span>`;
+  rf.innerHTML = rSel
+    ? `<span>已选：<b>${esc(rSel)}</b></span><span class="spacer" style="flex:1"></span><button class="mini" id="do-download">← 下载</button>`
+    : `<span>双击文件夹进入 · 选中文件后可下载</span>`;
+  const up = $("#do-upload"), dn = $("#do-download");
+  if (up) up.addEventListener("click", () => addTransfer(tabId, "up"));
+  if (dn) dn.addEventListener("click", () => addTransfer(tabId, "down"));
+}
+
+/* ---------- 传输任务（并发上限 3，模拟进度） ---------- */
+function addTransfer(tabId, dir) {
+  const tab = state.tabs.find(t => t.id === tabId);
+  const sess = state.sessions[tabId];
+  const h = hostById(tab.hostId);
+  let name, size, src, dst;
+  if (dir === "up") {
+    name = sess.selLocal; if (!name) return;
+    const f = sftpList("local", sess, tab).find(x => x.name === name);
+    size = f.dir ? 3145728 : f.size;
+    src = sess.localPath + "/" + name;
+    dst = sess.remotePath + "/" + name;
+  } else {
+    name = sess.selRemote; if (!name) return;
+    const f = sftpList("remote", sess, tab).find(x => x.name === name);
+    size = f.dir ? 6291456 : f.size;
+    src = sess.remotePath + "/" + name;
+    dst = sess.localPath + "/" + name;
+  }
+  const t = {
+    id: uid(), tabId, dir, name, size, src, dst,
+    done: 0, status: "queued", speed: 0,
+    failAt: (state.transfers.length >= 2 && state.nextId++ % 3 === 0) ? Math.floor(size * (0.3 + Math.random() * 0.4)) : -1, // 前两个任务必定成功，此后约 1/3 任务演示失败
+  };
+  state.transfers.push(t);
+  state.xferOpen[tabId] = true;
+  toast((dir === "up" ? "已加入上传队列：" : "已加入下载队列：") + name);
+  pumpQueue();
+  renderMain();
+}
+function pumpQueue() {
+  const running = state.transfers.filter(t => t.status === "running").length;
+  let slots = 3 - running;
+  if (slots <= 0) return;
+  for (const t of state.transfers) {
+    if (slots <= 0) break;
+    if (t.status === "queued") {
+      t.status = "running";
+      t.speed = Math.max(64 * 1024, t.size / (40 + Math.random() * 80)); // 约 4~12s 完成
+      slots--;
+    }
+  }
+}
+setInterval(() => {
+  let dirty = false;
+  for (const t of state.transfers) {
+    if (t.status !== "running") continue;
+    t.done = Math.min(t.size, t.done + t.speed / 10); // 100ms 步进
+    if (t.failAt > 0 && t.done >= t.failAt) { t.status = "failed"; dirty = true; }
+    else if (t.done >= t.size) { t.done = t.size; t.status = "done"; dirty = true; }
+  }
+  const hadSlots = state.transfers.some(t => t.status === "queued") &&
+    state.transfers.filter(t => t.status === "running").length < 3;
+  if (hadSlots) { pumpQueue(); dirty = true; }
+  if (dirty || state.transfers.some(t => t.status === "running")) {
+    const tab = state.tabs.find(t => t.id === state.activeTab);
+    if (tab && tab.type === "sftp" && state.view === "hosts") updateXferDom();
+  }
+}, 100);
+
+function stLabel(s) {
+  return { queued: "排队", running: "传输中", done: "已完成", failed: "失败", cancelled: "已取消" }[s];
+}
+function renderXferPanel() {
+  const items = state.transfers.slice().reverse().map(t => {
+    const pct = t.size ? Math.floor(t.done / t.size * 100) : 0;
+    const barCls = t.status === "done" ? "done" : t.status === "failed" ? "fail" : "";
+    const ops = (t.status === "running" || t.status === "queued")
+      ? `<button class="mini" data-xcancel="${t.id}">取消</button>`
+      : t.status === "failed" ? `<button class="mini" data-xretry="${t.id}">重试</button>` : "";
+    return `<div class="xfer-item" data-xid="${t.id}">
+      <div class="xfer-top">${t.dir === "up" ? IC.up : IC.down}<span class="fname">${esc(t.name)}</span><span class="st ${t.status}">${stLabel(t.status)}</span></div>
+      <div class="xfer-route">${esc(t.src)} → ${esc(t.dst)}</div>
+      <div class="pbar ${barCls}"><div style="width:${pct}%"></div></div>
+      <div class="xfer-meta">
+        <span class="mono">${pct}%</span>
+        <span class="mono">${fmtBytes(t.done)} / ${fmtBytes(t.size)}</span>
+        <span class="xfer-ops">${ops}</span>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="xfer">
+    <div class="xfer-head">传输任务<span style="flex:1"></span><button class="mini" id="xfer-clear">清除已完成</button></div>
+    <div class="xfer-list">${items || '<div class="xfer-empty">暂无传输任务<br>选中文件后点击「上传 →」或「← 下载」</div>'}</div>
+  </div>`;
+}
+function updateXferDom() {
+  // 局部刷新传输面板与工具栏徽标
+  const panel = $(".xfer");
+  const tab = state.tabs.find(t => t.id === state.activeTab);
+  if (tab && state.xferOpen[tab.id] && panel) {
+    const holder = panel.parentElement;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = renderXferPanel();
+    holder.replaceChild(tmp.firstElementChild, panel);
+    bindXferOps(tab.id);
+  }
+  const activeCount = state.transfers.filter(t => t.status === "running" || t.status === "queued").length;
+  const tg = $("#xfer-toggle");
+  if (tg) tg.innerHTML = `传输 ${activeCount ? `<span class="countbadge">${activeCount}</span>` : ""}`;
+}
+function bindXferOps(tabId) {
+  $$("[data-xcancel]").forEach(b => b.addEventListener("click", () => {
+    const t = state.transfers.find(x => x.id === b.dataset.xcancel);
+    if (t) { t.status = "cancelled"; pumpQueue(); updateXferDom(); }
+  }));
+  $$("[data-xretry]").forEach(b => b.addEventListener("click", () => {
+    const t = state.transfers.find(x => x.id === b.dataset.xretry);
+    if (t) { t.status = "queued"; t.done = 0; t.failAt = -1; pumpQueue(); toast("已重新加入队列：" + t.name); updateXferDom(); }
+  }));
+  const clr = $("#xfer-clear");
+  if (clr) clr.addEventListener("click", () => {
+    state.transfers = state.transfers.filter(t => t.status === "running" || t.status === "queued");
+    renderMain();
+  });
+}
+</script>
+<script>
+"use strict";
+/* =========================================================
+ * 第四部分：上下文菜单 + Modal 体系
+ * ========================================================= */
+
+function hideCtx() { $("#ctxmenu").style.display = "none"; }
+document.addEventListener("click", e => { if (!e.target.closest("#ctxmenu")) hideCtx(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { hideCtx(); hideModal(); } });
+
+function showCtx(items, x, y) {
+  const m = $("#ctxmenu");
+  m.innerHTML = items.map((it, i) => {
+    if (it.sep) return '<div class="sep"></div>';
+    const sub = it.sub ? `<span class="arrow">▸</span><div class="sub">${it.sub.map((s, j) =>
+      `<div class="mi" data-sub="${i}:${j}">${esc(s.label)}</div>`).join("")}</div>` : "";
+    return `<div class="mi ${it.danger ? "danger" : ""}" data-mi="${i}">${esc(it.label)}${sub}</div>`;
+  }).join("");
+  m.style.display = "block";
+  const mw = m.offsetWidth, mh = m.offsetHeight;
+  m.style.left = Math.min(x, window.innerWidth - mw - 8) + "px";
+  m.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
+  $$(".mi[data-mi]", m).forEach(el => el.addEventListener("click", e => {
+    if (e.target.closest(".sub")) return;
+    const it = items[+el.dataset.mi];
+    if (it.sub) return; // 有子菜单时不触发
+    hideCtx();
+    if (it.action) it.action();
+  }));
+  $$("[data-sub]", m).forEach(el => el.addEventListener("click", e => {
+    e.stopPropagation();
+    const [i, j] = el.dataset.sub.split(":").map(Number);
+    hideCtx();
+    items[i].sub[j].action();
+  }));
+}
+
+function hostMenu(hostId, x, y) {
+  const h = hostById(hostId);
+  const groupItems = [{ label: "根级（无分组）", action: () => moveHost(hostId, null) }]
+    .concat(state.groups.map(g => ({ label: groupPath(g.id), action: () => moveHost(hostId, g.id) })));
+  showCtx([
+    { label: "打开终端", action: () => openTerminal(hostId) },
+    { label: "浏览文件 (SFTP)", action: () => openSftp(hostId) },
+    { sep: true },
+    { label: "编辑…", action: () => showHostForm(h) },
+    { label: "移至分组", sub: groupItems },
+    { sep: true },
+    { label: "删除主机", danger: true, action: () => confirmSheet("删除主机", `确定删除「${esc(h.name)}」吗？此操作不可撤销。`, "删除", () => {
+      state.hosts = state.hosts.filter(x => x.id !== hostId);
+      state.tabs.filter(t => t.hostId === hostId).map(t => t.id).forEach(closeTab);
+      if (state.selHostId === hostId) state.selHostId = null;
+      renderAll(); toast("主机已删除");
+    }) },
+  ], x, y);
+}
+function groupMenu(groupId, x, y) {
+  const g = groupById(groupId);
+  showCtx([
+    { label: "新建子分组", action: () => promptTextSheet("新建子分组", "在「" + g.name + "」下创建子分组：", "分组名称", name => {
+      state.groups.push({ id: uid(), name, parent: groupId, open: true });
+      groupById(groupId).open = true; renderAll(); toast("分组已创建");
+    }) },
+    { label: "重命名", action: () => promptTextSheet("重命名分组", "", "分组名称", name => {
+      g.name = name; renderAll(); toast("分组已重命名");
+    }, g.name) },
+    { sep: true },
+    { label: "删除分组", danger: true, action: () => confirmSheet("删除分组",
+      `确定删除分组「${esc(g.name)}」吗？组内主机将移回根级，子分组将一并删除。`, "删除", () => {
+      const ids = [groupId];
+      let changed = true;
+      while (changed) { changed = false; state.groups.forEach(x => { if (x.parent && ids.includes(x.parent) && !ids.includes(x.id)) { ids.push(x.id); changed = true; } }); }
+      state.hosts.forEach(h => { if (h.groupId && ids.includes(h.groupId)) h.groupId = null; });
+      state.groups = state.groups.filter(x => !ids.includes(x.id));
+      renderAll(); toast("分组已删除，主机已移回根级");
+    }) },
+  ], x, y);
+}
+function moveHost(hostId, gid) {
+  hostById(hostId).groupId = gid;
+  renderAll();
+  toast(gid ? "已移至「" + groupPath(gid) + "」" : "已移回根级");
+}
+
+/* ---------- Modal 基础设施（支持叠层：文件选择器可压在主机表单之上） ---------- */
+const _modalStack = [];
+function showModal(html, cls, keepCurrent) {
+  const holder = $("#sheet-holder");
+  if (keepCurrent) {
+    const cur = holder.lastElementChild;
+    if (cur) { _modalStack.push(cur); cur.style.display = "none"; } // 暂存下层 sheet（保留表单值与事件）
+  } else {
+    holder.innerHTML = "";
+    _modalStack.length = 0;
+  }
+  $("#overlay").classList.add("show");
+  const div = document.createElement("div");
+  div.className = "sheet " + (cls || "");
+  div.innerHTML = html;
+  holder.appendChild(div);
+}
+function hideModal() {
+  const holder = $("#sheet-holder");
+  const cur = holder.lastElementChild;
+  if (cur) holder.removeChild(cur);
+  const prev = _modalStack.pop();
+  if (prev) { prev.style.display = ""; holder.appendChild(prev); }
+  if (!holder.children.length) $("#overlay").classList.remove("show");
+}
+$("#overlay").addEventListener("mousedown", e => { if (e.target.id === "overlay") hideModal(); });
+
+function confirmSheet(title, desc, okLabel, onOk) {
+  showModal(`
+    <div class="alerticon">${IC.warn}</div>
+    <h3 style="text-align:center">${esc(title)}</h3>
+    <div class="desc center">${desc}</div>
+    <div class="btnrow" style="justify-content:center">
+      <button class="btn" id="m-cancel">取消</button>
+      <button class="btn danger" id="m-ok">${esc(okLabel)}</button>
+    </div>`, "confirm-sheet");
+  $("#m-cancel").addEventListener("click", hideModal);
+  $("#m-ok").addEventListener("click", () => { hideModal(); onOk(); });
+}
+function promptTextSheet(title, desc, label, onOk, initial) {
+  showModal(`
+    <h3>${esc(title)}</h3>
+    ${desc ? `<div class="desc">${esc(desc)}</div>` : ""}
+    <div class="formcard"><div class="frow2"><label>${esc(label)}</label><input type="text" id="m-text" value="${esc(initial || "")}"></div></div>
+    <div class="btnrow"><button class="btn" id="m-cancel">取消</button><button class="btn primary" id="m-ok" disabled>确定</button></div>`);
+  const inp = $("#m-text"), ok = $("#m-ok");
+  const check = () => { ok.disabled = !inp.value.trim(); };
+  inp.addEventListener("input", check); check(); inp.focus();
+  ok.addEventListener("click", () => { const v = inp.value.trim(); hideModal(); onOk(v); });
+  $("#m-cancel").addEventListener("click", hideModal);
+  inp.addEventListener("keydown", e => { if (e.key === "Enter" && !ok.disabled) ok.click(); });
+}
+
+/* ---------- 主机编辑表单（添加 / 编辑共用） ---------- */
+function showHostForm(h) {
+  const isEdit = !!h;
+  h = h || { name: "", addr: "", port: 22, user: "", note: "", groupId: null, auth: "password", passSaved: true, keyPath: "", keyPassSaved: false };
+  const groupOpts = [`<option value="">根级（无分组）</option>`]
+    .concat(state.groups.map(g => `<option value="${g.id}" ${h.groupId === g.id ? "selected" : ""}>${esc(groupPath(g.id))}</option>`)).join("");
+  showModal(`
+    <h3>${isEdit ? "编辑主机" : "添加主机"}</h3>
+    <div class="desc">${isEdit ? "修改主机配置，保存后立即生效。" : "填写连接信息，主机将出现在侧栏对应分组下。"}</div>
+    <div class="formcard">
+      <div class="fsec">主机</div>
+      <div class="frow2"><label>名称</label><input type="text" id="f-name" value="${esc(h.name)}" placeholder="如 web-prod"></div>
+      <div class="frow2"><label>地址</label><input type="text" id="f-addr" value="${esc(h.addr)}" placeholder="IP 或域名"></div>
+      <div class="frow2"><label>端口</label><input type="number" id="f-port" value="${h.port}" min="1" max="65535"></div>
+      <div class="frow2"><label>用户名</label><input type="text" id="f-user" value="${esc(h.user)}"></div>
+      <div class="frow2"><label>备注</label><input type="text" id="f-note" value="${esc(h.note || "")}" placeholder="可选"></div>
+      <div class="frow2"><label>所属分组</label><select id="f-group">${groupOpts}</select></div>
+    </div>
+    <div class="formcard">
+      <div class="fsec">认证</div>
+      <div class="frow2"><label>方式</label>
+        <div class="seg" style="flex:1">
+          <button id="seg-pw" class="${h.auth === "password" ? "on" : ""}">密码</button>
+          <button id="seg-key" class="${h.auth === "key" ? "on" : ""}">密钥</button>
+        </div>
+      </div>
+      <div id="auth-pw" style="display:${h.auth === "password" ? "block" : "none"}">
+        <div class="frow2"><label>密码</label><input type="password" id="f-pass" placeholder="${isEdit && h.passSaved ? "已保存在钥匙串" : "输入密码"}"></div>
+        <div class="frow2"><label>保存密码</label><button class="switch ${h.passSaved ? "on" : ""}" id="f-pwsw"></button></div>
+        <div class="frow2" id="pw-hint" style="display:${h.passSaved ? "none" : "flex"}"><label></label><span style="font-size:11px;color:var(--text-2)">连接时将要求手动输入</span></div>
+      </div>
+      <div id="auth-key" style="display:${h.auth === "key" ? "block" : "none"}">
+        <div class="frow2"><label>私钥路径</label><input type="text" id="f-keypath" value="${esc(h.keyPath || "")}" placeholder="~/.ssh/id_ed25519"><button class="btn" id="f-pick" style="height:26px;padding:0 10px;font-size:12px;flex:0 0 auto">选择文件…</button></div>
+        <div class="frow2"><label>密钥口令</label><input type="password" id="f-keypass" placeholder="可选"></div>
+        <div class="frow2"><label>保存口令</label><button class="switch ${h.keyPassSaved ? "on" : ""}" id="f-kpsw"></button></div>
+      </div>
+    </div>
+    <div class="btnrow"><button class="btn" id="m-cancel">取消</button><button class="btn primary" id="m-save" disabled>保存</button></div>`);
+
+  const F = id => $("#" + id);
+  let auth = h.auth;
+  const check = () => {
+    F("m-save").disabled = !(F("f-name").value.trim() && F("f-addr").value.trim() && F("f-user").value.trim());
+  };
+  ["f-name", "f-addr", "f-user"].forEach(id => F(id).addEventListener("input", check));
+  check();
+  F("seg-pw").addEventListener("click", () => {
+    auth = "password";
+    F("seg-pw").classList.add("on"); F("seg-key").classList.remove("on");
+    F("auth-pw").style.display = "block"; F("auth-key").style.display = "none";
+  });
+  F("seg-key").addEventListener("click", () => {
+    auth = "key";
+    F("seg-key").classList.add("on"); F("seg-pw").classList.remove("on");
+    F("auth-key").style.display = "block"; F("auth-pw").style.display = "none";
+  });
+  F("f-pwsw").addEventListener("click", () => {
+    F("f-pwsw").classList.toggle("on");
+    F("pw-hint").style.display = F("f-pwsw").classList.contains("on") ? "none" : "flex";
+  });
+  F("f-kpsw").addEventListener("click", () => F("f-kpsw").classList.toggle("on"));
+  F("f-pick").addEventListener("click", () => showFilePicker(path => { F("f-keypath").value = path; }, true));
+  F("m-cancel").addEventListener("click", hideModal);
+  F("m-save").addEventListener("click", () => {
+    const data = {
+      name: F("f-name").value.trim(), addr: F("f-addr").value.trim(),
+      port: Math.max(1, Math.min(65535, parseInt(F("f-port").value, 10) || 22)),
+      user: F("f-user").value.trim(), note: F("f-note").value.trim(),
+      groupId: F("f-group").value || null, auth,
+      passSaved: auth === "password" ? F("f-pwsw").classList.contains("on") : false,
+      keyPath: auth === "key" ? F("f-keypath").value.trim() : "",
+      keyPassSaved: auth === "key" ? F("f-kpsw").classList.contains("on") : false,
+    };
+    if (isEdit) Object.assign(h, data);
+    else state.hosts.push(Object.assign({ id: uid(), fp: null, fpAlg: "ssh-ed25519", demo: "unknown" }, data));
+    hideModal(); renderAll(); toast("主机已保存");
+  });
+}
+function showFilePicker(onPick, keepCurrent) {
+  const files = ["id_ed25519", "id_ed25519.pub", "id_rsa", "id_rsa.pub", "id_ecdsa", "known_hosts", "config"];
+  showModal(`
+    <h3>选择私钥文件</h3>
+    <div class="desc">~/.ssh/（模拟文件选择器）</div>
+    <div class="formcard" style="padding:6px">
+      ${files.map(f => `<div class="filepick-item" data-f="${f}">${f.endsWith(".pub") || f === "config" || f === "known_hosts" ? IC.file : IC.key} ${f}</div>`).join("")}
+    </div>
+    <div class="btnrow"><button class="btn" id="m-cancel">取消</button></div>`, "", keepCurrent);
+  const sheet = $("#sheet-holder").lastElementChild;
+  $$(".filepick-item", sheet).forEach(el => el.addEventListener("dblclick", () => { hideModal(); onPick("~/.ssh/" + el.dataset.f); }));
+  $$(".filepick-item", sheet).forEach(el => el.addEventListener("click", () => {
+    $$(".filepick-item", sheet).forEach(x => x.classList.remove("sel"));
+    el.classList.add("sel");
+    setTimeout(() => { hideModal(); onPick("~/.ssh/" + el.dataset.f); }, 180);
+  }));
+  $("#m-cancel", sheet).addEventListener("click", hideModal);
+}
+
+/* ---------- TOFU 指纹确认（同一主机仅弹一次，其余连接等待该次结果） ---------- */
+const tofuWaiters = {}; // hostId -> [onTrust,...]；有等待者表示该主机确认框已在展示
+function showTofuModal(h, onTrust) {
+  if (tofuWaiters[h.id]) { tofuWaiters[h.id].push(onTrust); return; } // 并入等待队列，不再弹框
+  tofuWaiters[h.id] = [onTrust];
+  showModal(`
+    <div class="alerticon">${IC.warn}</div>
+    <h3 style="text-align:center">未知主机密钥</h3>
+    <div class="desc center">首次连接 <b>${esc(h.name)}</b>（${esc(h.addr)}:${h.port}）。<br>请核对服务器出示的主机密钥指纹，确认无误后再信任。信任后指纹将被记录，之后连接不再询问。</div>
+    <div class="fp-line">
+      <div class="k">${esc(h.fpAlg)} 指纹</div>
+      <div class="v">${esc(FP.newtoy)}</div>
+    </div>
+    <div class="btnrow" style="justify-content:center">
+      <button class="btn" id="m-cancel">取消</button>
+      <button class="btn primary" id="m-trust">信任并连接</button>
+    </div>`);
+  $("#m-cancel").addEventListener("click", () => { delete tofuWaiters[h.id]; hideModal(); }); // 取消：所有等待者一并放弃
+  $("#m-trust").addEventListener("click", () => {
+    h.fp = FP.newtoy; h.demo = null; // 写入 known_hosts
+    const waiters = tofuWaiters[h.id] || [];
+    delete tofuWaiters[h.id];
+    hideModal(); toast("已记录主机密钥指纹");
+    waiters.forEach(fn => fn()); // 等待中的连接按确认结果继续
+  });
+}
+/* ---------- 密钥变更告警 ---------- */
+function showMismatchModal(h) {
+  showModal(`
+    <div class="alerticon">${IC.alertRed}</div>
+    <h3>服务器密钥已变更！</h3>
+    <div class="desc center">「${esc(h.name)}」出示的主机密钥与本地记录<b>不一致</b>。<br>服务器可能被重装，也可能正在遭遇<b>中间人攻击</b>。为安全起见已中断连接。</div>
+    <div class="fp-compare">
+      <div class="fp-line"><div class="k">已记录指纹（known_hosts）</div><div class="v">${esc(FP.legacyOld)}</div></div>
+      <div class="fp-line bad"><div class="k">对方出示指纹</div><div class="v">${esc(FP.legacyNew)}</div></div>
+    </div>
+    <div class="btnrow" style="justify-content:center">
+      <button class="btn danger" id="m-disc">断开连接</button>
+    </div>`, "danger-sheet");
+  $("#m-disc").addEventListener("click", hideModal);
+}
+/* ---------- 手动输入密码（按标签页独立，不共享、不落盘） ---------- */
+function showPasswordModal(h, onOk) {
+  showModal(`
+    <div class="alerticon">${IC.lock.replace("currentColor", "#0A84FF")}</div>
+    <h3 style="text-align:center">需要密码</h3>
+    <div class="desc center">输入 <b>${esc(h.user)}@${esc(h.name)}</b> 的密码。<br>该主机未保存密码到钥匙串，密码仅用于本次标签页会话，关闭标签即销毁；同一主机的其他标签页需各自输入。</div>
+    <div class="formcard"><div class="frow2"><label>密码</label><input type="password" id="m-pw" placeholder="输入登录密码"></div></div>
+    <div class="btnrow"><button class="btn" id="m-cancel">取消</button><button class="btn primary" id="m-login" disabled>登录</button></div>`);
+  const inp = $("#m-pw"), ok = $("#m-login");
+  inp.addEventListener("input", () => { ok.disabled = !inp.value; });
+  inp.focus();
+  ok.addEventListener("click", () => {
+    const pw = inp.value;
+    hideModal(); onOk(pw); // 密码只随回调进入该标签页会话，不做任何缓存
+  });
+  $("#m-cancel").addEventListener("click", hideModal);
+  inp.addEventListener("keydown", e => { if (e.key === "Enter" && !ok.disabled) ok.click(); });
+}
+</script>
+<script>
+"use strict";
+/* =========================================================
+ * 第五部分：代码片段 / 设置 / 初始化
+ * ========================================================= */
+
+let snipSel = null;
+function renderSnippets(c) {
+  if (!snipSel || !state.snippets.find(s => s.id === snipSel)) snipSel = state.snippets[0] ? state.snippets[0].id : null;
+  const cur = state.snippets.find(s => s.id === snipSel);
+  c.innerHTML = `<div class="page">
+    <div class="subpage-head">
+      <h2>代码片段</h2><span class="badge-plan" style="margin:0">规划中 · 功能预览</span>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn" id="snip-add" style="height:28px">＋ 新建片段</button>
+    </div>
+    <div class="snip-layout">
+      <div class="snip-list">
+        ${state.snippets.map(s => `<div class="snip-item ${s.id === snipSel ? "sel" : ""}" data-snip="${s.id}">
+          <div class="stitle">${esc(s.title)}</div>
+          <div style="display:flex;gap:4px;margin-top:3px">${s.tags.map(t => `<span class="chip" style="font-size:10px;padding:1px 6px">${esc(t)}</span>`).join("")}</div>
+          <div class="sdesc">${esc(s.desc)}</div>
+        </div>`).join("") || '<div style="padding:20px;color:var(--text-3);text-align:center;font-size:12px">暂无片段</div>'}
+      </div>
+      <div class="snip-detail">
+        ${cur ? `
+          <h3 style="font-size:16px">${esc(cur.title)}</h3>
+          <div style="display:flex;gap:6px">${cur.tags.map(t => `<span class="chip">${esc(t)}</span>`).join("")}</div>
+          <div class="note-text" style="text-align:left;max-width:none">${esc(cur.desc)}</div>
+          <div class="codeblock">${esc(cur.code)}</div>
+          <div class="btnrow" style="margin-top:2px">
+            <button class="btn" id="snip-copy">复制</button>
+            <button class="btn" id="snip-edit">编辑</button>
+            <button class="btn danger" id="snip-del">删除</button>
+          </div>` : '<div class="centerfill"><div class="note-text">选择或新建一个片段</div></div>'}
+      </div>
+    </div>
+  </div>`;
+  $$(".snip-item").forEach(el => el.addEventListener("click", () => { snipSel = el.dataset.snip; renderMain(); }));
+  $("#snip-add").addEventListener("click", () => snipForm(null));
+  if (cur) {
+    $("#snip-copy").addEventListener("click", () => {
+      copyText(cur.code);
+      toast("已复制");
+    });
+    $("#snip-edit").addEventListener("click", () => snipForm(cur));
+    $("#snip-del").addEventListener("click", () => confirmSheet("删除片段", `确定删除片段「${esc(cur.title)}」吗？`, "删除", () => {
+      state.snippets = state.snippets.filter(s => s.id !== cur.id);
+      snipSel = null; renderMain(); toast("片段已删除");
+    }));
+  }
+}
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else fallbackCopy(text);
+}
+function fallbackCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text; document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); } catch (e) { /* 原型忽略 */ }
+  document.body.removeChild(ta);
+}
+function snipForm(s) {
+  const isEdit = !!s;
+  s = s || { title: "", tags: [], desc: "", code: "" };
+  showModal(`
+    <h3>${isEdit ? "编辑片段" : "新建片段"}</h3>
+    <div class="formcard">
+      <div class="frow2"><label>标题</label><input type="text" id="s-title" value="${esc(s.title)}"></div>
+      <div class="frow2"><label>标签</label><input type="text" id="s-tags" value="${esc(s.tags.join(", "))}" placeholder="逗号分隔，如：运维, 日志"></div>
+      <div class="frow2"><label>说明</label><input type="text" id="s-desc" value="${esc(s.desc)}"></div>
+      <div class="frow2" style="align-items:flex-start"><label style="padding-top:6px">代码</label><textarea id="s-code" rows="6" style="font-family:var(--mono)">${esc(s.code)}</textarea></div>
+    </div>
+    <div class="btnrow"><button class="btn" id="m-cancel">取消</button><button class="btn primary" id="m-save" disabled>保存</button></div>`);
+  const check = () => { $("#m-save").disabled = !($("#s-title").value.trim() && $("#s-code").value.trim()); };
+  $("#s-title").addEventListener("input", check);
+  $("#s-code").addEventListener("input", check);
+  check();
+  $("#m-cancel").addEventListener("click", hideModal);
+  $("#m-save").addEventListener("click", () => {
+    const data = {
+      title: $("#s-title").value.trim(),
+      tags: $("#s-tags").value.split(/[,，]/).map(x => x.trim()).filter(Boolean),
+      desc: $("#s-desc").value.trim(),
+      code: $("#s-code").value,
+    };
+    if (isEdit) Object.assign(s, data);
+    else { const id = uid(); state.snippets.push(Object.assign({ id }, data)); snipSel = id; }
+    hideModal(); renderMain(); toast("片段已保存");
+  });
+}
+
+/* ---------- 设置 ---------- */
+function renderSettings(c) {
+  c.innerHTML = `<div class="page">
+    <div class="subpage-head"><h2>设置</h2></div>
+    <div class="set-body">
+      <div class="set-card">
+        <div class="set-row">
+          <div class="lab">iCloud 同步<div class="sub">通过 iCloud Key-Value Storage 同步主机配置与代码片段</div></div>
+          <button class="switch ${state.icloud ? "on" : ""}" id="set-icloud"></button>
+        </div>
+        <div class="set-row">
+          <div class="lab">片段存储目录<div class="sub">代码片段在本地库中的存储位置（规划中）</div></div>
+          <button class="btn" id="set-dir" style="height:26px;font-size:12px">选择…</button>
+        </div>
+      </div>
+      <div class="set-card">
+        <div class="set-row"><div class="lab">版本<div class="sub">Panda SSH 0.1.0 · Rust core v0.1</div></div></div>
+        <div class="set-row"><div class="lab">开源协议<div class="sub">Apache-2.0</div></div></div>
+        <div class="set-row"><div class="lab">技术栈<div class="sub">Rust（russh / russh-sftp）+ SwiftUI · uniffi 绑定</div></div></div>
+      </div>
+      <div class="note-text" style="text-align:left">此页面为交互原型演示，所有设置仅保存在当前页面会话中。</div>
+    </div>
+  </div>`;
+  $("#set-icloud").addEventListener("click", () => {
+    state.icloud = !state.icloud;
+    renderAll();
+    toast(state.icloud ? "iCloud 同步已开启" : "iCloud 同步已暂停");
+  });
+  $("#set-dir").addEventListener("click", () => showFilePicker(() => toast("目录已更新（模拟）")));
+}
+
+/* ---------- 总渲染 & 初始化 ---------- */
+function renderAll() {
+  renderSidebar();
+  renderTabs();
+  renderMain();
+}
+
+$("#search").addEventListener("input", e => { state.search = e.target.value; renderSidebar(); });
+$("#btn-add-host").addEventListener("click", () => showHostForm(null));
+$("#btn-add-group").addEventListener("click", () => promptTextSheet("新建分组", "在根级创建新分组：", "分组名称", name => {
+  state.groups.push({ id: uid(), name, parent: null, open: true });
+  renderAll(); toast("分组已创建");
+}));
+$("#btn-snippets").addEventListener("click", () => { state.view = "snippets"; renderAll(); });
+$("#btn-settings").addEventListener("click", () => { state.view = "settings"; renderAll(); });
+$("#sync").addEventListener("click", () => {
+  state.icloud = !state.icloud;
+  renderAll();
+  toast(state.icloud ? "iCloud 同步已恢复" : "同步已暂停");
+});
+$("#tabplus").addEventListener("click", e => {
+  e.stopPropagation(); // 阻止 document 级点击监听把刚弹出的菜单立刻关掉
+  const h = state.selHostId ? hostById(state.selHostId) : null;
+  const r = e.target.getBoundingClientRect();
+  if (!h) { toast("请先在侧栏选择一台主机"); return; }
+  showCtx([
+    { label: "新建终端 — " + h.name, action: () => openTerminal(h.id) },
+    { label: "新建 SFTP — " + h.name, action: () => openSftp(h.id) },
+  ], r.left, r.bottom + 4);
+});
+
+// 交通灯：仅视觉装饰，点击给提示
+$$("#traffic span").forEach(s => s.addEventListener("click", () => toast("原型演示：窗口控制不可用")));
+
+renderAll();
+</script>
+</body>
+</html>

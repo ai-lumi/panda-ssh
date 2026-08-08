@@ -1,0 +1,31 @@
+[package]
+name = "panda-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+test = false
+
+[dependencies]
+panda-core = { path = "../panda-core" }
+uniffi = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+russh = { workspace = true }
+russh-sftp = { workspace = true }
+rand = "0.10"
+tempfile = "3"
+
+[features]
+# Enables the `uniffi-bindgen` CLI bin used by apple/Scripts/build-rust.sh.
+# Off by default so iOS/macOS library builds don't pull in clap & friends.
+bindgen-cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]

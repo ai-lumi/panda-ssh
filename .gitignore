@@ -1,0 +1,15 @@
+# Rust
+/target
+Cargo.lock.bak
+
+# Xcode
+apple/build/
+apple/DerivedData/
+apple/PandaSSH.xcodeproj/
+apple/Rust/PandaCoreFFI.xcframework/
+apple/Rust/Generated/
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store

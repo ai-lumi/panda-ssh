@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/panda-core", "crates/panda-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/luowenqiang/panda-ssh"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "fs", "time", "net"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+thiserror = "2"
+russh = "0.62"
+russh-sftp = "2.4"
+uniffi = "0.32"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"

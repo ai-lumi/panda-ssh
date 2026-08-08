@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Panda SSH（熊猫 SSH）：极简 SSH 客户端，Apache-2.0 开源。
+  Tech stack: Rust workspace (panda-core 核心库: russh/russh-sftp/tokio/serde+toml;
+  panda-ffi: uniffi 绑定) + SwiftUI 多平台 App (macOS 14+ / iPadOS 17+, SwiftTerm
+  终端, XcodeGen 生成工程)。Linux GTK4 后期复用 panda-core。
+  配置共享: iCloud Key-Value Storage + iCloud 同步钥匙串；密钥材料只进钥匙串，
+  配置文件仅存引用。
+  开发方法: 强制 TDD（先写失败测试再实现，red-green-refactor）；Rust 侧
+  cargo test，Swift 侧可测逻辑用 XCTest。
+
+rules:
+  proposal:
+    - 必须包含 Non-goals 一节
+    - 说明对 macOS 与 iPadOS 双端的影响
+  tasks:
+    - 每个实现任务前先列对应的测试任务
+    - 任务粒度控制在一次可验证的提交内
+    - 每个功能任务必须显式包含三类测试：正常流程、意外操作、边界条件
+    - 所有变更完成前必须通过覆盖率门禁：lines >= 95%、regions >= 95%
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

@@ -1,0 +1,83 @@
+name: PandaSSH
+options:
+  bundleIdPrefix: com.pandassh
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.2.0
+
+targetTemplates:
+  App:
+    type: application
+    sources:
+      - path: PandaSSH
+      - path: Rust/Generated
+        excludes: ["*.h", "*.modulemap", "module.modulemap"]
+    dependencies:
+      - package: SwiftTerm
+      - framework: Rust/PandaCoreFFI.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pandassh.app
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_VERSION: "5.0"
+
+targets:
+  PandaSSH-macOS:
+    templates: [App]
+    platform: macOS
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "-"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Panda SSH"
+      configs:
+        # Local dev builds use ad-hoc signing; iCloud / App Groups /
+        # keychain-sharing entitlements require a paid developer team and a
+        # provisioning profile, so they only apply to Release builds.
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-macOS-Dev.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-macOS.entitlements
+
+  # 单元测试 target:双端共享 apple/PandaSSHTests 下的同一套测试源码
+  PandaSSH-macOSTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: PandaSSHTests
+    dependencies:
+      - target: PandaSSH-macOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_IDENTITY: "-"
+
+  PandaSSH-iOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: PandaSSHTests
+    dependencies:
+      - target: PandaSSH-iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+
+  PandaSSH-iOS:
+    templates: [App]
+    platform: iOS
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-iOS.entitlements
+        TARGETED_DEVICE_FAMILY: "2"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"

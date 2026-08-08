@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="熊猫 SSH Logo">
+  <defs>
+    <!-- 背景：中央微亮的深黑绿，黑客帝国氛围 -->
+    <radialGradient id="bg" cx="50%" cy="40%" r="75%">
+      <stop offset="0%" stop-color="#0e1f12"/>
+      <stop offset="55%" stop-color="#050a06"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+    <!-- 霓虹绿发光 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowSmall" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 圆角图标底板 -->
+  <rect x="8" y="8" width="496" height="496" rx="104" fill="url(#bg)" stroke="#0a2b12" stroke-width="3"/>
+
+  <!-- ===== 矩阵雨背景（二进制 01 雨，对应 SSH/加密） ===== -->
+  <g font-family="Menlo, Monaco, monospace" font-size="17" fill="#00ff41">
+    <!-- 中轴线两侧的雨柱，从下往上逐渐变淡以模拟景深 -->
+    <g opacity="0.28">
+      <text x="52" y="120">00101</text>
+      <text x="52" y="200">10110</text>
+      <text x="52" y="280">01100</text>
+      <text x="52" y="360">11001</text>
+      <text x="52" y="440">01011</text>
+    </g>
+    <g opacity="0.22">
+      <text x="118" y="84">01101</text>
+      <text x="118" y="164">10010</text>
+      <text x="118" y="244">11001</text>
+      <text x="118" y="324">01110</text>
+      <text x="118" y="404">10110</text>
+    </g>
+    <g opacity="0.30">
+      <text x="406" y="92">11010</text>
+      <text x="406" y="172">00101</text>
+      <text x="406" y="252">10100</text>
+      <text x="406" y="332">01101</text>
+      <text x="406" y="412">10011</text>
+    </g>
+    <g opacity="0.24">
+      <text x="464" y="140">01010</text>
+      <text x="464" y="220">11001</text>
+      <text x="464" y="300">10110</text>
+      <text x="464" y="380">01100</text>
+      <text x="464" y="460">10010</text>
+    </g>
+    <!-- 顶部雨滴头：亮白绿色 -->
+    <g fill="#b8ffd0" font-size="18">
+      <text x="52" y="103">1</text>
+      <text x="118" y="67">0</text>
+      <text x="406" y="75">1</text>
+      <text x="464" y="123">0</text>
+    </g>
+  </g>
+
+  <!-- ===== 天线（远程连接信号） ===== -->
+  <rect x="248" y="96" width="16" height="44" rx="6" fill="#0a0f0a"/>
+  <circle cx="256" cy="82" r="13" fill="#00ff41" filter="url(#glow)"/>
+  <!-- 天线顶部的信号弧 -->
+  <g fill="none" stroke="#00ff41" stroke-width="5" stroke-linecap="round" opacity="0.85" filter="url(#glowSmall)">
+    <path d="M236 66 A28 28 0 0 1 276 66"/>
+    <path d="M226 52 A46 46 0 0 1 286 52" opacity="0.55"/>
+  </g>
+
+  <!-- ===== 熊猫脸 ===== -->
+  <!-- 耳朵 -->
+  <ellipse cx="168" cy="168" rx="52" ry="46" fill="#0a0f0a"/>
+  <ellipse cx="344" cy="168" rx="52" ry="46" fill="#0a0f0a"/>
+  <!-- 脸颊 -->
+  <ellipse cx="256" cy="286" rx="126" ry="108" fill="#eaf3ea"/>
+  <!-- 眼罩（经典熊猫黑眼圈，向鼻梁延伸） -->
+  <ellipse cx="200" cy="266" rx="40" ry="28" fill="#0a0f0a" transform="rotate(-18 200 266)"/>
+  <ellipse cx="312" cy="266" rx="40" ry="28" fill="#0a0f0a" transform="rotate(18 312 266)"/>
+  <!-- 眼睛：发光的矩阵绿 -->
+  <circle cx="200" cy="266" r="11" fill="#00ff41" filter="url(#glow)"/>
+  <circle cx="312" cy="266" r="11" fill="#00ff41" filter="url(#glow)"/>
+  <!-- 眼罩高光 -->
+  <circle cx="191" cy="257" r="4" fill="#2f5a2f" opacity="0.8"/>
+  <circle cx="303" cy="257" r="4" fill="#2f5a2f" opacity="0.8"/>
+  <!-- 鼻子 -->
+  <ellipse cx="256" cy="322" rx="15" ry="11" fill="#0a0f0a"/>
+  <!-- 微笑弧 -->
+  <path d="M228 340 Q256 358 284 340" fill="none" stroke="#0a0f0a" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- ===== 终端提示符 >_ （SSH 命令行） ===== -->
+  <text x="256" y="436" text-anchor="middle" font-family="Menlo, Monaco, monospace" font-size="52" font-weight="bold" fill="#00ff41" filter="url(#glow)">&gt;_</text>
+  <!-- 提示符下的光标闪烁下划线 -->
+  <rect x="218" y="452" width="76" height="6" rx="3" fill="#00ff41" opacity="0.7"/>
+
+  <!-- 四周四角装饰点 -->
+  <g fill="#00ff41" opacity="0.35">
+    <circle cx="48" cy="464" r="5"/>
+    <circle cx="464" cy="48" r="5"/>
+  </g>
+</svg>
