@@ -349,6 +349,76 @@ mod tests {
         assert!(!store.list().unwrap().is_empty());
     }
 
+    #[test]
+    fn list_propagates_non_notfound_io_error() {
+        // 用文件路径冒充目录，read_dir 会返回非 NotFound 错误。
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let store = SnippetStore::new(not_a_dir);
+        assert!(store.list().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unreadable_snippet_file_is_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.md");
+        std::fs::write(&path, b"---\ntitle: x\ntags: []\n---\nbody").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let store = SnippetStore::new(dir.path().to_path_buf());
+        assert!(store.list().unwrap().is_empty());
+        // 恢复权限以便 tempdir 清理。
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn unreadable_snippet_file_is_skipped() {
+        // 非 Unix 平台：通过破坏 frontmatter 让解析失败即可验证“读取失败/解析失败被跳过”。
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path().join("broken.md"), "---\nunclosed frontmatter");
+        let store = SnippetStore::new(dir.path().to_path_buf());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_propagates_non_notfound_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // 创建一个目录但用 .md 结尾，让 remove_file 返回非 NotFound 错误。
+        let path = dir.path().join("is-a-dir.md");
+        std::fs::create_dir(&path).unwrap();
+        let store = SnippetStore::new(dir.path().to_path_buf());
+        assert!(store.delete("is-a-dir").is_err());
+    }
+
+    #[test]
+    fn yaml_escape_sequences_are_preserved() {
+        let text = r#"---
+title: "line1\nline2\ttab\\quote\"end"
+tags: ["a\"b", "c\\d"]
+---
+body"#;
+        let snippet = parse_snippet("escapes", text).unwrap();
+        assert_eq!(snippet.title, "line1\nline2\ttab\\quote\"end");
+        assert_eq!(snippet.tags, vec!["a\"b", "c\\d"]);
+    }
+
+    #[test]
+    fn parse_yaml_array_invalid_returns_empty() {
+        let text = "---\ntitle: x\ntags: not-an-array\n---\nbody";
+        let snippet = parse_snippet("bad-tags", text).unwrap();
+        assert!(snippet.tags.is_empty());
+    }
+
+    #[test]
+    fn parse_yaml_array_with_empty_items_is_filtered() {
+        let text = "---\ntitle: x\ntags: [a, , b]\n---\nbody";
+        let snippet = parse_snippet("sparse-tags", text).unwrap();
+        assert_eq!(snippet.tags, vec!["a", "b"]);
+    }
+
     fn write_file(path: PathBuf, content: &str) {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();

@@ -22,7 +22,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Secret material for one connection attempt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Credentials {
     Password(String),
     KeyFile {
@@ -286,10 +286,13 @@ impl SshSession {
 ///
 /// Bytes written with [`write`](Self::write) are sent to the remote shell,
 /// and bytes emitted by the remote side are buffered and can be polled with
-/// [`read`](Self::read). The session is closed and the SSH connection is
-/// disconnected when [`close`](Self::close) is called.
+/// [`read`](Self::read). The shell channel is closed when [`close`](Self::close)
+/// is called; the underlying SSH connection is only disconnected if this
+/// `ShellSession` holds the last reference to the `SshSession`.
 pub struct ShellSession {
-    session: SshSession,
+    /// 持有 Arc 以延长 SSH 连接生命周期，直到 ShellSession 被 drop。
+    #[allow(dead_code)]
+    session: Arc<SshSession>,
     writer: mpsc::Sender<Vec<u8>>,
     reader: Option<tokio::task::JoinHandle<()>>,
     output: Arc<Mutex<Vec<u8>>>,
@@ -298,7 +301,7 @@ pub struct ShellSession {
 
 impl ShellSession {
     /// Open a shell channel on `session` and start the background reader.
-    pub async fn open(session: SshSession) -> Result<Self> {
+    pub async fn open(session: Arc<SshSession>) -> Result<Self> {
         let mut channel = session.open_session_channel().await?;
         channel.request_shell(true).await?;
 
@@ -363,14 +366,14 @@ impl ShellSession {
         Ok(buf.drain(..take).collect())
     }
 
-    /// Close the shell channel, wait for the reader to finish and disconnect.
+    /// Close the shell channel and wait for the reader to finish.
+    /// 不主动断开底层 SSH 连接，以便连接池复用。
     pub async fn close(&mut self) -> Result<()> {
         self.closed.store(true, Ordering::SeqCst);
         let _ = self.writer.try_send(Vec::new());
         if let Some(reader) = self.reader.take() {
             let _ = reader.await;
         }
-        self.session.disconnect().await?;
         Ok(())
     }
 }

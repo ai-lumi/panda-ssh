@@ -207,8 +207,10 @@ final class ConfigSync {
         do {
             try mergedHosts.write(to: hostsURL, atomically: true, encoding: .utf8)
             try snapshot.groups.write(to: groupsURL, atomically: true, encoding: .utf8)
+            Logger.shared.info("配置同步完成", module: LogModule.config)
             return true
         } catch {
+            Logger.shared.error("配置同步失败; 原因=\(error.localizedDescription)", module: LogModule.config)
             return false
         }
     }

@@ -6,8 +6,8 @@ import XCTest
 @testable import PandaSSH_iOS
 #endif
 
-/// 假 shell 会话测试:覆盖正常流程(连接/内置命令)、意外操作(未知命令、
-/// 空命令、越界翻历史)、边界条件(clear/exit、离线主机)三类用例。
+/// 终端会话状态机测试：覆盖连接流程（connecting → shell/failed）、
+/// 重试、关闭、mock 连接欢迎信息与回显行为。
 @MainActor
 final class TerminalSessionTests: XCTestCase {
 
@@ -19,37 +19,31 @@ final class TerminalSessionTests: XCTestCase {
         )
     }
 
-    /// 进入 shell 阶段的会话。
-    private func makeShell(demo: DemoFlag? = nil) -> TerminalSessionStore {
-        let store = TerminalSessionStore(host: makeHost(demo: demo))
-        store.finishConnecting()
-        return store
-    }
-
     // MARK: - 连接阶段
 
-    func testInitialPhaseIsConnectingWithHint() {
+    func testInitialPhaseIsConnectingWithoutConnection() {
         let store = TerminalSessionStore(host: makeHost())
 
         XCTAssertEqual(store.phase, .connecting)
-        XCTAssertEqual(store.lines.count, 1)
-        XCTAssertTrue(store.lines[0].text.contains("正在连接 203.0.113.10:22"))
+        XCTAssertNil(store.connection)
     }
 
-    func testFinishConnectingEntersShellWithWelcome() {
-        let store = makeShell()
+    func testFinishConnectingEntersShellWithConnection() {
+        let store = TerminalSessionStore(host: makeHost())
+
+        store.finishConnecting()
 
         XCTAssertEqual(store.phase, .shell)
-        XCTAssertEqual(store.lines.count, 3)
-        XCTAssertTrue(store.lines[2].text.contains("Welcome to web-prod"))
+        XCTAssertNotNil(store.connection)
     }
 
-    func testOfflineHostFailsAfterConnecting() {
+    func testFinishConnectingOfflineHostFails() {
         let store = TerminalSessionStore(host: makeHost(demo: .offline))
 
         store.finishConnecting()
 
         XCTAssertEqual(store.phase, .failed)
+        XCTAssertNil(store.connection)
     }
 
     func testRetryAfterFailureReturnsToConnecting() {
@@ -60,145 +54,83 @@ final class TerminalSessionTests: XCTestCase {
         store.retry()
 
         XCTAssertEqual(store.phase, .connecting)
-        XCTAssertTrue(store.lines[0].text.contains("正在连接"))
+        XCTAssertNil(store.connection)
     }
 
-    // MARK: - Prompt
+    func testRetryIncrementsAttempt() {
+        let store = TerminalSessionStore(host: makeHost(demo: .offline))
+        store.finishConnecting()
 
-    func testPromptUsesTildeForHome() {
-        let store = makeShell()
-        XCTAssertEqual(store.prompt, "luowenqiang@web-prod:~$")
+        store.retry()
+
+        XCTAssertEqual(store.attempt, 1)
     }
 
-    // MARK: - 内置命令(正常流程)
+    func testMarkFailedSetsFailedPhase() {
+        let store = TerminalSessionStore(host: makeHost())
 
-    func testHelpListsBuiltinCommands() {
-        let store = makeShell()
-        store.run("help")
+        store.markFailed()
 
-        let output = store.lines.last?.text ?? ""
-        for name in ["help", "ls", "pwd", "whoami", "uname", "date", "echo", "clear", "exit"] {
-            XCTAssertTrue(output.contains(name), "help 输出应包含 \(name)")
+        XCTAssertEqual(store.phase, .failed)
+    }
+
+    func testCloseReleasesConnection() {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
+        XCTAssertNotNil(store.connection)
+
+        store.close()
+
+        XCTAssertEqual(store.phase, .failed)
+        XCTAssertNil(store.connection)
+    }
+
+    // MARK: - Mock 连接数据流
+
+    func testMockConnectionContainsWelcomeMessage() throws {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
+
+        guard let conn = store.connection else {
+            XCTFail("连接不应为 nil")
+            return
         }
+        let data = try conn.read(max: 4096)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(text.contains("已建立连接"), "欢迎信息应包含「已建立连接」，实际：\(text)")
+        XCTAssertTrue(text.contains("Welcome to web-prod"), "欢迎信息应包含主机名")
     }
 
-    func testLsOutputsFakeListing() {
-        let store = makeShell()
-        store.run("ls")
+    func testMockConnectionEchoesInput() throws {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
 
-        let output = store.lines.last?.text ?? ""
-        XCTAssertTrue(output.contains("app"))
-        XCTAssertTrue(output.contains("backup-2026-08-01.sql.gz"))
+        guard let conn = store.connection else {
+            XCTFail("连接不应为 nil")
+            return
+        }
+        // 先读走欢迎信息
+        _ = try? conn.read(max: 4096)
+
+        // 写入数据后读回应原样返回
+        let payload = "ls -la\n".data(using: .utf8)!
+        try conn.write(payload)
+        let echoed = try conn.read(max: 4096)
+        XCTAssertEqual(echoed, payload)
     }
 
-    func testPwdPrintsCwd() {
-        let store = makeShell()
-        store.run("pwd")
-        XCTAssertEqual(store.lines.last?.text, "/home/luowenqiang")
-    }
+    func testMockConnectionReadEmptyReturnsNoData() throws {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
 
-    func testWhoamiPrintsUsername() {
-        let store = makeShell()
-        store.run("whoami")
-        XCTAssertEqual(store.lines.last?.text, "luowenqiang")
-    }
+        guard let conn = store.connection else {
+            XCTFail("连接不应为 nil")
+            return
+        }
+        // 读走所有数据
+        _ = try? conn.read(max: 4096)
 
-    func testUnamePrintsKernelLine() {
-        let store = makeShell()
-        store.run("uname -a")
-        XCTAssertTrue(store.lines.last?.text.contains("Linux web-prod") == true)
-    }
-
-    func testDatePrintsSomething() {
-        let store = makeShell()
-        store.run("date")
-
-        let output = store.lines.last?.text ?? ""
-        XCTAssertFalse(output.isEmpty)
-        XCTAssertFalse(output.contains("command not found"))
-    }
-
-    func testEchoPrintsArgumentStrippingQuotes() {
-        let store = makeShell()
-        store.run("echo hello world")
-        XCTAssertEqual(store.lines.last?.text, "hello world")
-
-        store.run("echo 'quoted'")
-        XCTAssertEqual(store.lines.last?.text, "quoted")
-    }
-
-    // MARK: - 内置命令(边界与意外)
-
-    func testUnknownCommandReportsNotFound() {
-        let store = makeShell()
-        store.run("bogus arg")
-
-        XCTAssertTrue(store.lines.last?.text.contains("zsh: command not found: bogus") == true)
-    }
-
-    func testEmptyCommandOnlyEchoesPrompt() {
-        let store = makeShell()
-        let before = store.lines.count
-
-        let result = store.run("   ")
-
-        XCTAssertEqual(result, .none)
-        XCTAssertEqual(store.lines.count, before + 1) // 只有一行 prompt,无输出
-        XCTAssertTrue(store.history.isEmpty) // 空命令不进历史
-    }
-
-    func testClearEmptiesLines() {
-        let store = makeShell()
-        store.run("ls")
-
-        let result = store.run("clear")
-
-        XCTAssertEqual(result, .none)
-        XCTAssertTrue(store.lines.isEmpty)
-    }
-
-    func testExitRequestsTabClose() {
-        let store = makeShell()
-        XCTAssertEqual(store.run("exit"), .closeTab)
-    }
-
-    func testRunAppendsPromptEchoLine() {
-        let store = makeShell()
-        store.run("whoami")
-
-        // 倒数第二行是 prompt + 命令回显
-        let echo = store.lines[store.lines.count - 2].text
-        XCTAssertTrue(echo.contains("luowenqiang@web-prod:~$"))
-        XCTAssertTrue(echo.contains("whoami"))
-    }
-
-    // MARK: - 命令历史
-
-    func testHistoryUpDownCycles() {
-        let store = makeShell()
-        store.run("ls")
-        store.run("pwd")
-
-        XCTAssertEqual(store.historyUp(), "pwd")
-        XCTAssertEqual(store.historyUp(), "ls")
-        XCTAssertEqual(store.historyUp(), "ls") // 到顶后停留
-        XCTAssertEqual(store.historyDown(), "pwd")
-        XCTAssertEqual(store.historyDown(), "") // 回到底部清空输入
-    }
-
-    func testHistoryOnEmptyHistoryStaysEmpty() {
-        let store = makeShell()
-        XCTAssertEqual(store.historyUp(), "")
-        XCTAssertEqual(store.historyDown(), "")
-    }
-
-    func testNewCommandResetsHistoryPosition() {
-        let store = makeShell()
-        store.run("ls")
-        _ = store.historyUp()
-
-        store.run("pwd")
-
-        XCTAssertEqual(store.historyUp(), "pwd")
+        let data = try conn.read(max: 4096)
+        XCTAssertTrue(data.isEmpty)
     }
 }

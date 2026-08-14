@@ -1,35 +1,10 @@
 import SwiftUI
 
-extension Color {
-    /// 卡片/输入区底色,跨平台:textBackgroundColor 在 iOS 不存在。
-    static let cardBackground = Color(platform: {
-        #if os(macOS)
-        NSColor.textBackgroundColor
-        #else
-        UIColor.secondarySystemBackground
-        #endif
-    }())
-
-    private init(platform: @autoclosure () -> PlatformColor) {
-        #if os(macOS)
-        self.init(nsColor: platform())
-        #else
-        self.init(uiColor: platform())
-        #endif
-    }
-}
-
-#if os(macOS)
-private typealias PlatformColor = NSColor
-#else
-private typealias PlatformColor = UIColor
-#endif
-
 /// 可复用对话框组件,文案与 prototype/index.html 一致。
 /// 触发时机(打开终端/SFTP 前的 preconnect 检查)由阶段二接线;
 /// 本阶段在主机详情页提供临时预览入口,各组件也有独立 #Preview。
 
-/// 指纹展示块:标签 + 等宽指纹,白底圆角;isBad 时红色描边(密钥变更对比用)。
+/// 指纹展示块:标签 + 等宽指纹,isBad 时红色描边(密钥变更对比用)。
 struct FingerprintBox: View {
     let label: String
     let fingerprint: String
@@ -47,11 +22,16 @@ struct FingerprintBox: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
-        .background(isBad ? Color.red.opacity(0.05) : Color.cardBackground)
+        .background(.regularMaterial)
+        .background(isBad ? Color.red.opacity(0.05) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(isBad ? Color.red.opacity(0.5) : Color.primary.opacity(0.09), lineWidth: 1)
+            Group {
+                if isBad {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.red.opacity(0.5), lineWidth: 1)
+                }
+            }
         )
     }
 }
@@ -66,7 +46,7 @@ struct TofuConfirmSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 40))
                 .foregroundStyle(.orange)
@@ -78,16 +58,12 @@ struct TofuConfirmSheet: View {
                 .multilineTextAlignment(.center)
             FingerprintBox(label: "\(host.fingerprintAlgorithm) 指纹", fingerprint: fingerprint)
             HStack(spacing: 12) {
-                Button("取消") { onCancel(); dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                Button("取消", role: .cancel) { onCancel(); dismiss() }
                 Button("信任并连接") { onTrust(); dismiss() }
-                    .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
             }
             .padding(.top, 4)
         }
-        .padding(20)
-        .frame(width: 460)
     }
 }
 
@@ -102,7 +78,7 @@ struct HostKeyMismatchSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "exclamationmark.circle")
                 .font(.system(size: 40))
                 .foregroundStyle(.red)
@@ -118,13 +94,10 @@ struct HostKeyMismatchSheet: View {
                 FingerprintBox(label: "对方出示指纹", fingerprint: presentedFingerprint, isBad: true)
             }
             Button("断开连接", role: .destructive) { onDisconnect(); dismiss() }
-                .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .padding(.top, 4)
         }
-        .padding(20)
-        .frame(width: 460)
     }
 }
 
@@ -137,7 +110,7 @@ struct PasswordPromptSheet: View {
     @State private var password = ""
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "lock.fill")
                 .font(.system(size: 36))
                 .foregroundStyle(Color.accentColor)
@@ -151,17 +124,13 @@ struct PasswordPromptSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(submit)
             HStack(spacing: 12) {
-                Button("取消") { onCancel(); dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                Button("取消", role: .cancel) { onCancel(); dismiss() }
                 Button("登录") { submit() }
-                    .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .disabled(password.isEmpty)
             }
             .padding(.top, 4)
         }
-        .padding(20)
-        .frame(width: 460)
     }
 
     private func submit() {
@@ -180,7 +149,7 @@ struct KeyPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "key.fill")
                 .font(.system(size: 36))
                 .foregroundStyle(Color.accentColor)
@@ -201,11 +170,8 @@ struct KeyPickerSheet: View {
                 Label("选择私钥文件", systemImage: "doc.badge.arrow.up")
             }
             .buttonStyle(.borderedProminent)
-            Button("取消") { onCancel(); dismiss() }
-                .keyboardShortcut(.cancelAction)
+            Button("取消", role: .cancel) { onCancel(); dismiss() }
         }
-        .padding(20)
-        .frame(width: 460)
     }
 }
 
@@ -232,16 +198,14 @@ struct GroupNameSheet: View {
                 .onSubmit(submit)
             HStack {
                 Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                Button("取消", role: .cancel) { dismiss() }
                 Button("确定") { submit() }
-                    .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .padding(20)
-        .frame(width: 400)
+        .frame(minWidth: 320, idealWidth: 360)
         .onAppear { name = initial }
     }
 
@@ -250,66 +214,6 @@ struct GroupNameSheet: View {
         guard !value.isEmpty else { return }
         onDone(value)
         dismiss()
-    }
-}
-
-/// 模拟文件选择器:列出 ~/.ssh/ 下的假文件(私钥选择、片段目录选择共用)。
-struct MockFilePickerSheet: View {
-    /// 选中文件后的回调,参数为 ~/.ssh/ 开头的完整路径
-    var onPick: (String) -> Void = { _ in }
-    @Environment(\.dismiss) private var dismiss
-
-    /// 与原型 showFilePicker 一致的假文件列表
-    static let fakeFiles = [
-        "id_ed25519", "id_ed25519.pub", "id_rsa", "id_rsa.pub",
-        "id_ecdsa", "known_hosts", "config",
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("选择私钥文件").font(.headline)
-            Text("~/.ssh/（模拟文件选择器）")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            VStack(spacing: 0) {
-                ForEach(Self.fakeFiles, id: \.self) { file in
-                    Button {
-                        onPick("~/.ssh/\(file)")
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: isPrivateKey(file) ? "key" : "doc")
-                                .foregroundStyle(.secondary)
-                                .frame(width: 16)
-                            Text(file)
-                                .font(.system(.callout, design: .monospaced))
-                            Spacer()
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .background(Color.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.09), lineWidth: 1)
-            )
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding(20)
-        .frame(width: 400)
-    }
-
-    private func isPrivateKey(_ file: String) -> Bool {
-        !file.hasSuffix(".pub") && file != "config" && file != "known_hosts"
     }
 }
 
@@ -331,9 +235,5 @@ struct MockFilePickerSheet: View {
 
 #Preview("分组名称输入") {
     GroupNameSheet(title: "新建子分组", message: "在「生产环境」下创建子分组：")
-}
-
-#Preview("模拟文件选择器") {
-    MockFilePickerSheet()
 }
 #endif

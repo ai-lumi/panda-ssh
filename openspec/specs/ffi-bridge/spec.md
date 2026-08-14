@@ -53,12 +53,18 @@ FFI 层 SHALL NOT 访问系统钥匙串；密码与私钥口令 MUST 由 Swift �
 
 ### Requirement: 初始化
 
-`init_store` 首次调用生效、后续调用为 no-op；未初始化时调用其他接口 MUST 返回 `NotInitialized`。
+`init_store(config_dir)` 设置当前进程的配置目录；未初始化时调用其他接口 MUST 返回 `NotInitialized`。App 生命周期内只调用一次；测试场景允许重新初始化以切换临时目录。
 
 #### Scenario: 未初始化调用
 
 - **WHEN** 未调用 `init_store` 直接调用 `list_hosts`
 - **THEN** 返回 `NotInitialized` 错误
+
+#### Scenario: 集成测试切换临时目录
+
+- **GIVEN** 进程内已调用过 `init_store`
+- **WHEN** 在同进程中再次调用 `init_store` 指向新的临时目录
+- **THEN** 后续 store 操作使用新的临时目录
 
 ### Requirement: 错误分类
 
@@ -73,4 +79,60 @@ FFI 错误 MUST 保留可编程区分的类别：`AuthFailed`、`Timeout`、`Hos
 
 - **WHEN** 发生 Mismatch 或 Reject 策略下的 Unknown
 - **THEN** 错误以结构化字段携带相关指纹，UI 可直接展示
+
+### Requirement: 启动传输任务
+
+`start_transfer` SHALL 接受 `size` 参数；对于下载任务 SHALL 使用该值作为总大小；对于上传任务，当 `size` 为 0 时 SHALL 从本地文件计算，否则 SHALL 使用传入值。
+
+#### Scenario: 下载任务带大小启动
+
+- **GIVEN** 调用 `start_transfer(direction=Download, size=300_000_000, ...)`
+- **WHEN** 任务入队
+- **THEN** 任务总大小为 300_000_000 字节
+
+#### Scenario: 上传任务未传大小
+
+- **GIVEN** 调用 `start_transfer(direction=Upload, size=0, local_path="/local/f.bin", ...)`
+- **WHEN** 任务入队
+- **THEN** 任务总大小等于 `/local/f.bin` 的实际大小
+
+### Requirement: 覆盖确认请求可跨 FFI 边界传递
+
+FFI 层 SHALL 将 `panda-core` 的覆盖确认请求以结构化类型暴露给 Swift，使 UI 可展示源文件与目标文件的大小、最后修改时间，并回传用户决策。
+
+#### Scenario: Swift 收到结构化覆盖确认
+
+- **WHEN** Swift 调用 `sftp_upload` / `sftp_download` 且目标文件已存在
+- **THEN** FFI 返回一个可区分的错误/结果变体，携带 `source_size`、`source_mtime`、`target_size`、`target_mtime` 字段，而不是仅返回字符串错误
+
+#### Scenario: 用户决策可回传至 Rust
+
+- **GIVEN** Swift 已收到覆盖确认请求
+- **WHEN** 用户在弹窗中选择「覆盖」或「跳过」
+- **THEN** Swift 通过 FFI 提供的机制（如同步弹窗返回布尔值，或拆分为 `sftp_upload_with_overwrite` 接口）将决策回传给 Rust 并继续执行
+
+### Requirement: 不破坏现有 FFI 调用语义
+
+新增覆盖确认流程 SHALL 保持现有 FFI 函数对调用方的同步外观；异步逻辑仍 SHALL 在全局 tokio runtime 上 `block_on` 执行。覆盖确认弹窗由 Swift UI 层负责，Rust 侧 SHALL 在需要确认时通过错误/结果变体告知 UI，而不是自行阻塞等待用户输入。
+
+#### Scenario: 未触发覆盖时行为不变
+
+- **WHEN** 目标文件不存在，调用 `sftp_upload` / `sftp_download`
+- **THEN** 行为与变更前完全一致，直接完成传输
+
+### Requirement: 传输任务状态机
+
+单文件传输任务 SHALL 在成功获取并发许可证后才进入 `Running` 状态；等待许可证期间 SHALL 保持 `Queued` 状态。
+
+#### Scenario: 超出并发上限的任务排队
+
+- **GIVEN** 并发上限为 3，已存在 3 个运行中任务
+- **WHEN** 添加第 4 个上传任务
+- **THEN** 该任务状态为 `Queued`，前 3 个任务之一完成后它才变为 `Running`
+
+#### Scenario: 取消排队任务
+
+- **GIVEN** 一个状态为 `Queued` 的任务
+- **WHEN** 调用取消
+- **THEN** 任务立即变为 `Cancelled`，不占用许可证
 

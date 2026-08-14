@@ -85,23 +85,36 @@ struct HostsFile {
 /// container); writes are atomic (temp file + rename).
 pub struct TomlConfigStore {
     path: PathBuf,
+    /// 内存缓存，避免同一实例内重复解析 TOML。
+    cache: std::sync::Mutex<Option<Vec<HostConfig>>>,
 }
 
 impl TomlConfigStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            cache: std::sync::Mutex::new(None),
+        }
     }
 
     fn read(&self) -> Result<Vec<HostConfig>, Error> {
-        match std::fs::read_to_string(&self.path) {
+        {
+            let guard = self.cache.lock().unwrap();
+            if let Some(ref cached) = *guard {
+                return Ok(cached.clone());
+            }
+        }
+        let hosts = match std::fs::read_to_string(&self.path) {
             Ok(text) => {
                 let file: HostsFile = toml::from_str(&text)?;
-                Ok(file.hosts)
+                file.hosts
             }
             // A missing file just means "no hosts saved yet".
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e.into()),
-        }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        *self.cache.lock().unwrap() = Some(hosts.clone());
+        Ok(hosts)
     }
 
     fn write(&self, hosts: &[HostConfig]) -> Result<(), Error> {
@@ -109,7 +122,9 @@ impl TomlConfigStore {
             hosts: hosts.to_vec(),
         };
         let text = toml::to_string_pretty(&file)?;
-        write_atomic(&self.path, text.as_bytes())
+        write_atomic(&self.path, text.as_bytes())?;
+        *self.cache.lock().unwrap() = Some(hosts.to_vec());
+        Ok(())
     }
 }
 
@@ -139,11 +154,27 @@ impl ConfigStore for TomlConfigStore {
 }
 
 /// Write `bytes` to `path` atomically via a temp file + rename.
+/// 文件写盘走 `spawn_blocking`，避免在 tokio worker 线程上阻塞。
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// 异步版本的 `write_atomic`，内部使用 `spawn_blocking`。
+#[allow(dead_code)]
+pub(crate) async fn write_atomic_async(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::Other(format!("spawn_blocking failed: {e}")))?
 }
 
 #[cfg(test)]

@@ -58,11 +58,13 @@ final class PreconnectGate: ObservableObject {
     /// 密钥认证但本机未选择私钥时，引导选择私钥。
     private func checkCredentials(host: HostEntry) {
         if host.auth == .publicKey && host.keyPath.isEmpty {
+            Logger.shared.warning("私钥未选择 host=\(host.address):\(host.port)", module: LogModule.hostKey)
             sheet = .keyPicker
             return
         }
         let secrets = credentialResolver.connectionSecrets(for: host)
         if secrets == nil {
+            Logger.shared.warning("凭据缺失 host=\(host.address):\(host.port)", module: LogModule.hostKey)
             sheet = .password
         } else {
             unlocked = true
@@ -75,21 +77,25 @@ final class PreconnectGate: ObservableObject {
                 presentedKey = key
                 if let alreadyTrusted = await model.awaitTofuConfirmation(for: host.id) {
                     if alreadyTrusted {
+                        Logger.shared.info("已信任主机密钥 host=\(host.address):\(host.port)", module: LogModule.hostKey)
                         unlocked = true
                     } else {
                         onClose()
                     }
                 } else {
+                    Logger.shared.warning("TOFU 待确认 host=\(host.address):\(host.port)", module: LogModule.hostKey)
                     sheet = .tofu
                 }
             } else {
                 checkCredentials(host: host)
             }
         } catch let error as HostKeyMismatchError {
+            Logger.shared.warning("主机密钥变更 host=\(host.address):\(host.port); 已知指纹=\(error.storedFingerprint); 呈现指纹=\(error.presentedFingerprint)", module: LogModule.hostKey)
             presentedKey = PresentedHostKey(key: "", fingerprint: error.presentedFingerprint)
             sheet = .mismatch
         } catch {
             // 探测失败(网络/超时):交给后续真实连接阶段处理,不在门控拦截。
+            Logger.shared.warning("主机密钥探测失败 host=\(host.address):\(host.port); 原因=\(error.localizedDescription)", module: LogModule.hostKey)
             unlocked = true
         }
     }
@@ -149,30 +155,20 @@ struct ConnectFailureView: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 40))
-                .foregroundStyle(.red)
-            Text("连接超时")
-                .font(.headline)
-                .foregroundStyle(Color(red: 1, green: 0.42, blue: 0.39))
-            Text("dial tcp \(host.address):\(host.port): i/o timeout\n无法连接到远程主机，请检查网络或主机是否在线。")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        VStack(spacing: 16) {
+            ContentUnavailableView {
+                Label("连接超时", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.red)
+            } description: {
+                Text("dial tcp \(host.address):\(host.port): i/o timeout\n无法连接到远程主机，请检查网络或主机是否在线。")
+                    .font(.system(.caption, design: .monospaced))
+            }
             HStack(spacing: 10) {
                 Button("重试", action: onRetry)
+                    .buttonStyle(.borderedProminent)
                 Button("关闭标签", action: onClose)
             }
-            .padding(.top, 4)
         }
-        .padding(18)
-        .frame(maxWidth: 460)
-        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.red.opacity(0.35), lineWidth: 1)
-        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

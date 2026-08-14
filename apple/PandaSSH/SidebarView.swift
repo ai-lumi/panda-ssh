@@ -7,6 +7,9 @@ struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var toast: ToastCenter
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
 
     @State private var searchText = ""
     @State private var sheet: SheetKind?
@@ -199,6 +202,7 @@ struct SidebarView: View {
                 isActive: model.sidebarPage == .snippets,
                 action: model.showSnippets
             )
+            #if os(iOS)
             SideEntryButton(
                 title: "设置",
                 systemImage: "gearshape",
@@ -206,9 +210,39 @@ struct SidebarView: View {
                 isActive: model.sidebarPage == .settings,
                 action: model.showSettings
             )
+            #endif
+            #if os(macOS)
+            SideEntryButton(
+                title: "日志",
+                systemImage: "list.bullet.rectangle",
+                badge: nil,
+                isActive: false,
+                action: { openLogWindow() }
+            )
+            #else
+            SideEntryButton(
+                title: "日志",
+                systemImage: "list.bullet.rectangle",
+                badge: nil,
+                isActive: model.sidebarPage == .logs,
+                action: model.showLogs
+            )
+            #endif
         }
         .padding(6)
     }
+
+    #if os(macOS)
+    private func openLogWindow() {
+        // 优先激活已存在的日志窗口,否则由 SwiftUI 创建新窗口
+        for window in NSApp.windows where window.title == "日志" {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        // 窗口不存在时通过环境值打开
+        openWindow(id: "panda-log")
+    }
+    #endif
 }
 
 /// 侧栏行的动作回调集合,供递归节点视图向上传递菜单动作。
@@ -255,10 +289,10 @@ struct HostRowView: View {
                 .help(dotTip)
             VStack(alignment: .leading, spacing: 1) {
                 Text(host.name)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.callout.weight(.semibold))
                     .lineLimit(1)
                 Text(host.subtitle)
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -266,8 +300,8 @@ struct HostRowView: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        // 双击打开终端,但使用 simultaneousGesture 避免拦截 List 的单击选中。
-        .simultaneousGesture(TapGesture(count: 2).onEnded { callbacks.openTerminal(host) })
+        // 显式处理单击选中,避免 OutlineGroup 中行手势与 List 选中冲突。
+        .simultaneousGesture(TapGesture(count: 1).onEnded { model.selectHost(host.id) })
         .contextMenu { hostMenu }
         .accessibilityElement(children: .combine)
     }
@@ -309,10 +343,10 @@ struct GroupRowView: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "folder")
-                .font(.system(size: 12))
+                .font(.callout)
                 .foregroundStyle(.secondary)
             Text(group.name)
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(.callout.weight(.semibold))
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
@@ -356,15 +390,15 @@ private struct SideEntryButton: View {
                 Image(systemName: systemImage)
                     .frame(width: 16)
                 Text(title)
-                    .font(.system(size: 12.5))
+                    .font(.callout)
                 Spacer()
                 if let badge {
                     Text(badge)
-                        .font(.system(size: 10))
+                        .font(.caption2)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Color.purple, in: RoundedRectangle(cornerRadius: 4))
+                        .background(.purple, in: Capsule())
                 }
             }
             .padding(.horizontal, 8)

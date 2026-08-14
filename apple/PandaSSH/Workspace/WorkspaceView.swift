@@ -77,7 +77,14 @@ struct WorkspaceView: View {
         case .snippets:
             SnippetsView()
         case .settings:
+            #if os(iOS)
             SettingsView()
+            #else
+            // macOS 走原生 Settings Scene(cmd+,),侧栏无设置入口
+            hostsContent
+            #endif
+        case .logs:
+            LogView(logger: Logger.shared)
         case .hosts:
             hostsContent
         }
@@ -88,11 +95,16 @@ struct WorkspaceView: View {
         if let active = workspace.tabs.first(where: { $0.id == workspace.activeTabID }) {
             if let host = model.hosts.first(where: { $0.id == active.hostID }) {
                 // 终端/SFTP 标签内部按 preconnectAction 走连接门控(TOFU/告警/密码)
+                // .id(active.id) 强制 SwiftUI 按标签身份管理视图生命周期:
+                // 切换同类型标签时销毁旧视图(释放 Metal 渲染器/SwiftTerm 缓冲区/SSH 连接),
+                // 创建新视图(重新连接),避免资源堆积导致内存持续增长。
                 switch active.kind {
                 case .terminal:
                     TerminalTabView(tab: active, host: host)
+                        .id(active.id)
                 case .sftp:
                     SftpTabView(tab: active, host: host, transfers: transfers)
+                        .id(active.id)
                 }
             } else {
                 ContentUnavailableView(
@@ -114,12 +126,14 @@ struct WorkspaceView: View {
     }
 }
 
-/// 单个标签:类型图标 + 标题 + 关闭按钮,点击切换活动标签,活动标签高亮。
+/// 单个标签:类型图标 + 标题 + 关闭按钮,点击切换活动标签。
+/// 选中态用底边强调线(系统标签风格),非圆角胶囊。
 private struct WorkspaceTabItemView: View {
     let tab: WorkspaceTab
     let isActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -134,11 +148,19 @@ private struct WorkspaceTabItemView: View {
             .foregroundStyle(.secondary)
             .accessibilityLabel("关闭标签页")
         }
-        .padding(.horizontal, 10)
+        .font(.callout)
+        .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(isActive ? Color.accentColor.opacity(0.2) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .background(hovering && !isActive ? Color.primary.opacity(0.06) : Color.clear)
+        .overlay(alignment: .bottom) {
+            if isActive {
+                Rectangle()
+                    .fill(Color.accentColor)
+                    .frame(height: 2)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .onTapGesture(perform: onSelect)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isActive ? .isSelected : [])

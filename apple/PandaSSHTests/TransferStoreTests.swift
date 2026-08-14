@@ -99,6 +99,115 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertEqual(store.activeCount, 5)
     }
 
+    // MARK: - 暂停与继续
+
+    func testPauseRunningTaskStopsProgress() {
+        let store = makeStore()
+        let id = addFile(store)
+        store.tick()
+        let before = store.tasks.first { $0.id == id }?.transferred ?? 0
+        XCTAssertGreaterThan(before, 0)
+
+        store.pause(id: id)
+        store.tick()
+        store.tick()
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .paused)
+        XCTAssertEqual(task?.transferred, before, "暂停后进度应冻结")
+    }
+
+    func testResumePausedTaskContinues() {
+        let store = makeStore()
+        let id = addFile(store)
+        store.tick()
+        store.pause(id: id)
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .paused)
+
+        store.resume(id: id)
+        drain(store)
+
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .done)
+    }
+
+    func testPauseQueuedTaskDoesNotAcquireSlot() {
+        let store = makeStore()
+        (0..<3).forEach { addFile(store, name: "f\($0)", size: 10_000_000) }
+        let queued = addFile(store, name: "q")
+        XCTAssertEqual(store.tasks.first { $0.id == queued }?.status, .queued)
+
+        store.pause(id: queued)
+        // 取消前三个任务让出槽位,被暂停的排队任务不应被提升。
+        store.tasks.filter { $0.status == .running }.forEach { store.cancel(id: $0.id) }
+        store.tick()
+
+        XCTAssertEqual(store.tasks.first { $0.id == queued }?.status, .paused)
+
+        store.resume(id: queued)
+        drain(store)
+
+        XCTAssertEqual(store.tasks.first { $0.id == queued }?.status, .done)
+    }
+
+    func testCancelPausedTask() {
+        let store = makeStore()
+        let id = addFile(store)
+        store.pause(id: id)
+        store.cancel(id: id)
+
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .cancelled)
+    }
+
+    func testResumedTaskSpeedIsNotDilutedByPauseInterval() {
+        // 固定随机源使速度可预测：size=10_000_000 / (40+0.5*80) = 125_000 bytes/s。
+        let store = TransferStore(random: { 0.5 })
+        let id = addFile(store, name: "f", size: 10_000_000)
+        store.tick()
+        store.tick()
+        let before = store.tasks.first { $0.id == id }!
+        XCTAssertGreaterThan(before.liveSpeed, 100_000)
+
+        store.pause(id: id)
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .paused)
+
+        // 暂停 1 秒；若窗口未重置，旧采样点会把实时速度稀释到接近 0。
+        Thread.sleep(forTimeInterval: 1.0)
+
+        store.resume(id: id)
+        store.tick()
+
+        let after = store.tasks.first { $0.id == id }!
+        XCTAssertEqual(after.status, .running)
+        XCTAssertGreaterThan(after.liveSpeed, 50_000, "继续后速度应恢复，不应被暂停时间稀释")
+    }
+
+    func testResumeThroughQueuedStateStillResetsSpeedWindow() {
+        let store = makeStore()
+        // 占满 3 个并发槽位，让第四个任务处于 queued。
+        (0..<3).forEach { addFile(store, name: "blocker\($0)", size: 10_000_000) }
+        let id = addFile(store, name: "paused", size: 10_000_000)
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .queued)
+
+        store.pause(id: id)
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .paused)
+
+        // FFI resume 后任务先回到 Queued，等槽位释放才 Running。
+        store.resume(id: id)
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .queued)
+
+        let blocker = store.tasks.first { $0.name == "blocker0" }!
+        store.cancel(id: blocker.id)
+        store.tick()
+
+        let task = store.tasks.first { $0.id == id }!
+        XCTAssertEqual(task.status, .running)
+        XCTAssertGreaterThan(task.liveSpeed, 0, "经 Queued 恢复后也应能显示实时速度")
+    }
+
     // MARK: - 演示失败:前两个必成功,此后按规则失败
 
     func testFirstTwoTasksNeverFailEvenWithAggressiveRandom() {
@@ -245,5 +354,420 @@ final class TransferStoreTests: XCTestCase {
         store.retry(id: id)
 
         XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .running)
+    }
+
+    // MARK: - 路径映射
+
+    func testUploadMapsSourceToLocalAndDestinationToRemote() {
+        let spy = TransferSourceSpy()
+        let store = TransferStore(source: spy)
+
+        _ = store.add(
+            direction: .upload,
+            name: "f.bin",
+            size: 100,
+            source: "/local/f.bin",
+            destination: "/remote/f.bin"
+        )
+
+        XCTAssertEqual(spy.calls.last?.localPath, "/local/f.bin")
+        XCTAssertEqual(spy.calls.last?.remotePath, "/remote/f.bin")
+        XCTAssertEqual(spy.calls.last?.size, 100)
+    }
+
+    func testDownloadMapsDestinationToLocalAndSourceToRemote() {
+        let spy = TransferSourceSpy()
+        let store = TransferStore(source: spy)
+
+        _ = store.add(
+            direction: .download,
+            name: "f.bin",
+            size: 100,
+            source: "/remote/f.bin",
+            destination: "/local/f.bin"
+        )
+
+        XCTAssertEqual(spy.calls.last?.localPath, "/local/f.bin")
+        XCTAssertEqual(spy.calls.last?.remotePath, "/remote/f.bin")
+        XCTAssertEqual(spy.calls.last?.size, 100)
+    }
+
+    // MARK: - 速度展示
+
+    func testRunningTaskHasPositiveLiveAndTotalSpeed() {
+        let store = makeStore()
+        let id = addFile(store, size: 10_000_000)
+
+        store.tick() // 推进一次，产生进度变化
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .running)
+        XCTAssertGreaterThan(task?.liveSpeed ?? 0, 0)
+        XCTAssertGreaterThan(task?.totalSpeed ?? 0, 0)
+        XCTAssertNotNil(task?.estimatedTimeRemaining)
+    }
+
+    func testCompletedTaskHasZeroLiveSpeedAndNoEstimatedRemaining() {
+        let store = makeStore()
+        let id = addFile(store, size: 10_000)
+
+        drain(store)
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .done)
+        XCTAssertEqual(task?.liveSpeed, 0)
+        XCTAssertGreaterThanOrEqual(task?.totalSpeed ?? 0, 0)
+        XCTAssertNil(task?.estimatedTimeRemaining)
+    }
+
+    func testCancelledTaskHasZeroLiveSpeed() {
+        let store = makeStore()
+        let id = addFile(store)
+
+        store.tick()
+        store.cancel(id: id)
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .cancelled)
+        XCTAssertEqual(task?.liveSpeed, 0)
+        XCTAssertNil(task?.estimatedTimeRemaining)
+    }
+
+    func testQueuedTaskHasZeroSpeed() {
+        let store = makeStore()
+        (0..<3).forEach { addFile(store, name: "f\($0)") }
+        let queued = addFile(store, name: "q")
+
+        let task = store.tasks.first { $0.id == queued }
+        XCTAssertEqual(task?.status, .queued)
+        XCTAssertEqual(task?.liveSpeed, 0)
+        XCTAssertEqual(task?.totalSpeed, 0)
+        XCTAssertNil(task?.estimatedTimeRemaining)
+    }
+
+    func testSpeedIsPreservedAcrossRefresh() {
+        let store = makeStore()
+        let id = addFile(store, size: 10_000_000)
+        store.tick()
+        let before = store.tasks.first { $0.id == id }
+        XCTAssertGreaterThan(before?.liveSpeed ?? 0, 0)
+
+        // add 另一个任务触发 refresh，原任务速度不应丢失
+        _ = addFile(store, name: "other", size: 1_000_000)
+
+        let after = store.tasks.first { $0.id == id }
+        XCTAssertEqual(after?.totalSpeed, before?.totalSpeed)
+    }
+
+    // MARK: - 批量任务
+
+    func testAddBatchUploadRecordsSourcesAndDestDir() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+
+        let id = store.addBatchUpload(sources: ["/local/a.txt", "/local/b.txt"], destDir: "/remote/dir", hostID: "h1")
+
+        XCTAssertEqual(spy.uploads.last?.sources, ["/local/a.txt", "/local/b.txt"])
+        XCTAssertEqual(spy.uploads.last?.destDir, "/remote/dir")
+        XCTAssertEqual(spy.uploads.last?.hostID, "h1")
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertTrue(task?.isBatch ?? false)
+        XCTAssertEqual(task?.batchSources, ["/local/a.txt", "/local/b.txt"])
+        XCTAssertEqual(task?.batchDestDir, "/remote/dir")
+    }
+
+    func testAddBatchDownloadRecordsSourcesAndDestDir() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+
+        let id = store.addBatchDownload(sources: ["/remote/a.log", "/remote/b.log"], destDir: "/local/dir", hostID: "h2")
+
+        XCTAssertEqual(spy.downloads.last?.sources, ["/remote/a.log", "/remote/b.log"])
+        XCTAssertEqual(spy.downloads.last?.destDir, "/local/dir")
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.direction, .download)
+        XCTAssertTrue(task?.isBatch ?? false)
+    }
+
+    func testBatchTaskNameShowsCount() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+
+        store.addBatchUpload(sources: ["/tmp/a.txt", "/tmp/b.txt"], destDir: "/r")
+
+        let task = store.tasks.first
+        XCTAssertEqual(task?.name, "a.txt 等 2 项")
+    }
+
+    func testBatchTaskProgressReflectsRecord() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+        let id = store.addBatchUpload(sources: ["/tmp/a.bin"], destDir: "/r")
+
+        spy.setBatchTask(id: id, totalSize: 1_000, transferred: 400, status: .running)
+        store.tick()
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .running)
+        XCTAssertEqual(task?.size, 1_000)
+        XCTAssertEqual(task?.transferred, 400)
+        XCTAssertEqual(task?.percent, 40)
+    }
+
+    func testCancelBatchTaskCallsBatchCancel() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+        let id = store.addBatchUpload(sources: ["/tmp/a.bin"], destDir: "/r")
+
+        store.cancel(id: id)
+
+        XCTAssertTrue(spy.cancelledIDs.contains(id.uuidString))
+    }
+
+    func testBatchTaskCompletedWhenRecordDone() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+        let id = store.addBatchUpload(sources: ["/tmp/a.bin"], destDir: "/r")
+
+        spy.setBatchTask(id: id, totalSize: 500, transferred: 500, status: .done)
+        store.tick()
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .done)
+        XCTAssertEqual(task?.progress, 1)
+    }
+
+    // MARK: - 任务组
+
+    func testGroupedTasksAggregateIntoTaskGroup() {
+        let store = makeStore()
+        let groupID = UUID()
+        let groupName = "project"
+        let id1 = store.add(direction: .upload, name: "a.swift", size: 100, source: "/l/a.swift", destination: "/r/a.swift", groupID: groupID, groupName: groupName)
+        let id2 = store.add(direction: .upload, name: "b.swift", size: 200, source: "/l/b.swift", destination: "/r/b.swift", groupID: groupID, groupName: groupName)
+        let id3 = store.add(direction: .upload, name: "c.swift", size: 300, source: "/l/c.swift", destination: "/r/c.swift")
+
+        let groups = store.taskGroups
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.id, groupID)
+        XCTAssertEqual(groups.first?.name, groupName)
+        XCTAssertEqual(groups.first?.tasks.count, 2)
+        XCTAssertTrue(groups.first?.tasks.contains(where: { $0.id == id1 }) == true)
+        XCTAssertTrue(groups.first?.tasks.contains(where: { $0.id == id2 }) == true)
+        XCTAssertEqual(store.tasks.first { $0.id == id3 }?.groupID, nil)
+    }
+
+    func testTaskGroupProgressReflectsMemberProgress() {
+        let store = makeStore()
+        let groupID = UUID()
+        _ = store.add(direction: .upload, name: "a.bin", size: 1_000_000, source: "/l/a.bin", destination: "/r/a.bin", groupID: groupID, groupName: "g")
+        _ = store.add(direction: .upload, name: "b.bin", size: 2_000_000, source: "/l/b.bin", destination: "/r/b.bin", groupID: groupID, groupName: "g")
+
+        store.tick()
+
+        let group = store.taskGroups.first { $0.id == groupID }
+        XCTAssertEqual(group?.totalSize, 3_000_000)
+        XCTAssertGreaterThan(group?.transferred ?? 0, 0)
+        XCTAssertGreaterThan(group?.progress ?? 0, 0)
+        XCTAssertLessThan(group?.progress ?? 1, 1)
+    }
+
+    func testCancelGroupStopsAllMembers() {
+        let store = makeStore()
+        let groupID = UUID()
+        let id1 = store.add(direction: .upload, name: "a.bin", size: 1_000_000, source: "/l/a.bin", destination: "/r/a.bin", groupID: groupID, groupName: "g")
+        let id2 = store.add(direction: .upload, name: "b.bin", size: 1_000_000, source: "/l/b.bin", destination: "/r/b.bin", groupID: groupID, groupName: "g")
+        let id3 = store.add(direction: .upload, name: "c.bin", size: 1_000_000, source: "/l/c.bin", destination: "/r/c.bin")
+
+        store.cancelGroup(id: groupID)
+
+        XCTAssertEqual(store.tasks.first { $0.id == id1 }?.status, .cancelled)
+        XCTAssertEqual(store.tasks.first { $0.id == id2 }?.status, .cancelled)
+        XCTAssertEqual(store.tasks.first { $0.id == id3 }?.status, .running)
+    }
+
+    func testRetryGroupOnlyRetriesFailedMembers() {
+        let store = makeStore(failRule: { $0 == 1 }) // 第二个任务(b)失败
+        let groupID = UUID()
+        let id1 = store.add(direction: .upload, name: "a.bin", size: 10_000, source: "/l/a.bin", destination: "/r/a.bin", groupID: groupID, groupName: "g")
+        let id2 = store.add(direction: .upload, name: "b.bin", size: 10_000, source: "/l/b.bin", destination: "/r/b.bin", groupID: groupID, groupName: "g")
+        drain(store)
+
+        XCTAssertEqual(store.tasks.first { $0.id == id2 }?.status, .failed)
+
+        store.retryGroup(id: groupID)
+        drain(store)
+
+        XCTAssertEqual(store.tasks.first { $0.id == id1 }?.status, .done)
+        XCTAssertEqual(store.tasks.first { $0.id == id2 }?.status, .done)
+    }
+
+    func testGroupRegistryPreservesGroupAfterRefresh() {
+        let store = makeStore()
+        let groupID = UUID()
+        let groupName = "docs"
+        let id = store.add(direction: .upload, name: "a.txt", size: 100, source: "/l/a.txt", destination: "/r/a.txt", groupID: groupID, groupName: groupName)
+
+        // add 另一个任务触发 refresh
+        _ = store.add(direction: .upload, name: "b.txt", size: 100, source: "/l/b.txt", destination: "/r/b.txt")
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.groupID, groupID)
+        XCTAssertEqual(task?.groupName, groupName)
+    }
+
+}
+
+/// 记录 enqueueTransfer 参数,用于验证 upload/download 路径映射。
+private final class TransferSourceSpy: TransferSource {
+    struct Call {
+        let direction: TransferDirection
+        let hostID: String
+        let localPath: String
+        let remotePath: String
+        let size: UInt64
+    }
+
+    var calls: [Call] = []
+
+    func enqueueTransfer(
+        direction: TransferDirection,
+        hostID: String,
+        localPath: String,
+        remotePath: String,
+        size: UInt64,
+        password: String?,
+        passphrase: String?
+    ) -> String {
+        calls.append(Call(direction: direction, hostID: hostID, localPath: localPath, remotePath: remotePath, size: size))
+        return UUID().uuidString
+    }
+
+    func cancelTransfer(id: String) {}
+    func pauseTransfer(id: String) {}
+    func resumeTransfer(id: String) {}
+    func retryTransfer(id: String) -> String { UUID().uuidString }
+    func listTransfers() -> [TransferRecord] { [] }
+    func tick() {}
+}
+
+/// 批量传输源 spy,用于验证 Swift 侧批量任务映射与生命周期。
+private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource {
+    struct BatchCall {
+        let hostID: String
+        let sources: [String]
+        let destDir: String
+    }
+
+    var uploads: [BatchCall] = []
+    var downloads: [BatchCall] = []
+    var cancelledIDs: Set<String> = []
+    private var tasks: [BatchTransferRecord] = []
+    private var nextID = 1
+
+    func enqueueTransfer(
+        direction: TransferDirection,
+        hostID: String,
+        localPath: String,
+        remotePath: String,
+        size: UInt64,
+        password: String?,
+        passphrase: String?
+    ) -> String {
+        UUID().uuidString
+    }
+
+    func cancelTransfer(id: String) {}
+    func pauseTransfer(id: String) {}
+    func resumeTransfer(id: String) {}
+    func retryTransfer(id: String) -> String { UUID().uuidString }
+    func listTransfers() -> [TransferRecord] { [] }
+    func tick() {}
+
+    func enqueueBatchUpload(
+        hostID: String,
+        sources: [String],
+        destDir: String,
+        password: String?,
+        passphrase: String?
+    ) -> String {
+        let id = makeID()
+        uploads.append(BatchCall(hostID: hostID, sources: sources, destDir: destDir))
+        tasks.append(makeRecord(id: id, direction: .upload, sources: sources, destDir: destDir))
+        return id
+    }
+
+    func enqueueBatchDownload(
+        hostID: String,
+        sources: [String],
+        destDir: String,
+        password: String?,
+        passphrase: String?
+    ) -> String {
+        let id = makeID()
+        downloads.append(BatchCall(hostID: hostID, sources: sources, destDir: destDir))
+        tasks.append(makeRecord(id: id, direction: .download, sources: sources, destDir: destDir))
+        return id
+    }
+
+    func cancelBatchTransfer(id: String) {
+        cancelledIDs.insert(id)
+        guard let index = tasks.firstIndex(where: { $0.id.uuidString == id }) else { return }
+        if tasks[index].status == .running || tasks[index].status == .queued {
+            tasks[index] = mutated(tasks[index], status: .cancelled)
+        }
+    }
+
+    func listBatchTransfers() -> [BatchTransferRecord] { tasks }
+
+    func setBatchTask(id: UUID, totalSize: UInt64, transferred: UInt64, status: TransferStatus) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[index] = BatchTransferRecord(
+            id: id,
+            direction: tasks[index].direction,
+            name: tasks[index].name,
+            size: totalSize,
+            transferred: transferred,
+            status: status,
+            sources: tasks[index].sources,
+            destDir: tasks[index].destDir,
+            hostID: tasks[index].hostID,
+            error: nil
+        )
+    }
+
+    private func makeID() -> String {
+        nextID += 1
+        return UUID().uuidString
+    }
+
+    private func makeRecord(id: String, direction: TransferDirection, sources: [String], destDir: String) -> BatchTransferRecord {
+        BatchTransferRecord(
+            id: UUID(uuidString: id) ?? UUID(),
+            direction: direction,
+            name: "",
+            size: 0,
+            transferred: 0,
+            status: .queued,
+            sources: sources,
+            destDir: destDir,
+            hostID: "",
+            error: nil
+        )
+    }
+
+    private func mutated(_ record: BatchTransferRecord, status: TransferStatus) -> BatchTransferRecord {
+        BatchTransferRecord(
+            id: record.id,
+            direction: record.direction,
+            name: record.name,
+            size: record.size,
+            transferred: record.transferred,
+            status: status,
+            sources: record.sources,
+            destDir: record.destDir,
+            hostID: record.hostID,
+            error: record.error
+        )
     }
 }

@@ -1,6 +1,8 @@
 import Foundation
+import Combine
 
 /// 文件条目(对应原型 LOCAL_FS / remoteFS 的 {name, dir, size, mtime})。
+
 struct FileEntry: Equatable, Identifiable {
     let name: String
     let isDirectory: Bool
@@ -204,6 +206,7 @@ final class FilePaneNavigator: ObservableObject {
 
     @Published private(set) var entries: [FileEntry] = []
     @Published private(set) var lastError: Error? = nil
+    @Published private(set) var isLoading: Bool = false
 
     init(source: any FilePaneSource) {
         self.source = source
@@ -236,6 +239,8 @@ final class FilePaneNavigator: ObservableObject {
     /// 刷新当前目录内容;失败时写入 `lastError` 并返回 false。
     @discardableResult
     func reload() async -> Bool {
+        isLoading = true
+        defer { isLoading = false }
         do {
             entries = try await source.list(path: path)
             lastError = nil
@@ -276,6 +281,16 @@ final class FilePaneNavigator: ObservableObject {
     }
 }
 
+/// 待处理的文件覆盖确认。
+struct PendingConflict: Identifiable, Equatable {
+    let id = UUID()
+    let name: String
+    let sourceSize: UInt64
+    let sourceDate: Date?
+    let targetSize: UInt64
+    let targetDate: Date?
+}
+
 /// SFTP 标签会话:本地/远程两个导航器 + 两侧选中项,并把上传/下载
 /// 挂到共享的 TransferStore。
 @MainActor
@@ -285,11 +300,40 @@ final class SftpSessionStore: ObservableObject {
 
     @Published private(set) var localPane: FilePaneNavigator
     @Published private(set) var remotePane: FilePaneNavigator
-    @Published private(set) var selectedLocal: String?
-    @Published private(set) var selectedRemote: String?
+    /// 本地栏选中集合;单选模式下大小为 0 或 1,多选模式下可包含多个条目。
+    @Published var selectedLocalSet: Set<String> = []
+    /// 远程栏选中集合;单选模式下大小为 0 或 1,多选模式下可包含多个条目。
+    @Published var selectedRemoteSet: Set<String> = []
+    /// 兼容旧代码的单选访问:返回集合中的唯一选中项。
+    var selectedLocal: String? { selectedLocalSet.first }
+    var selectedRemote: String? { selectedRemoteSet.first }
+    /// 本地栏多选模式开关。
+    @Published var isLocalMultiSelect: Bool = false
+    /// 远程栏多选模式开关。
+    @Published var isRemoteMultiSelect: Bool = false
+    /// 当前等待用户决策的覆盖确认;SwiftUI 通过 sheet/alert 展示。
+    @Published var pendingConflict: PendingConflict?
 
     /// 真实连接参数;mock 模式为 nil。
     private var connectionSecrets: (password: String?, passphrase: String?)?
+    /// 冲突弹窗选择后需要继续的传输上下文。
+    private var conflictContext: (
+        direction: TransferDirection,
+        name: String,
+        size: UInt64,
+        source: String,
+        destination: String
+    )?
+    /// 已自动刷新过的完成任务 id,避免重复刷新。
+    private var refreshedTaskIDs: Set<UUID> = []
+    /// 测试注入点:覆盖本地目录扫描行为。
+    var scanLocalHandler: (([String], String) -> [BatchItemRecord])?
+    /// 测试注入点:覆盖远程目录扫描行为。
+    var scanRemoteHandler: (([String], String) -> [BatchItemRecord])?
+    /// 待刷新面板标记;完成事件通过 debounce 合并,避免目录传输产生大量文件时频繁刷新。
+    private var pendingReload: (local: Bool, remote: Bool) = (false, false)
+    private var reloadWorkItem: DispatchWorkItem?
+    private var cancellables = Set<AnyCancellable>()
 
     init(host: HostEntry, transfers: TransferStore) {
         self.host = host
@@ -302,6 +346,56 @@ final class SftpSessionStore: ObservableObject {
                 rootTitle: "远程"
             )
         )
+        observeCompletedTransfers()
+    }
+
+    /// 监听传输任务完成,自动刷新受影响的面板。
+    /// 通过 0.3s debounce 合并多个同时完成的文件任务,避免目录传输时反复刷新。
+    private func observeCompletedTransfers() {
+        transfers.$tasks
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] tasks in
+                guard let self else { return }
+                var needsLocal = false
+                var needsRemote = false
+                for task in tasks where task.status == .done && !self.refreshedTaskIDs.contains(task.id) {
+                    self.refreshedTaskIDs.insert(task.id)
+                    switch task.direction {
+                    case .upload:
+                        if task.destination.hasPrefix(self.remotePane.path) { needsRemote = true }
+                    case .download:
+                        if task.destination.hasPrefix(self.localPane.path) { needsLocal = true }
+                    }
+                }
+                if needsLocal { self.pendingReload.local = true }
+                if needsRemote { self.pendingReload.remote = true }
+                // 清理已不在任务列表中的旧 ID，避免无限增长。
+                let liveIDs = Set(tasks.map(\.id))
+                self.refreshedTaskIDs = self.refreshedTaskIDs.intersection(liveIDs)
+                self.schedulePendingReload()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// 0.3s debounce：多次完成事件合并为一次面板刷新。
+    private func schedulePendingReload() {
+        guard pendingReload.local || pendingReload.remote else { return }
+        reloadWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                if self.pendingReload.local {
+                    self.pendingReload.local = false
+                    _ = await self.localPane.reload()
+                }
+                if self.pendingReload.remote {
+                    self.pendingReload.remote = false
+                    _ = await self.remotePane.reload()
+                }
+            }
+        }
+        reloadWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     /// 用真实后端初始化远程面板;调用前需先通过连接门控取得密码/口令。
@@ -319,6 +413,7 @@ final class SftpSessionStore: ObservableObject {
                 passphrase: passphrase
             )
         )
+        Logger.shared.info("SFTP 已连接 host=\(host.address):\(host.port)", module: LogModule.sftp)
     }
 
     private func resolveHomeDir(password: String?, passphrase: String?) async -> String {
@@ -331,6 +426,7 @@ final class SftpSessionStore: ObservableObject {
             )
         } catch {
             // 兜底：解析失败时使用 `/`，让用户仍能手动导航。
+            Logger.shared.error("home 目录解析失败 host=\(host.address):\(host.port); 原因=\(error.localizedDescription)", module: LogModule.sftp)
             return "/"
         }
     }
@@ -358,30 +454,226 @@ final class SftpSessionStore: ObservableObject {
 
     // MARK: - 本地栏操作
 
-    func selectLocal(_ name: String) { selectedLocal = name }
-    func enterLocal(_ name: String) async { if await localPane.enter(name) { selectedLocal = nil } }
-    func goUpLocal() async { await localPane.goUp(); selectedLocal = nil }
-    func navigateLocal(to path: String) async { await localPane.navigate(to: path); selectedLocal = nil }
+    /// 单选模式下替换为单个选中项;多选模式下追加/移除该项。
+    func selectLocal(_ name: String, append: Bool = false) {
+        if append {
+            if selectedLocalSet.contains(name) {
+                selectedLocalSet.remove(name)
+            } else {
+                selectedLocalSet.insert(name)
+            }
+        } else {
+            selectedLocalSet = [name]
+        }
+    }
+    func enterLocal(_ name: String) async { if await localPane.enter(name) { selectedLocalSet.removeAll() } }
+    func goUpLocal() async { await localPane.goUp(); selectedLocalSet.removeAll() }
+    func navigateLocal(to path: String) async { await localPane.navigate(to: path); selectedLocalSet.removeAll() }
 
     // MARK: - 远程栏操作
 
-    func selectRemote(_ name: String) { selectedRemote = name }
-    func enterRemote(_ name: String) async { if await remotePane.enter(name) { selectedRemote = nil } }
-    func goUpRemote() async { await remotePane.goUp(); selectedRemote = nil }
-    func navigateRemote(to path: String) async { await remotePane.navigate(to: path); selectedRemote = nil }
+    /// 单选模式下替换为单个选中项;多选模式下追加/移除该项。
+    func selectRemote(_ name: String, append: Bool = false) {
+        if append {
+            if selectedRemoteSet.contains(name) {
+                selectedRemoteSet.remove(name)
+            } else {
+                selectedRemoteSet.insert(name)
+            }
+        } else {
+            selectedRemoteSet = [name]
+        }
+    }
+    func enterRemote(_ name: String) async { if await remotePane.enter(name) { selectedRemoteSet.removeAll() } }
+    func goUpRemote() async { await remotePane.goUp(); selectedRemoteSet.removeAll() }
+    func navigateRemote(to path: String) async { await remotePane.navigate(to: path); selectedRemoteSet.removeAll() }
+
+    func toggleLocalMultiSelect() {
+        isLocalMultiSelect.toggle()
+        selectedLocalSet.removeAll()
+    }
+
+    func toggleRemoteMultiSelect() {
+        isRemoteMultiSelect.toggle()
+        selectedRemoteSet.removeAll()
+    }
 
     // MARK: - 传输挂载
 
-    /// 把本地选中项加入上传队列;无选中或条目不存在时返回 nil。
+    /// 把本地选中项加入上传队列。
+    /// 单选文件时保留覆盖确认;单选目录或多选时按目录边界生成任务组。
     @discardableResult
-    func uploadSelected() -> TransferTask? {
-        guard let name = selectedLocal,
+    func uploadSelected() async -> TransferTask? {
+        let selected = selectedLocalSet
+        guard !selected.isEmpty else { return nil }
+        if isLocalMultiSelect || selected.count > 1 {
+            let paths = selected.map { joinPath(localPane.path, $0) }
+            return upload(localPaths: Array(paths)).first
+        }
+        guard let name = selected.first,
               let entry = localPane.entries.first(where: { $0.name == name }) else { return nil }
-        let size = entry.isDirectory ? 3_145_728 : entry.size
+        if entry.isDirectory {
+            return upload(localPaths: [joinPath(localPane.path, name)]).first
+        }
+        return await uploadSingleFile(name: name, size: entry.size)
+    }
+
+    /// 把远程选中项加入下载队列。
+    /// 单选文件时保留覆盖确认;单选目录或多选时按目录边界生成任务组。
+    @discardableResult
+    func downloadSelected() async -> TransferTask? {
+        let selected = selectedRemoteSet
+        guard !selected.isEmpty else { return nil }
+        if isRemoteMultiSelect || selected.count > 1 {
+            let paths = selected.map { joinPath(remotePane.path, $0) }
+            return download(remotePaths: Array(paths)).first
+        }
+        guard let name = selected.first,
+              let entry = remotePane.entries.first(where: { $0.name == name }) else { return nil }
+        if entry.isDirectory {
+            return download(remotePaths: [joinPath(remotePane.path, name)]).first
+        }
+        return await downloadSingleFile(name: name, size: entry.size)
+    }
+
+    /// 批量上传本地路径(文件或目录),按目录边界生成任务组。
+    /// 仅单个文件时生成独立任务;多个文件时每个文件独立;目录单独成组。
+    @discardableResult
+    func upload(localPaths: [String]) -> [TransferTask] {
+        guard !localPaths.isEmpty else { return [] }
+        // 先用 Rust 扫描结果识别目录(测试 handler 也走这里),
+        // 回退到 FileManager 判断真实本地路径。
+        let scannedDirPaths = Set(scanLocalItems(paths: localPaths, destDir: remotePane.path).filter { $0.isDir }.map { $0.source })
+        let dirs = localPaths.filter { scannedDirPaths.contains($0) || isDirectory(at: $0) }
+        let files = localPaths.filter { !dirs.contains($0) }
+
+        var tasks: [TransferTask] = []
+
+        // 仅单个文件:走独立任务,与单选文件行为一致。
+        if dirs.isEmpty, files.count == 1, let file = files.first {
+            let name = (file as NSString).lastPathComponent
+            if let size = fileSize(at: file),
+               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(remotePane.path, name)) {
+                tasks.append(task)
+            }
+            return tasks
+        }
+
+        // 多个文件:每个文件独立任务,不组成任务组;扫描结果可提供大小回退(便于测试)。
+        for file in files {
+            let name = (file as NSString).lastPathComponent
+            let scannedSize = scanLocalItems(paths: [file], destDir: remotePane.path).first { $0.source == file }?.size
+            if let size = fileSize(at: file) ?? scannedSize,
+               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(remotePane.path, name)) {
+                tasks.append(task)
+            }
+        }
+
+        // 每个目录生成一个任务组,组内每个文件为独立任务。
+        for dir in dirs {
+            let name = (dir as NSString).lastPathComponent
+            let destDir = joinPath(remotePane.path, name)
+            let items = scanLocalItems(paths: [dir], destDir: destDir)
+            tasks += enqueueGroup(direction: .upload, groupName: name, items: items)
+        }
+
+        return tasks
+    }
+
+    /// 批量下载远程路径(文件或目录),按目录边界生成任务组。
+    @discardableResult
+    func download(remotePaths: [String]) -> [TransferTask] {
+        guard !remotePaths.isEmpty else { return [] }
+        // 远程路径类型需通过 Rust 扫描结果中的 isDir 判断;先全部交给扫描器。
+        let items = scanRemoteItems(paths: remotePaths, destDir: localPane.path)
+        let allDirs = items.filter { $0.isDir }.map { $0.source }
+        // 只取真正的顶层目录：不是其他目录的前缀，避免嵌套子目录被重复建组。
+        let topLevelDirs = Set(allDirs.filter { dir in
+            !allDirs.contains(where: { $0 != dir && dir.hasPrefix($0 + "/") })
+        })
+
+        var tasks: [TransferTask] = []
+
+        // 仅单个文件:走独立任务。
+        if items.count == 1, let item = items.first, !item.isDir {
+            return enqueueSingle(direction: .download, name: (item.source as NSString).lastPathComponent, size: item.size, source: item.source, destination: item.destination).map { [$0] } ?? []
+        }
+
+        // 顶层文件:独立任务(不属于任何顶层目录的后代)。
+        let topLevelFiles = items.filter { item in
+            !item.isDir && !topLevelDirs.contains(where: { item.source.hasPrefix($0 + "/") })
+        }
+        for item in topLevelFiles {
+            if let task = enqueueSingle(direction: .download, name: (item.source as NSString).lastPathComponent, size: item.size, source: item.source, destination: item.destination) {
+                tasks.append(task)
+            }
+        }
+
+        // 每个顶层目录一个任务组。
+        for dirSource in topLevelDirs {
+            let groupName = (dirSource as NSString).lastPathComponent
+            let groupItems = items.filter { $0.source == dirSource || $0.source.hasPrefix(dirSource + "/") }
+            tasks += enqueueGroup(direction: .download, groupName: groupName, items: groupItems)
+        }
+
+        return tasks
+    }
+
+    /// 用户已决策覆盖确认:覆盖则加入队列,跳过则取消。
+    func resolveConflict(overwrite: Bool) {
+        guard let context = conflictContext else {
+            pendingConflict = nil
+            return
+        }
+        pendingConflict = nil
+        defer { conflictContext = nil }
+        guard overwrite else { return }
+        _ = enqueueSingle(
+            direction: context.direction,
+            name: context.name,
+            size: context.size,
+            source: context.source,
+            destination: context.destination
+        )
+    }
+
+    // MARK: - 私有辅助
+
+    private func uploadSingleFile(name: String, size: UInt64) async -> TransferTask? {
+        let source = joinPath(localPane.path, name)
+        let destination = joinPath(remotePane.path, name)
+        if connectionSecrets != nil,
+           let conflict = try? await checkUploadConflict(name: name, source: source, destination: destination) {
+            conflictContext = (.upload, name, size, source, destination)
+            pendingConflict = conflict
+            return nil
+        }
+        return enqueueSingle(direction: .upload, name: name, size: size, source: source, destination: destination)
+    }
+
+    private func downloadSingleFile(name: String, size: UInt64) async -> TransferTask? {
+        let source = joinPath(remotePane.path, name)
+        let destination = joinPath(localPane.path, name)
+        if connectionSecrets != nil,
+           let conflict = try? await checkDownloadConflict(name: name, source: source, destination: destination) {
+            conflictContext = (.download, name, size, source, destination)
+            pendingConflict = conflict
+            return nil
+        }
+        return enqueueSingle(direction: .download, name: name, size: size, source: source, destination: destination)
+    }
+
+    private func enqueueSingle(
+        direction: TransferDirection,
+        name: String,
+        size: UInt64,
+        source: String,
+        destination: String
+    ) -> TransferTask? {
         let id = transfers.add(
-            direction: .upload, name: name, size: size,
-            source: localPane.path + "/" + name,
-            destination: remotePane.path + "/" + name,
+            direction: direction, name: name, size: size,
+            source: source,
+            destination: destination,
             hostID: host.id,
             password: connectionSecrets?.password,
             passphrase: connectionSecrets?.passphrase
@@ -389,21 +681,159 @@ final class SftpSessionStore: ObservableObject {
         return transfers.tasks.first { $0.id == id }
     }
 
-    /// 把远程选中项加入下载队列;无选中或条目不存在时返回 nil。
-    @discardableResult
-    func downloadSelected() -> TransferTask? {
-        guard let name = selectedRemote,
-              let entry = remotePane.entries.first(where: { $0.name == name }) else { return nil }
-        let size = entry.isDirectory ? 6_291_456 : entry.size
-        let id = transfers.add(
-            direction: .download, name: name, size: size,
-            source: remotePane.path + "/" + name,
-            destination: localPane.path + "/" + name,
+    private func enqueueGroup(
+        direction: TransferDirection,
+        groupName: String,
+        items: [BatchItemRecord]
+    ) -> [TransferTask] {
+        let fileItems = items.filter { !$0.isDir }
+        guard !fileItems.isEmpty else { return [] }
+        let groupID = UUID()
+        var tasks: [TransferTask] = []
+        for item in fileItems {
+            let id = transfers.add(
+                direction: direction,
+                name: (item.source as NSString).lastPathComponent,
+                size: item.size,
+                source: item.source,
+                destination: item.destination,
+                hostID: host.id,
+                groupID: groupID,
+                groupName: groupName,
+                password: connectionSecrets?.password,
+                passphrase: connectionSecrets?.passphrase
+            )
+            if let task = transfers.tasks.first(where: { $0.id == id }) {
+                tasks.append(task)
+            }
+        }
+        return tasks
+    }
+
+    private func scanLocalItems(paths: [String], destDir: String) -> [BatchItemRecord] {
+        if let handler = scanLocalHandler {
+            return handler(paths, destDir)
+        }
+        return (try? scanLocalBatch(sources: paths, destDir: destDir)) ?? []
+    }
+
+    private func scanRemoteItems(paths: [String], destDir: String) -> [BatchItemRecord] {
+        if let handler = scanRemoteHandler {
+            return handler(paths, destDir)
+        }
+        guard let secrets = connectionSecrets else { return [] }
+        return (try? scanRemoteBatch(
+            hostId: host.id,
+            sources: paths,
+            destDir: destDir,
+            password: secrets.password,
+            passphrase: secrets.passphrase
+        )) ?? []
+    }
+
+    private func fileSize(at path: String) -> UInt64? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) as NSDictionary else { return nil }
+        return attrs.fileSize()
+    }
+
+    private func isDirectory(at path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    private func parentPath(of path: String) -> String {
+        (path as NSString).deletingLastPathComponent
+    }
+
+    /// 安全拼接文件路径，避免双斜杠（如根目录 `/` 拼接后变成 `//name`）。
+    private func joinPath(_ dir: String, _ name: String) -> String {
+        if dir.hasSuffix("/") {
+            return dir + name
+        } else {
+            return dir + "/" + name
+        }
+    }
+
+    /// 删除本地文件或目录;删除成功后刷新本地面板。
+    /// 返回 `nil` 表示成功，否则返回错误描述。
+    func deleteLocal(name: String) async -> String? {
+        let path = joinPath(localPane.path, name)
+        do {
+            try FileManager.default.removeItem(atPath: path)
+            _ = await localPane.reload()
+            return nil
+        } catch {
+            let nsError = error as NSError
+            let description = nsError.localizedDescription
+            Logger.shared.error("删除本地文件失败: path=\(path), error=\(description)", module: LogModule.sftp)
+            return description
+        }
+    }
+
+    /// 删除远程文件或目录;删除成功后刷新远程面板。
+    /// 返回 `nil` 表示成功，否则返回错误描述。
+    func deleteRemote(name: String) async -> String? {
+        guard let entry = remotePane.entries.first(where: { $0.name == name }) else {
+            return "条目不存在"
+        }
+        let path = joinPath(remotePane.path, name)
+        do {
+            try PandaCoreBridge.shared.removeRemoteFile(
+                hostID: host.id,
+                remotePath: path,
+                isDirectory: entry.isDirectory,
+                password: connectionSecrets?.password,
+                passphrase: connectionSecrets?.passphrase,
+                trustOnFirstUse: false
+            )
+            _ = await remotePane.reload()
+            return nil
+        } catch {
+            let nsError = error as NSError
+            let description = nsError.localizedDescription
+            Logger.shared.error("删除远程文件失败: path=\(path), error=\(description)", module: LogModule.sftp)
+            return description
+        }
+    }
+
+    private func checkUploadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {
+        let record = try PandaCoreBridge.shared.checkUploadConflict(
             hostID: host.id,
+            localPath: source,
+            remotePath: destination,
             password: connectionSecrets?.password,
-            passphrase: connectionSecrets?.passphrase
+            passphrase: connectionSecrets?.passphrase,
+            trustOnFirstUse: false
         )
-        return transfers.tasks.first { $0.id == id }
+        return record.map {
+            PendingConflict(
+                name: name,
+                sourceSize: $0.sourceSize,
+                sourceDate: $0.sourceMtime.map { Date(timeIntervalSince1970: Double($0)) },
+                targetSize: $0.targetSize,
+                targetDate: $0.targetMtime.map { Date(timeIntervalSince1970: Double($0)) }
+            )
+        }
+    }
+
+    private func checkDownloadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {
+        let record = try PandaCoreBridge.shared.checkDownloadConflict(
+            hostID: host.id,
+            remotePath: source,
+            localPath: destination,
+            password: connectionSecrets?.password,
+            passphrase: connectionSecrets?.passphrase,
+            trustOnFirstUse: false
+        )
+        return record.map {
+            PendingConflict(
+                name: name,
+                sourceSize: $0.sourceSize,
+                sourceDate: $0.sourceMtime.map { Date(timeIntervalSince1970: Double($0)) },
+                targetSize: $0.targetSize,
+                targetDate: $0.targetMtime.map { Date(timeIntervalSince1970: Double($0)) }
+            )
+        }
     }
 
     // MARK: - 会话释放

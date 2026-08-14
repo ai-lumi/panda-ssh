@@ -1,19 +1,26 @@
 //! Core library for Panda SSH: host config, known-hosts, SSH and SFTP.
 
+pub mod batch;
 pub mod config;
+pub mod connection_pool;
 pub mod groups;
 pub mod hostkey;
 pub mod sftp;
 pub mod snippets;
 pub mod ssh;
 
+pub use batch::{
+    execute_batch_download, execute_batch_upload, scan_local_sources, scan_remote_sources,
+    BatchConflictCallback, BatchItem, BatchOutcome, BatchPlan, BatchProgressCallback,
+    BatchTransferOptions, ConflictResolution, ScanOptions,
+};
 pub use config::{AuthMethod, ConfigStore, HostConfig, TomlConfigStore};
 pub use groups::{
     delete_group_cascade, descendant_ids, move_group, Group, GroupStore, TomlGroupStore,
     MAX_GROUP_DEPTH,
 };
 pub use hostkey::{HostKeyStatus, KnownHostStatus, KnownHosts, fingerprint_sha256};
-pub use sftp::{RemoteFile, SftpClient};
+pub use sftp::{FileConflictInfo, RemoteFile, SftpClient};
 pub use snippets::{Snippet, SnippetStore};
 pub use ssh::{Credentials, ExecOutput, ShellSession, SshSession, UnknownHostKeyPolicy};
 

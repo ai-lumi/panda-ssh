@@ -92,3 +92,145 @@ SFTP 标签页 SHALL 以左栏本地文件系统、右栏远程文件系统的�
 - **WHEN** 用户从该主机打开标签页
 - **THEN** 标签页内显示失败原因，并提供「重试」或「关闭」操作
 
+### Requirement: 侧栏主机行单击选中
+
+侧栏主机行 SHALL 支持单击选中；打开终端等操作通过右键/长按上下文菜单提供。
+
+#### Scenario: 单击主机
+
+- **WHEN** 单击侧栏中的主机行
+- **THEN** 该行高亮，右侧显示主机详情
+
+#### Scenario: 双击主机
+
+- **GIVEN** 侧栏中的主机行
+- **WHEN** 双击该行
+- **THEN** 不触发任何操作；打开终端已移至右键/长按菜单
+
+#### Scenario: 右键主机打开终端
+
+- **GIVEN** 侧栏中显示主机 `web-prod`
+- **WHEN** 右键 `web-prod` 并选择「打开终端」
+- **THEN** 为该主机新建终端标签页
+
+### Requirement: 面包屑不重复 rootTitle
+
+SFTP 双栏顶部的面包屑 SHALL 不重复显示已作为栏头标签出现的 rootTitle。
+
+#### Scenario: 在远程根目录
+
+- **GIVEN** 远程 rootTitle 为「远程 — ssh-test」
+- **WHEN** 当前路径等于根目录
+- **THEN** 面包屑区域为空，仅左侧栏头显示「远程 — ssh-test」
+
+### Requirement: SFTP 文件列表目录进入
+
+SFTP 双栏文件列表 SHALL 支持双击目录进入子目录；文件与目录 SHALL 均支持单击选中。
+
+#### Scenario: 双击目录进入
+
+- **GIVEN** 文件列表中显示目录 `ssh-test`
+- **WHEN** 双击 `ssh-test`
+- **THEN** 远程面板切换到 `ssh-test` 目录内容
+
+#### Scenario: 单击选中目录
+
+- **WHEN** 单击文件列表中的目录
+- **THEN** 该目录高亮，但不进入
+
+#### Scenario: 单击文件选中
+
+- **GIVEN** 文件列表中显示文件 `upload-300m.bin`
+- **WHEN** 单击 `upload-300m.bin`
+- **THEN** 该行高亮，底部出现下载按钮
+
+### Requirement: 返回顶级目录
+
+SFTP 双栏顶部标题 SHALL 作为返回顶级目录的入口；点击后当前面板 SHALL 回到根目录。
+
+#### Scenario: 点击标题返回顶级
+
+- **GIVEN** 用户已深入 `ssh-test/sub/dir`
+- **WHEN** 点击顶部「远程 — host.name」标题
+- **THEN** 远程面板回到 `/share/homes/lwq/ssh-test`（该面板 root）
+
+### Requirement: SFTP 文件行上下文菜单
+
+SFTP 文件行 SHALL 支持右键（macOS）或长按（iPadOS）呼出上下文菜单，菜单项根据文件类型与所在面板动态变化。
+
+#### Scenario: 右键远程文件
+
+- **GIVEN** 远程面板中显示文件 `app.log`
+- **WHEN** 右键 `app.log`
+- **THEN** 弹出菜单，包含「下载」选项
+
+#### Scenario: 右键本地目录
+
+- **GIVEN** 本地面板中显示目录 `Documents`
+- **WHEN** 右键 `Documents`
+- **THEN** 弹出菜单，包含「进入」和「上传」选项
+
+### Requirement: 传输完成后自动刷新
+
+上传完成后，若目标路径位于当前远程面板目录，SFTP 远程面板 SHALL 自动刷新；下载完成后，若目标路径位于当前本地面板目录，本地面板 SHALL 自动刷新。
+
+#### Scenario: 上传完成后刷新远程面板
+
+- **GIVEN** 当前远程面板位于 `/share/homes/lwq/ssh-test`
+- **WHEN** 上传 `deploy.tar.gz` 到该目录且任务完成
+- **THEN** 远程面板自动重新列出目录，`deploy.tar.gz` 出现在列表中
+
+#### Scenario: 下载完成后刷新本地面板
+
+- **GIVEN** 当前本地面板位于 `/tmp/panda-ssh-manual-test`
+- **WHEN** 从远程下载 `app.log` 到该目录且任务完成
+- **THEN** 本地面板自动重新列出目录，`app.log` 出现在列表中
+
+### Requirement: 手动刷新当前目录
+
+SFTP 双栏顶部 SHALL 提供手动刷新按钮，点击后刷新当前面板目录内容。
+
+#### Scenario: 点击刷新按钮
+
+- **GIVEN** 当前本地面板显示旧文件列表
+- **WHEN** 点击顶部刷新按钮
+- **THEN** 本地面板重新加载并显示最新文件列表
+
+### Requirement: SFTP 文件列表删除
+
+SFTP 文件列表的每一行 SHALL 在右键（macOS）或长按（iPadOS）菜单中提供「删除」选项；删除前 SHALL 弹出二次确认框；确认后本地条目 SHALL 通过文件系统删除，远程条目 SHALL 通过 SFTP 删除。
+
+#### Scenario: 删除本地文件
+
+- **GIVEN** 本地文件列表中有一个文件 `report.pdf`
+- **WHEN** 用户右键/长按该文件并选择「删除」，然后在确认框中确认
+- **THEN** `report.pdf` 从本地文件系统删除，本地面板自动刷新
+
+#### Scenario: 删除远程空目录
+
+- **GIVEN** 远程文件列表中有一个空目录 `old-logs`
+- **WHEN** 用户右键/长按该目录并选择「删除」，然后在确认框中确认
+- **THEN** `old-logs` 从远端删除，远程面板自动刷新
+
+#### Scenario: 取消删除
+
+- **GIVEN** 用户右键/长按某个文件并选择「删除」
+- **WHEN** 用户在确认框中选择「取消」
+- **THEN** 该文件/目录未被删除
+
+### Requirement: 传输面板按任务组展示
+
+传输面板 SHALL 将具有相同 `groupID` 的任务聚合在同一任务组下展示，无 `groupID` 的任务作为独立任务展示。每个任务组 SHALL 显示组名、组内进度汇总与批量操作按钮，组内每个文件任务 SHALL 显示独立进度与操作。
+
+#### Scenario: 目录传输任务组展示
+
+- **GIVEN** 目录 `backup` 的上传生成了 3 个文件任务
+- **WHEN** 打开传输面板
+- **THEN** 面板中显示一个名为 `backup` 的组，组内列出 3 个文件任务，每个任务有自己的进度条和取消/重试按钮，组头有「停止全部」和「重试失败」按钮
+
+#### Scenario: 独立任务与任务组共存
+
+- **GIVEN** 队列中有一个目录任务组 `backup` 和一个独立文件任务 `report.pdf`
+- **WHEN** 打开传输面板
+- **THEN** `backup` 组与 `report.pdf` 独立任务均可见，互不影响
+

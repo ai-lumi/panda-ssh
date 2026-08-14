@@ -38,11 +38,7 @@ struct HostDetailView: View {
                 }
                 .padding(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
                 .frame(maxWidth: 520)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.primary.opacity(0.09), lineWidth: 1)
-                )
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
             HStack(spacing: 10) {
                 Button {
@@ -101,7 +97,7 @@ private struct Chip: View {
         HStack(spacing: 4) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: 9))
+                    .imageScale(.small)
             }
             Text(text)
         }

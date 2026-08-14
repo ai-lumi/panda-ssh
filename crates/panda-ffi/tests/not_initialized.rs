@@ -4,7 +4,10 @@
 //! 该文件运行在独立进程里（与其它集成测试分开），确保全局 `STORES` 未被
 //! 其它测试初始化。
 
-use panda_ffi::{delete_host, init_store, list_hosts, save_host, sftp_list, test_connection};
+use panda_ffi::{
+    delete_host, init_store, list_hosts, save_host, sftp_check_download_conflict,
+    sftp_check_upload_conflict, sftp_list, shell_open, test_connection,
+};
 use panda_ffi::{accept_unknown_host_key, host_key_status};
 use panda_ffi::{delete_group, list_groups, move_group, save_group};
 use panda_ffi::{AuthMethodEnum, GroupRecord, HostConfigRecord, PandaError};
@@ -66,6 +69,18 @@ fn store_not_initialized_returns_not_initialized() {
         accept_unknown_host_key("h".into(), 22, "ssh-ed25519 AAAA".into()),
         Err(PandaError::NotInitialized)
     ));
+    assert!(matches!(
+        sftp_check_upload_conflict("x".into(), "/tmp/a".into(), "/remote/a".into(), None, None, true),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        sftp_check_download_conflict("x".into(), "/remote/a".into(), "/tmp/a".into(), None, None, true),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        shell_open("x".into(), None, None, true),
+        Err(PandaError::NotInitialized)
+    ));
 }
 
 #[test]
@@ -80,3 +95,4 @@ fn init_store_with_bad_path_returns_error() {
 
     let _ = std::fs::remove_dir_all(&parent);
 }
+

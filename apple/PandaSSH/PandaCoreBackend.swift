@@ -25,8 +25,10 @@ final class PandaCoreBackend: AppBackend {
             ConfigSync.shared.startObserving { [weak self] in
                 self?.onRemoteChange?()
             }
+            Logger.shared.info("FFI 初始化成功", module: LogModule.ffi)
         } catch {
             startupError = error.localizedDescription
+            Logger.shared.error("FFI 初始化失败; 原因=\(error.localizedDescription)", module: LogModule.ffi)
         }
     }
 

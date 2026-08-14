@@ -26,11 +26,10 @@ private struct ToastOverlay: ViewModifier {
             if let message = center.message {
                 Text(message)
                     .font(.callout)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 7)
-                    .background(Color(white: 0.16).opacity(0.92), in: Capsule())
-                    .shadow(radius: 8)
+                    .background(.regularMaterial, in: Capsule())
                     .padding(.top, 12)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }

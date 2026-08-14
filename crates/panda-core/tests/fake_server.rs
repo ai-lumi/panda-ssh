@@ -11,17 +11,19 @@ use std::time::Duration;
 
 use panda_core::config::AuthMethod;
 use panda_core::{
-    Credentials, Error, HostConfig, KnownHostStatus, KnownHosts, SftpClient, ShellSession,
-    SshSession, UnknownHostKeyPolicy,
+    execute_batch_download, execute_batch_upload, scan_remote_sources, BatchTransferOptions,
+    ConflictResolution, Credentials, Error, HostConfig, KnownHostStatus, KnownHosts, ScanOptions,
+    SftpClient, ShellSession, SshSession, UnknownHostKeyPolicy,
 };
+use panda_core::connection_pool::ConnectionPool;
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 const USERNAME: &str = "panda";
 const PASSWORD: &str = "s3cret";
@@ -100,6 +102,13 @@ impl russh::server::Handler for TestHandler {
             }
             // Never finishes: used to test the client-side exec timeout.
             "hang" => {}
+            // Sends extended data with ext != 1, which the client should ignore.
+            "ext" => {
+                session.extended_data(channel, 0, b"ignored ext data".to_vec())?;
+                session.data(channel, b"after ext".to_vec())?;
+                session.exit_status_request(channel, 0)?;
+                session.close(channel)?;
+            }
             _ => {
                 session.exit_status_request(channel, 0)?;
                 session.close(channel)?;
@@ -204,6 +213,9 @@ struct FailRules {
     fail_read: HashSet<String>,
     fail_close: HashSet<String>,
     fail_mkdir: HashSet<String>,
+    fail_rmdir: HashSet<String>,
+    fail_remove: HashSet<String>,
+    no_mtime: HashSet<String>,
 }
 
 /// A tiny in-memory filesystem backing the SFTP subsystem: flat maps of
@@ -264,9 +276,13 @@ fn basename(path: &str) -> String {
 }
 
 fn attrs_for(size: u64, is_dir: bool) -> FileAttributes {
+    attrs_for_with_mtime(size, is_dir, Some(1_700_000_000))
+}
+
+fn attrs_for_with_mtime(size: u64, is_dir: bool, mtime: Option<u32>) -> FileAttributes {
     let mut attrs = FileAttributes {
         size: Some(size),
-        mtime: Some(1_700_000_000),
+        mtime,
         ..Default::default()
     };
     if is_dir {
@@ -405,12 +421,15 @@ impl russh_sftp::server::Handler for MemFs {
             return Err(StatusCode::Eof);
         }
         let mut entries = Vec::new();
+        let fail = self.fail.lock().await;
         for (file, content) in self.files.lock().await.iter() {
             if parent_of(file) == path {
-                entries.push(File::new(
-                    basename(file),
-                    attrs_for(content.len() as u64, false),
-                ));
+                let attrs = if fail.no_mtime.contains(file) {
+                    attrs_for_with_mtime(content.len() as u64, false, None)
+                } else {
+                    attrs_for(content.len() as u64, false)
+                };
+                entries.push(File::new(basename(file), attrs));
             }
         }
         for dir in self.dirs.lock().await.iter() {
@@ -422,6 +441,9 @@ impl russh_sftp::server::Handler for MemFs {
     }
 
     async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        if self.fail.lock().await.fail_remove.contains(&filename) {
+            return Err(StatusCode::Failure);
+        }
         if self.files.lock().await.remove(&filename).is_some() {
             Ok(Self::ok(id))
         } else {
@@ -438,16 +460,51 @@ impl russh_sftp::server::Handler for MemFs {
         if self.fail.lock().await.fail_mkdir.contains(&path) {
             return Err(StatusCode::Failure);
         }
+        if self.dirs.lock().await.contains(&path) || path == "/" {
+            return Ok(Status {
+                id,
+                status_code: StatusCode::Failure,
+                error_message: "already exists".to_string(),
+                language_tag: "en-US".to_string(),
+            });
+        }
+        let parent = parent_of(&path);
+        if parent != "/" && !self.dirs.lock().await.contains(&parent) {
+            return Err(StatusCode::NoSuchFile);
+        }
         self.dirs.lock().await.insert(path);
         Ok(Self::ok(id))
     }
 
     async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        if self.fail.lock().await.fail_rmdir.contains(&path) {
+            return Err(StatusCode::Failure);
+        }
         if self.dirs.lock().await.remove(&path) {
             Ok(Self::ok(id))
         } else {
             Err(StatusCode::NoSuchFile)
         }
+    }
+
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        if let Some(content) = self.files.lock().await.get(&path) {
+            return Ok(Attrs {
+                id,
+                attrs: attrs_for(content.len() as u64, false),
+            });
+        }
+        if self.dirs.lock().await.contains(&path) || path == "/" {
+            return Ok(Attrs {
+                id,
+                attrs: attrs_for(0, true),
+            });
+        }
+        Err(StatusCode::NoSuchFile)
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        self.stat(id, path).await
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
@@ -868,7 +925,7 @@ async fn sftp_upload_directory_as_source_returns_error() {
 }
 
 #[tokio::test]
-async fn sftp_upload_to_nonexistent_parent_dir_returns_error() {
+async fn sftp_upload_creates_missing_parent_dirs() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
     let session = connect(port, dir.path(), PASSWORD).await.unwrap();
@@ -876,7 +933,34 @@ async fn sftp_upload_to_nonexistent_parent_dir_returns_error() {
 
     let local = dir.path().join("local.bin");
     std::fs::write(&local, b"x").unwrap();
-    assert!(sftp.upload(&local, "/no/dir/f.bin", None).await.is_err());
+    sftp.upload(&local, "/no/dir/f.bin", None).await.unwrap();
+
+    let entries = sftp.list_dir("/no/dir").await.unwrap();
+    let file = entries.iter().find(|f| f.name == "f.bin").expect("file missing");
+    assert!(!file.is_dir);
+    assert_eq!(file.size, 1);
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_upload_to_existing_parent_dir_still_works() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir_all("/existing/sub").await.unwrap();
+
+    let local = dir.path().join("local.bin");
+    std::fs::write(&local, b"y").unwrap();
+    sftp.upload(&local, "/existing/sub/f.bin", None).await.unwrap();
+
+    let entries = sftp.list_dir("/existing/sub").await.unwrap();
+    let file = entries.iter().find(|f| f.name == "f.bin").expect("file missing");
+    assert!(!file.is_dir);
+    assert_eq!(file.size, 1);
 
     sftp.close().await.unwrap();
     session.disconnect().await.unwrap();
@@ -1050,6 +1134,27 @@ async fn sftp_upload_close_failure_returns_error() {
 }
 
 #[tokio::test]
+async fn sftp_upload_with_cancel_close_failure_returns_error() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    fs.fail(|f| { f.fail_close.insert("/cancel-closed.bin".into()); })
+        .await;
+    let local = dir.path().join("local.bin");
+    std::fs::write(&local, b"x").unwrap();
+    assert!(
+        sftp.upload_with_cancel(&local, "/cancel-closed.bin", None, None)
+            .await
+            .is_err()
+    );
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
 async fn sftp_download_read_failure_returns_error() {
     let (port, fs) = start_server_with_fs().await;
     let dir = tempfile::tempdir().unwrap();
@@ -1086,11 +1191,137 @@ async fn sftp_create_dir_failure_returns_error() {
 }
 
 #[tokio::test]
+async fn sftp_create_dir_all_creates_missing_parents() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    // 远端不存在 /remote，create_dir_all 应递归创建 /remote 与 /remote/nested。
+    sftp.create_dir_all("/remote/nested").await.unwrap();
+    let entries = sftp.list_dir("/remote").await.unwrap();
+    assert!(entries.iter().any(|e| e.name == "nested" && e.is_dir));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_create_dir_all_ignores_existing_directory() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/existing").await.unwrap();
+    // 目录已存在时 create_dir_all 应视为成功。
+    sftp.create_dir_all("/existing").await.unwrap();
+    sftp.create_dir_all("/existing/sub").await.unwrap();
+    let entries = sftp.list_dir("/existing").await.unwrap();
+    assert!(entries.iter().any(|e| e.name == "sub" && e.is_dir));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_create_dir_all_fails_when_permission_denied() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    fs.fail(|f| { f.fail_mkdir.insert("/blocked/sub".into()); }).await;
+    assert!(sftp.create_dir_all("/blocked/sub").await.is_err());
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_remove_file_failure_returns_error() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let local = dir.path().join("f.txt");
+    std::fs::write(&local, b"data").unwrap();
+    sftp.upload(&local, "/remove-blocked.txt", None).await.unwrap();
+    fs.fail(|f| { f.fail_remove.insert("/remove-blocked.txt".into()); })
+        .await;
+
+    assert!(sftp.remove_file("/remove-blocked.txt").await.is_err());
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_remove_dir_failure_returns_error() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/rmdir-blocked").await.unwrap();
+    fs.fail(|f| { f.fail_rmdir.insert("/rmdir-blocked".into()); })
+        .await;
+
+    assert!(sftp.remove_dir("/rmdir-blocked").await.is_err());
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn exec_ignores_extended_data_with_non_stderr_extension() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+
+    let output = session.exec("ext").await.unwrap();
+    assert_eq!(output.stdout, b"after ext");
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.exit_status, Some(0));
+
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connect_to_refused_port_returns_ssh_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    // 找一个大概率未被占用的本地端口。
+    let result = SshSession::connect(
+        &HostConfig {
+            id: "x".into(),
+            name: "x".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            username: USERNAME.into(),
+            auth: AuthMethod::Password { password_ref: None },
+            notes: None,
+            group_id: None,
+        },
+        Credentials::Password(PASSWORD.to_string()),
+        &mut known_hosts,
+        UnknownHostKeyPolicy::AcceptAndStore,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(Error::Ssh(_))),
+        "expected Ssh error, got {:?}",
+        result.map(|_| "session")
+    );
+}
+
+#[tokio::test]
 async fn shell_session_writes_and_reads_output() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
     let session = connect(port, dir.path(), PASSWORD).await.unwrap();
-    let mut shell = ShellSession::open(session).await.unwrap();
+    let mut shell = ShellSession::open(Arc::new(session)).await.unwrap();
 
     // 等待 banner 输出
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1106,11 +1337,23 @@ async fn shell_session_writes_and_reads_output() {
 }
 
 #[tokio::test]
+async fn shell_close_twice_is_idempotent() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let mut shell = ShellSession::open(Arc::new(session)).await.unwrap();
+
+    shell.close().await.unwrap();
+    // 第二次 close:reader 已被 take，应走 else 分支且不 panic。
+    let _ = shell.close().await;
+}
+
+#[tokio::test]
 async fn shell_session_read_write_after_close_returns_error() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
     let session = connect(port, dir.path(), PASSWORD).await.unwrap();
-    let mut shell = ShellSession::open(session).await.unwrap();
+    let mut shell = ShellSession::open(Arc::new(session)).await.unwrap();
 
     shell.close().await.unwrap();
     assert!(matches!(shell.read(1024), Err(Error::ShellSessionClosed)));
@@ -1189,6 +1432,44 @@ async fn sftp_upload_cancel_stops_midway() {
 }
 
 #[tokio::test]
+async fn sftp_home_dir_returns_canonicalized_dot() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let home = sftp.home_dir().await.unwrap();
+    assert!(!home.is_empty(), "home_dir should return a non-empty path");
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_list_dir_handles_missing_mtime() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let local = dir.path().join("no-mtime.bin");
+    std::fs::write(&local, b"data").unwrap();
+    sftp.upload(&local, "/no-mtime.bin", None).await.unwrap();
+    fs.fail(|f| { f.no_mtime.insert("/no-mtime.bin".into()); })
+        .await;
+
+    let entries = sftp.list_dir("/").await.unwrap();
+    let entry = entries
+        .iter()
+        .find(|f| f.name == "no-mtime.bin")
+        .expect("file missing from listing");
+    assert_eq!(entry.modified, None);
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
 async fn sftp_download_cancel_stops_midway() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
@@ -1232,4 +1513,916 @@ async fn sftp_download_cancel_stops_midway() {
     );
 
     session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_upload_pause_and_resume_completes() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let local = dir.path().join("pause.bin");
+    let payload = vec![7u8; 5_000_000];
+    std::fs::write(&local, &payload).unwrap();
+
+    let pause = Arc::new(AtomicBool::new(false));
+    let resume = Arc::new(Notify::new());
+    let progress = Arc::new(std::sync::Mutex::new(0u64));
+    let progress_cb = progress.clone();
+    let cb = Arc::new(move |sent: u64, _total: u64| {
+        *progress_cb.lock().unwrap() = sent;
+    });
+
+    let pause_clone = pause.clone();
+    let resume_clone = resume.clone();
+    let progress_clone = progress.clone();
+    tokio::spawn(async move {
+        // 等待进度开始增长后暂停。
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if *progress_clone.lock().unwrap() > 0 {
+                break;
+            }
+        }
+        pause_clone.store(true, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let frozen = *progress_clone.lock().unwrap();
+        // 暂停期间进度不应继续增长。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            *progress_clone.lock().unwrap(),
+            frozen,
+            "进度在暂停期间应停止增长"
+        );
+        pause_clone.store(false, Ordering::Relaxed);
+        resume_clone.notify_waiters();
+    });
+
+    sftp.upload_with_pause(&local, "/pause.bin", Some(cb), None, Some(pause), Some(resume))
+        .await
+        .unwrap();
+
+    assert_eq!(*progress.lock().unwrap(), payload.len() as u64);
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sftp_download_pause_and_resume_completes() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let remote = "/pause-download.bin";
+    let payload = vec![9u8; 5_000_000];
+    let upload_local = dir.path().join("upload-src.bin");
+    std::fs::write(&upload_local, &payload).unwrap();
+    sftp.upload(&upload_local, remote, None).await.unwrap();
+
+    let local = dir.path().join("pause-download.bin");
+    let pause = Arc::new(AtomicBool::new(false));
+    let resume = Arc::new(Notify::new());
+    let progress = Arc::new(std::sync::Mutex::new(0u64));
+    let progress_cb = progress.clone();
+    let cb = Arc::new(move |received: u64, _total: u64| {
+        *progress_cb.lock().unwrap() = received;
+    });
+
+    let pause_clone = pause.clone();
+    let resume_clone = resume.clone();
+    let progress_clone = progress.clone();
+    tokio::spawn(async move {
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if *progress_clone.lock().unwrap() > 0 {
+                break;
+            }
+        }
+        pause_clone.store(true, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let frozen = *progress_clone.lock().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            *progress_clone.lock().unwrap(),
+            frozen,
+            "进度在暂停期间应停止增长"
+        );
+        pause_clone.store(false, Ordering::Relaxed);
+        resume_clone.notify_waiters();
+    });
+
+    sftp.download_with_pause(remote, &local, Some(cb), None, Some(pause), Some(resume))
+        .await
+        .unwrap();
+
+    assert_eq!(*progress.lock().unwrap(), payload.len() as u64);
+    session.disconnect().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Batch scan tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn batch_scan_remote_directory_recursively() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/project").await.unwrap();
+    sftp.create_dir("/project/src").await.unwrap();
+    let readme = dir.path().join("README.md");
+    std::fs::write(&readme, b"readme").unwrap();
+    let main_swift = dir.path().join("main.swift");
+    std::fs::write(&main_swift, b"code").unwrap();
+    sftp.upload(&readme, "/project/README.md", None).await.unwrap();
+    sftp.upload(&main_swift, "/project/src/main.swift", None)
+        .await
+        .unwrap();
+
+    let plan = scan_remote_sources(&sftp, &["/project".to_string()], "/local", &ScanOptions::default())
+        .await
+        .unwrap();
+
+    let destinations: Vec<_> = plan.items.iter().map(|i| i.destination.clone()).collect();
+    assert!(destinations.contains(&"/local/project".to_string()));
+    assert!(destinations.contains(&"/local/project/README.md".to_string()));
+    assert!(destinations.contains(&"/local/project/src".to_string()));
+    assert!(destinations.contains(&"/local/project/src/main.swift".to_string()));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_scan_remote_multiple_sources() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"a").unwrap();
+    sftp.upload(&a, "/a.txt", None).await.unwrap();
+
+    sftp.create_dir("/folder").await.unwrap();
+    let b = dir.path().join("b.txt");
+    std::fs::write(&b, b"bb").unwrap();
+    sftp.upload(&b, "/folder/b.txt", None).await.unwrap();
+
+    let plan = scan_remote_sources(
+        &sftp,
+        &["/a.txt".to_string(), "/folder".to_string()],
+        "/local",
+        &ScanOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let destinations: Vec<_> = plan.items.iter().map(|i| i.destination.clone()).collect();
+    assert!(destinations.contains(&"/local/a.txt".to_string()));
+    assert!(destinations.contains(&"/local/folder".to_string()));
+    assert!(destinations.contains(&"/local/folder/b.txt".to_string()));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_scan_remote_empty_directory() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/empty").await.unwrap();
+    let plan = scan_remote_sources(&sftp, &["/empty".to_string()], "/local", &ScanOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].destination, "/local/empty");
+    assert!(plan.items[0].is_dir);
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_scan_remote_respects_max_depth() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/d1").await.unwrap();
+    sftp.create_dir("/d1/d2").await.unwrap();
+    sftp.create_dir("/d1/d2/d3").await.unwrap();
+    let deep = dir.path().join("deep.txt");
+    std::fs::write(&deep, b"deep").unwrap();
+    sftp.upload(&deep, "/d1/d2/d3/deep.txt", None).await.unwrap();
+
+    let opts = ScanOptions {
+        max_depth: 2,
+        ..Default::default()
+    };
+    let result = scan_remote_sources(&sftp, &["/d1".to_string()], "/local", &opts).await;
+    assert!(result.is_err());
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_directory_recursively() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    // 预先创建目标父目录，保持该测试继续验证"目标父目录已存在"场景。
+    sftp.create_dir("/remote").await.unwrap();
+
+    let src = dir.path().join("project");
+    tokio::fs::create_dir(&src).await.unwrap();
+    tokio::fs::write(src.join("README.md"), b"readme").await.unwrap();
+    let sub = src.join("src");
+    tokio::fs::create_dir(&sub).await.unwrap();
+    tokio::fs::write(sub.join("main.swift"), b"code").await.unwrap();
+
+    let plan = panda_core::scan_local_sources(&[src.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_upload(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert!(!outcome.cancelled);
+    assert!(outcome.errors.is_empty());
+    assert_eq!(outcome.completed.len(), 2);
+
+    let entries = sftp.list_dir("/remote/project").await.unwrap();
+    assert!(entries.iter().any(|e| e.name == "README.md"));
+    let src_entries = sftp.list_dir("/remote/project/src").await.unwrap();
+    assert!(src_entries.iter().any(|e| e.name == "main.swift"));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_skips_conflict_when_callback_returns_skip() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    let existing = dir.path().join("existing.txt");
+    tokio::fs::write(&existing, b"old").await.unwrap();
+    sftp.upload(&existing, "/remote/existing.txt", None).await.unwrap();
+
+    let local = dir.path().join("existing.txt");
+    tokio::fs::write(&local, b"new").await.unwrap();
+
+    let plan = panda_core::scan_local_sources(&[local.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+    let options = BatchTransferOptions::default();
+    let conflict_cb = Arc::new(|_item: &panda_core::BatchItem, _info: &panda_core::FileConflictInfo| {
+        ConflictResolution::Skip
+    });
+    let outcome = execute_batch_upload(&sftp, &plan, &options, Some(conflict_cb), None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.skipped.len(), 1);
+    assert!(outcome.completed.is_empty());
+
+    // 远程内容应保持不变。
+    let back = dir.path().join("back.txt");
+    sftp.download("/remote/existing.txt", &back).await.unwrap();
+    assert_eq!(std::fs::read(&back).unwrap(), b"old");
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_error_isolation_continues_by_default() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    tokio::fs::write(&a, b"a").await.unwrap();
+    tokio::fs::write(&b, b"bb").await.unwrap();
+
+    let plan = panda_core::scan_local_sources(&[a.clone(), b.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+
+    // 让 b.txt 上传失败。
+    fs.fail(|f| { f.fail_write.insert("/remote/b.txt".into()); }).await;
+
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_upload(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.completed.len(), 1);
+    assert_eq!(outcome.errors.len(), 1);
+    assert!(outcome.errors[0].contains("b.txt"));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_stop_on_error_halts_on_first_failure() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    tokio::fs::write(&a, b"a").await.unwrap();
+    tokio::fs::write(&b, b"bb").await.unwrap();
+
+    let plan = panda_core::scan_local_sources(&[a.clone(), b.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+
+    fs.fail(|f| { f.fail_write.insert("/remote/a.txt".into()); }).await;
+
+    let options = BatchTransferOptions { stop_on_error: true };
+    let result = execute_batch_upload(&sftp, &plan, &options, None, None, None).await;
+    assert!(result.is_err());
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_creates_missing_remote_parent() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    let src = dir.path().join("project");
+    tokio::fs::create_dir(&src).await.unwrap();
+    tokio::fs::write(src.join("README.md"), b"readme").await.unwrap();
+
+    // 远端 /remote 不存在，execute_batch_upload 应递归创建并上传成功。
+    let plan = panda_core::scan_local_sources(&[src.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_upload(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.errors.is_empty(), "unexpected errors: {:?}", outcome.errors);
+    assert_eq!(outcome.completed.len(), 1);
+    let entries = sftp.list_dir("/remote/project").await.unwrap();
+    assert!(entries.iter().any(|e| e.name == "README.md"));
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_ignores_existing_remote_directory() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    sftp.create_dir("/remote/project").await.unwrap();
+
+    let src = dir.path().join("project");
+    tokio::fs::create_dir(&src).await.unwrap();
+    tokio::fs::write(src.join("README.md"), b"readme").await.unwrap();
+
+    let plan = panda_core::scan_local_sources(&[src.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_upload(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.errors.is_empty(), "unexpected errors: {:?}", outcome.errors);
+    assert_eq!(outcome.completed.len(), 1);
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_upload_error_includes_source_and_destination() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    // 让远端目录创建失败，验证错误信息同时包含源路径与目标路径。
+    fs.fail(|f| { f.fail_mkdir.insert("/remote/project".into()); }).await;
+
+    let src = dir.path().join("project");
+    tokio::fs::create_dir(&src).await.unwrap();
+    tokio::fs::write(src.join("README.md"), b"readme").await.unwrap();
+
+    let plan = panda_core::scan_local_sources(&[src.clone()], "/remote", &ScanOptions::default())
+        .await
+        .unwrap();
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_upload(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    // 目录创建失败会导致其下文件上传也失败，因此错误数 >= 1。
+    assert!(!outcome.errors.is_empty());
+    let dir_error = outcome
+        .errors
+        .iter()
+        .find(|e| e.contains("/remote/project") && !e.contains("README.md"))
+        .expect("should have directory creation error");
+    assert!(
+        dir_error.contains(&src.to_string_lossy().to_string()),
+        "error should contain source path: {}",
+        dir_error
+    );
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_download_directory_recursively() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/project").await.unwrap();
+    sftp.create_dir("/project/src").await.unwrap();
+    let readme = dir.path().join("README.md");
+    std::fs::write(&readme, b"readme").unwrap();
+    let main_swift = dir.path().join("main.swift");
+    std::fs::write(&main_swift, b"code").unwrap();
+    sftp.upload(&readme, "/project/README.md", None).await.unwrap();
+    sftp.upload(&main_swift, "/project/src/main.swift", None)
+        .await
+        .unwrap();
+
+    let local_dest = dir.path().join("local");
+    let plan = scan_remote_sources(
+        &sftp,
+        &["/project".to_string()],
+        local_dest.to_str().unwrap(),
+        &ScanOptions::default(),
+    )
+    .await
+    .unwrap();
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_download(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert!(!outcome.cancelled);
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(outcome.completed.len(), 2);
+
+    assert!(local_dest.join("project").is_dir());
+    assert_eq!(std::fs::read(local_dest.join("project/README.md")).unwrap(), b"readme");
+    assert_eq!(std::fs::read(local_dest.join("project/src/main.swift")).unwrap(), b"code");
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_download_skips_conflict_when_callback_returns_skip() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    let remote = dir.path().join("existing.txt");
+    std::fs::write(&remote, b"remote").unwrap();
+    sftp.upload(&remote, "/remote/existing.txt", None).await.unwrap();
+
+    let local = dir.path().join("existing.txt");
+    std::fs::write(&local, b"local").unwrap();
+
+    let plan = scan_remote_sources(&sftp, &["/remote/existing.txt".to_string()], dir.path().to_str().unwrap(), &ScanOptions::default())
+        .await
+        .unwrap();
+    let options = BatchTransferOptions::default();
+    let conflict_cb = Arc::new(|_item: &panda_core::BatchItem, _info: &panda_core::FileConflictInfo| {
+        ConflictResolution::Skip
+    });
+    let outcome = execute_batch_download(&sftp, &plan, &options, Some(conflict_cb), None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.skipped.len(), 1);
+    assert!(outcome.completed.is_empty());
+    assert_eq!(std::fs::read(&local).unwrap(), b"local");
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_download_error_includes_source_and_destination() {
+    let (port, fs) = start_server_with_fs().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    let remote_file = dir.path().join("blocked.txt");
+    std::fs::write(&remote_file, b"secret").unwrap();
+    sftp.upload(&remote_file, "/remote/blocked.txt", None)
+        .await
+        .unwrap();
+
+    fs.fail(|f| { f.fail_read.insert("/remote/blocked.txt".into()); }).await;
+
+    let plan = scan_remote_sources(
+        &sftp,
+        &["/remote/blocked.txt".to_string()],
+        dir.path().to_str().unwrap(),
+        &ScanOptions::default(),
+    )
+    .await
+    .unwrap();
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_download(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.errors.len(), 1);
+    let error = &outcome.errors[0];
+    assert!(
+        error.contains("/remote/blocked.txt"),
+        "error should contain remote source path: {}",
+        error
+    );
+    assert!(
+        error.contains(&dir.path().join("blocked.txt").to_string_lossy().to_string()),
+        "error should contain local destination path: {}",
+        error
+    );
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_download_dir_creation_error_includes_paths() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+
+    sftp.create_dir("/remote").await.unwrap();
+    sftp.create_dir("/remote/project").await.unwrap();
+
+    let plan = scan_remote_sources(
+        &sftp,
+        &["/remote/project".to_string()],
+        dir.path().to_str().unwrap(),
+        &ScanOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    // 在本地目标路径上创建一个文件，使 create_dir_all 因"路径已存在且不是目录"失败。
+    let blocking = dir.path().join("project");
+    std::fs::write(&blocking, b"not a dir").unwrap();
+
+    let options = BatchTransferOptions::default();
+    let outcome = execute_batch_download(&sftp, &plan, &options, None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.errors.len(), 1);
+    let error = &outcome.errors[0];
+    assert!(
+        error.contains("/remote/project"),
+        "error should contain remote source path: {}",
+        error
+    );
+    assert!(
+        error.contains(&blocking.to_string_lossy().to_string()),
+        "error should contain local destination path: {}",
+        error
+    );
+
+    sftp.close().await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Connection pool tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn connection_pool_reuses_session_for_same_key() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let session1 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
+    let session2 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts2,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    // 同一个 Arc 引用。
+    assert!(Arc::ptr_eq(&session1, &session2), "pool should reuse the same session");
+
+    session1.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_creates_new_session_for_different_creds() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let session1 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
+    let session2 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password("wrong".to_string()),
+            &mut known_hosts2,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await;
+
+    assert!(session2.is_err());
+
+    session1.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_creates_new_when_pool_empty() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+
+    assert_eq!(pool.len().await, 0);
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let session = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pool.len().await, 1);
+
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_rebuilds_after_disconnect() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let session1 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    session1.disconnect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
+    let session2 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts2,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !Arc::ptr_eq(&session1, &session2),
+        "pool should create a new session after disconnect"
+    );
+
+    session2.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_idle_timeout_reclaims_session() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+    pool.start_cleanup_task();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let _session = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pool.len().await, 1);
+
+    // 等待超过空闲超时（30s）+ 扫描间隔（5s），让回收任务有机会执行。
+    tokio::time::sleep(Duration::from_secs(36)).await;
+
+    // 超时后池中条目被移除。底层连接可能已被服务器断开，
+    // 因此不调用 disconnect()，直接 drop Arc。
+    assert_eq!(
+        pool.len().await, 0,
+        "stale session should be reclaimed after idle timeout"
+    );
+}
+
+#[tokio::test]
+async fn connection_pool_active_session_not_reclaimed() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+    pool.start_cleanup_task();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let _session = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
+    let _session2 = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts2,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pool.len().await, 1, "active session should not be reclaimed");
+
+    _session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_concurrent_access_is_safe() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = Arc::new(ConnectionPool::new());
+
+    let mut handles = Vec::new();
+    for i in 0..4 {
+        let pool = Arc::clone(&pool);
+        let dir_path = dir.path().to_path_buf();
+        let cfg = host_cfg(port);
+        let handle = tokio::spawn(async move {
+            let mut known_hosts = KnownHosts::new(dir_path.join(format!("kh_{}", i)));
+            pool
+                .get_or_create(
+                    "test".to_string(),
+                    &cfg,
+                    Credentials::Password(PASSWORD.to_string()),
+                    &mut known_hosts,
+                    UnknownHostKeyPolicy::AcceptAndStore,
+                )
+                .await
+                .unwrap()
+        });
+        handles.push(handle);
+    }
+
+    let mut sessions = Vec::new();
+    for handle in handles {
+        sessions.push(handle.await.unwrap());
+    }
+
+    // 并发获取应全部成功，且至少有一个复用。
+    let first_ptr = Arc::as_ptr(&sessions[0]);
+    let any_reused = sessions.iter().any(|s| Arc::as_ptr(s) == first_ptr);
+    assert!(any_reused, "concurrent access should result in session reuse");
+
+    for s in sessions {
+        s.disconnect().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn connection_pool_remove_deletes_entry() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let _session = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pool.len().await, 1);
+    pool.remove("test", &Credentials::Password(PASSWORD.to_string())).await;
+    assert_eq!(pool.len().await, 0, "remove should delete the entry");
+
+    _session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_cleanup_on_empty_pool_is_noop() {
+    let pool = ConnectionPool::new();
+    pool.start_cleanup_task();
+
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(pool.len().await, 0, "cleanup on empty pool should be a no-op");
 }

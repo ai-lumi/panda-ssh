@@ -17,6 +17,13 @@ use uuid::Uuid;
 
 uniffi::setup_scaffolding!();
 
+mod batch_transfer;
+pub use batch_transfer::{
+    batch_transfer_cancel, batch_transfer_list, batch_transfer_status, scan_local_batch,
+    scan_remote_batch, start_batch_download, start_batch_upload, BatchItemRecord,
+    BatchTransferDirectionEnum, BatchTransferStatusEnum, BatchTransferStatusRecord,
+};
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -144,6 +151,27 @@ pub struct RemoteFileRecord {
     pub modified: Option<u64>,
 }
 
+/// SFTP 覆盖确认所需信息：源文件与目标文件的大小、最后修改时间。
+/// `*_mtime` 为 Unix 时间戳（秒），无法获取时为 `None`。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RemoteFileConflictRecord {
+    pub source_size: u64,
+    pub source_mtime: Option<u64>,
+    pub target_size: u64,
+    pub target_mtime: Option<u64>,
+}
+
+impl From<panda_core::FileConflictInfo> for RemoteFileConflictRecord {
+    fn from(info: panda_core::FileConflictInfo) -> Self {
+        Self {
+            source_size: info.source_size,
+            source_mtime: info.source_mtime,
+            target_size: info.target_size,
+            target_mtime: info.target_mtime,
+        }
+    }
+}
+
 /// File-level host key status (no connection needed). Without a presented
 /// key only `Unknown` / `Known` are reachable; a genuine key change surfaces
 /// as `PandaError::HostKeyMismatch` at connect time.
@@ -242,7 +270,7 @@ impl From<Group> for GroupRecord {
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-fn runtime() -> &'static Runtime {
+pub(crate) fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
 }
 
@@ -253,10 +281,10 @@ struct Stores {
     known_hosts: KnownHosts,
 }
 
-static STORES: OnceLock<Stores> = OnceLock::new();
+static STORES: Mutex<Option<Arc<Stores>>> = Mutex::new(None);
 
-fn stores() -> Result<&'static Stores, PandaError> {
-    STORES.get().ok_or(PandaError::NotInitialized)
+pub(crate) fn stores() -> Result<Arc<Stores>, PandaError> {
+    STORES.lock().unwrap().clone().ok_or(PandaError::NotInitialized)
 }
 
 static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, ShellSession>>> = OnceLock::new();
@@ -275,17 +303,17 @@ fn next_shell_id() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Initialize the config store and known_hosts under `config_dir`
-/// (the app passes its App Group container path). The first call wins;
-/// later calls are no-ops.
+/// (the app passes its App Group container path). 允许重新初始化,
+/// 使 panda-ffi 的集成测试可以在同进程中切换临时目录;App 仍只调用一次。
 #[uniffi::export]
 pub fn init_store(config_dir: String) -> Result<(), PandaError> {
     let dir = PathBuf::from(config_dir);
     std::fs::create_dir_all(&dir)?;
-    let _ = STORES.set(Stores {
+    *STORES.lock().unwrap() = Some(Arc::new(Stores {
         config: TomlConfigStore::new(dir.join("hosts.toml")),
         groups: TomlGroupStore::new(dir.join("groups.toml")),
         known_hosts: KnownHosts::new(dir.join("known_hosts")),
-    });
+    }));
     Ok(())
 }
 
@@ -384,7 +412,7 @@ pub fn move_group(id: String, new_parent_id: Option<String>) -> Result<(), Panda
 // Connection helpers
 // ---------------------------------------------------------------------------
 
-fn load_host(host_id: &str) -> Result<HostConfig, PandaError> {
+pub(crate) fn load_host(host_id: &str) -> Result<HostConfig, PandaError> {
     stores()?
         .config
         .get(host_id)?
@@ -393,7 +421,7 @@ fn load_host(host_id: &str) -> Result<HostConfig, PandaError> {
 
 /// Build credentials from the host's auth method; secrets are supplied by
 /// the caller (read from the keychain on the Swift side).
-fn credentials_for(
+pub(crate) fn credentials_for(
     cfg: &HostConfig,
     password: Option<String>,
     passphrase: Option<String>,
@@ -409,42 +437,49 @@ fn credentials_for(
     }
 }
 
-/// Fresh connection per call; no pooling at this stage. Unknown host keys
-/// follow `trust_on_first_use`: `false` (the UI default) rejects them with
-/// `UnknownHostKey` and never writes known_hosts; `true` accepts and stores
-/// (TOFU, kept for automation / a future "always trust" option).
-async fn connect_host(
+/// 从连接池获取已有会话，或新建并放入池中。
+/// Unknown host keys follow `trust_on_first_use`.
+async fn get_or_create_session(
+    host_id: &str,
     cfg: &HostConfig,
     password: Option<String>,
     passphrase: Option<String>,
     trust_on_first_use: bool,
-) -> Result<SshSession, PandaError> {
-    let creds = credentials_for(cfg, password, passphrase)?;
+) -> Result<Arc<SshSession>, PandaError> {
+    let creds = credentials_for(cfg, password.clone(), passphrase.clone())?;
     let mut known_hosts = KnownHosts::new(stores()?.known_hosts.path().to_path_buf());
     let policy = if trust_on_first_use {
         UnknownHostKeyPolicy::AcceptAndStore
     } else {
         UnknownHostKeyPolicy::Reject
     };
-    Ok(SshSession::connect(cfg, creds, &mut known_hosts, policy).await?)
+    Ok(panda_core::connection_pool::global_pool()
+        .get_or_create(
+            host_id.to_string(),
+            cfg,
+            creds,
+            &mut known_hosts,
+            policy,
+        )
+        .await?)
 }
 
-/// Connect and open an SFTP channel in one step.
+/// 从连接池获取会话并打开 SFTP 频道。
 async fn open_sftp_session(
+    host_id: &str,
     cfg: &HostConfig,
     password: Option<String>,
     passphrase: Option<String>,
     trust_on_first_use: bool,
-) -> Result<(SshSession, SftpClient), PandaError> {
-    let session = connect_host(cfg, password, passphrase, trust_on_first_use).await?;
+) -> Result<(Arc<SshSession>, SftpClient), PandaError> {
+    let session = get_or_create_session(host_id, cfg, password, passphrase, trust_on_first_use).await?;
     let sftp = SftpClient::new(&session).await?;
     Ok((session, sftp))
 }
 
-/// Close the SFTP session and the SSH connection.
-async fn close_sftp(session: SshSession, sftp: SftpClient) -> Result<(), PandaError> {
+/// 关闭 SFTP 客户端，保留底层 SSH 连接在池中复用。
+async fn close_sftp(sftp: SftpClient) -> Result<(), PandaError> {
     sftp.close().await?;
-    session.disconnect().await?;
     Ok(())
 }
 
@@ -466,9 +501,8 @@ pub fn test_connection(
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let session = connect_host(&cfg, password, passphrase, trust_on_first_use).await?;
+        let session = get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         let output = session.exec("true").await?;
-        session.disconnect().await?;
         Ok(format!(
             "connected to {}@{}:{} (exit status: {:?})",
             cfg.username, cfg.host, cfg.port, output.exit_status
@@ -486,10 +520,10 @@ pub fn sftp_list(
 ) -> Result<Vec<RemoteFileRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         let files = sftp.list_dir(&path).await?;
-        close_sftp(session, sftp).await?;
+        close_sftp(sftp).await?;
         Ok(files
             .into_iter()
             .map(|f| RemoteFileRecord {
@@ -517,11 +551,11 @@ pub fn sftp_upload(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         sftp.upload(PathBuf::from(&local_path).as_path(), &remote_path, None)
             .await?;
-        close_sftp(session, sftp).await?;
+        close_sftp(sftp).await?;
         Ok(())
     })
 }
@@ -537,12 +571,58 @@ pub fn sftp_download(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         sftp.download(&remote_path, PathBuf::from(&local_path).as_path())
             .await?;
-        close_sftp(session, sftp).await?;
+        close_sftp(sftp).await?;
         Ok(())
+    })
+}
+
+/// 上传前预检查：若远端目标已存在，返回源文件与目标文件的大小及修改时间。
+/// 返回 `None` 表示目标不存在，可以直接上传。
+#[uniffi::export]
+pub fn sftp_check_upload_conflict(
+    host_id: String,
+    local_path: String,
+    remote_path: String,
+    password: Option<String>,
+    passphrase: Option<String>,
+    trust_on_first_use: bool,
+) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
+    let cfg = load_host(&host_id)?;
+    runtime().block_on(async {
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let conflict = sftp
+            .check_upload_conflict(PathBuf::from(&local_path).as_path(), &remote_path)
+            .await?;
+        close_sftp(sftp).await?;
+        Ok(conflict.map(RemoteFileConflictRecord::from))
+    })
+}
+
+/// 下载前预检查：若本地目标已存在，返回源文件与目标文件的大小及修改时间。
+/// 返回 `None` 表示目标不存在，可以直接下载。
+#[uniffi::export]
+pub fn sftp_check_download_conflict(
+    host_id: String,
+    remote_path: String,
+    local_path: String,
+    password: Option<String>,
+    passphrase: Option<String>,
+    trust_on_first_use: bool,
+) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
+    let cfg = load_host(&host_id)?;
+    runtime().block_on(async {
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let conflict = sftp
+            .check_download_conflict(&remote_path, PathBuf::from(&local_path).as_path())
+            .await?;
+        close_sftp(sftp).await?;
+        Ok(conflict.map(RemoteFileConflictRecord::from))
     })
 }
 
@@ -556,10 +636,10 @@ pub fn sftp_remove_file(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         sftp.remove_file(&remote_path).await?;
-        close_sftp(session, sftp).await?;
+        close_sftp(sftp).await?;
         Ok(())
     })
 }
@@ -574,10 +654,10 @@ pub fn sftp_remove_dir(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        sftp.remove_dir(&remote_path).await?;
-        close_sftp(session, sftp).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        sftp.remove_all(&remote_path).await?;
+        close_sftp(sftp).await?;
         Ok(())
     })
 }
@@ -592,10 +672,10 @@ pub fn sftp_create_dir(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         sftp.create_dir(&remote_path).await?;
-        close_sftp(session, sftp).await?;
+        close_sftp(sftp).await?;
         Ok(())
     })
 }
@@ -612,10 +692,10 @@ pub fn sftp_home_dir(
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let (_, sftp) =
+            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         let home = sftp.home_dir().await?;
-        close_sftp(session, sftp).await?;
+        close_sftp(sftp).await?;
         Ok(home)
     })
 }
@@ -638,7 +718,7 @@ pub fn shell_open(
 ) -> Result<u64, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let session = connect_host(&cfg, password, passphrase, trust_on_first_use).await?;
+        let session = get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         let shell = ShellSession::open(session).await?;
         let id = next_shell_id();
         shell_sessions().lock().unwrap().insert(id, shell);
@@ -696,6 +776,7 @@ pub enum TransferDirectionEnum {
 pub enum TransferStatusEnum {
     Queued,
     Running,
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -713,6 +794,8 @@ pub struct TransferStatusRecord {
     pub transferred: u64,
     pub status: TransferStatusEnum,
     pub error: Option<String>,
+    /// 单调递增版本号；任何状态/进度/错误变更时自动递增。
+    pub version: u64,
 }
 
 /// Internal task record, shared between the registry and the async worker.
@@ -730,6 +813,9 @@ struct TransferTask {
     transferred: Arc<AtomicU64>,
     error: Arc<std::sync::Mutex<Option<String>>>,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    resume_notify: Arc<tokio::sync::Notify>,
+    version: Arc<AtomicU64>,
 }
 
 impl TransferTask {
@@ -744,7 +830,13 @@ impl TransferTask {
             transferred: self.transferred.load(Ordering::Relaxed),
             status: *self.status.lock().unwrap(),
             error: self.error.lock().unwrap().clone(),
+            version: self.version.load(Ordering::Relaxed),
         }
+    }
+
+    /// 递增版本号，在状态/进度/错误变更后调用。
+    fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -772,13 +864,16 @@ pub fn start_transfer(
     host_id: String,
     local_path: String,
     remote_path: String,
+    size: u64,
     password: Option<String>,
     passphrase: Option<String>,
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
+    // 上传时若 Swift 未提供大小(传 0),则从本地文件系统计算;
+    // 下载时使用 Swift 从 SFTP 列表中已获取的远端大小。
     let size = match direction {
-        TransferDirectionEnum::Upload => total_size(PathBuf::from(&local_path).as_path()),
-        TransferDirectionEnum::Download => 0,
+        TransferDirectionEnum::Upload if size == 0 => total_size(PathBuf::from(&local_path).as_path()),
+        _ => size,
     };
     let id = Uuid::new_v4();
     let task = TransferTask {
@@ -794,6 +889,9 @@ pub fn start_transfer(
         transferred: Arc::new(AtomicU64::new(0)),
         error: Arc::new(std::sync::Mutex::new(None)),
         cancel: Arc::new(AtomicBool::new(false)),
+        paused: Arc::new(AtomicBool::new(false)),
+        resume_notify: Arc::new(tokio::sync::Notify::new()),
+        version: Arc::new(AtomicU64::new(1)),
     };
     transfer_tasks()
         .lock()
@@ -806,15 +904,40 @@ pub fn start_transfer(
     Ok(id.to_string())
 }
 
-async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
-    {
-        let mut status = task.status.lock().unwrap();
-        if *status == TransferStatusEnum::Cancelled {
+/// 当任务被暂停时阻塞，直到继续或被取消。
+async fn wait_while_paused(task: &TransferTask) {
+    loop {
+        if task.cancel.load(Ordering::Relaxed) {
             return;
         }
-        *status = TransferStatusEnum::Running;
+        if !task.paused.load(Ordering::Relaxed) {
+            return;
+        }
+        {
+            let mut status = task.status.lock().unwrap();
+            if *status == TransferStatusEnum::Cancelled {
+                return;
+            }
+            *status = TransferStatusEnum::Paused;
+        }
+        // 先注册等待再检查,避免 resume 通知在 await 前丢失。
+        let notified = task.resume_notify.notified();
+        if !task.paused.load(Ordering::Relaxed) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
+    // 排队阶段若被暂停，则等待恢复后再竞争信号量。
+    wait_while_paused(&task).await;
+    if task.cancel.load(Ordering::Relaxed) {
+        *task.status.lock().unwrap() = TransferStatusEnum::Cancelled;
+        return;
     }
 
+    // 先获取信号量许可证,获取成功前保持 Queued 状态,让 UI 正确显示排队中。
     let _permit = match transfer_semaphore().acquire().await {
         Ok(p) => p,
         Err(_) => {
@@ -824,11 +947,17 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
         }
     };
 
-    // Cancel may have been set while waiting for the semaphore.
-    if task.cancel.load(Ordering::Relaxed) {
-        *task.status.lock().unwrap() = TransferStatusEnum::Cancelled;
-        return;
+    // 获取信号量后再次被暂停，则先进入 Paused，等恢复后再 Running。
+    wait_while_paused(&task).await;
+
+    {
+        let mut status = task.status.lock().unwrap();
+        if *status == TransferStatusEnum::Cancelled {
+            return;
+        }
+        *status = TransferStatusEnum::Running;
     }
+    task.bump_version();
 
     let result = match task.direction {
         TransferDirectionEnum::Upload => run_upload(&task, &cfg).await,
@@ -841,6 +970,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
             if matches!(task.direction, TransferDirectionEnum::Upload) {
                 task.transferred.store(task.size, Ordering::Relaxed);
             }
+            task.bump_version();
         }
         Err(e) => {
             if task.cancel.load(Ordering::Relaxed) {
@@ -849,6 +979,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
                 *task.status.lock().unwrap_or_else(|e| e.into_inner()) = TransferStatusEnum::Failed;
                 *task.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
             }
+            task.bump_version();
         }
     }
 }
@@ -864,30 +995,35 @@ async fn run_upload(
         Err(e) => return Err(panda_core::Error::Other(e.to_string())),
     };
     let mut known_hosts = KnownHosts::new(store_path);
-    let session = SshSession::connect(
-        cfg,
-        creds,
-        &mut known_hosts,
-        UnknownHostKeyPolicy::AcceptAndStore,
-    )
-    .await?;
+    let session = panda_core::connection_pool::global_pool()
+        .get_or_create(
+            task.host_id.clone(),
+            cfg,
+            creds,
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await?;
     let sftp = SftpClient::new(&session).await?;
 
     let local = PathBuf::from(&task.local_path);
     let transferred = task.transferred.clone();
+    let version = task.version.clone();
     let progress = Arc::new(move |sent: u64, _total: u64| {
         transferred.store(sent, Ordering::Relaxed);
+        version.fetch_add(1, Ordering::Relaxed);
     });
     let result = sftp
-        .upload_with_cancel(
+        .upload_with_pause(
             local.as_path(),
             &task.remote_path,
             Some(progress),
             Some(task.cancel.clone()),
+            Some(task.paused.clone()),
+            Some(task.resume_notify.clone()),
         )
         .await;
     let _ = sftp.close().await;
-    let _ = session.disconnect().await;
     result
 }
 
@@ -902,30 +1038,35 @@ async fn run_download(
         Err(e) => return Err(panda_core::Error::Other(e.to_string())),
     };
     let mut known_hosts = KnownHosts::new(store_path);
-    let session = SshSession::connect(
-        cfg,
-        creds,
-        &mut known_hosts,
-        UnknownHostKeyPolicy::AcceptAndStore,
-    )
-    .await?;
+    let session = panda_core::connection_pool::global_pool()
+        .get_or_create(
+            task.host_id.clone(),
+            cfg,
+            creds,
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await?;
     let sftp = SftpClient::new(&session).await?;
 
     let local = PathBuf::from(&task.local_path);
     let transferred = task.transferred.clone();
+    let version = task.version.clone();
     let progress = Arc::new(move |received: u64, _total: u64| {
         transferred.store(received, Ordering::Relaxed);
+        version.fetch_add(1, Ordering::Relaxed);
     });
     let result = sftp
-        .download_with_cancel(
+        .download_with_pause(
             &task.remote_path,
             local.as_path(),
             Some(progress),
             Some(task.cancel.clone()),
+            Some(task.paused.clone()),
+            Some(task.resume_notify.clone()),
         )
         .await;
     let _ = sftp.close().await;
-    let _ = session.disconnect().await;
     result
 }
 
@@ -948,38 +1089,101 @@ pub fn transfer_list() -> Result<Vec<TransferStatusRecord>, PandaError> {
     Ok(records)
 }
 
-/// Cancel a queued or running task. Idempotent for already-terminal tasks.
+/// Cancel a queued, paused or running task. Idempotent for already-terminal tasks.
 #[uniffi::export]
 pub fn transfer_cancel(task_id: String) -> Result<(), PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
     let mut tasks = transfer_tasks().lock().unwrap();
     let task = tasks.get_mut(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     task.cancel.store(true, Ordering::Relaxed);
+    task.resume_notify.notify_waiters();
     let status = *task.status.lock().unwrap();
-    if status == TransferStatusEnum::Queued {
+    if matches!(status, TransferStatusEnum::Queued | TransferStatusEnum::Paused) {
         *task.status.lock().unwrap() = TransferStatusEnum::Cancelled;
+        task.bump_version();
     }
     Ok(())
 }
 
-/// Retry a failed task with the same parameters.
+/// Retry a failed or cancelled task, reusing the same task id.
+/// 重置任务状态为 Queued 后重新调度,避免在队列中产生新任务条目。
 #[uniffi::export]
 pub fn transfer_retry(task_id: String) -> Result<String, PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
-    let (direction, host_id, local_path, remote_path, password, passphrase, _size) = {
+    let task = {
         let tasks = transfer_tasks().lock().unwrap();
-        let task = tasks.get(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id.clone()))?;
-        (
-            task.direction.clone(),
-            task.host_id.clone(),
-            task.local_path.clone(),
-            task.remote_path.clone(),
-            task.password.clone(),
-            task.passphrase.clone(),
-            task.size,
-        )
+        tasks
+            .get(&id)
+            .ok_or_else(|| PandaError::UnknownTransferTask(task_id.clone()))?
+            .clone()
     };
-    start_transfer(direction, host_id, local_path, remote_path, password, passphrase)
+
+    {
+        let status = *task.status.lock().unwrap();
+        if !matches!(
+            status,
+            TransferStatusEnum::Failed | TransferStatusEnum::Cancelled
+        ) {
+            return Err(PandaError::Core(
+                "task is not in a retryable state".to_string(),
+            ));
+        }
+    }
+
+    let cfg = load_host(&task.host_id)?;
+
+    // 重置共享状态,保留原 id、路径与大小。
+    *task.status.lock().unwrap() = TransferStatusEnum::Queued;
+    task.transferred.store(0, Ordering::Relaxed);
+    *task.error.lock().unwrap() = None;
+    task.cancel.store(false, Ordering::Relaxed);
+    task.paused.store(false, Ordering::Relaxed);
+    task.resume_notify.notify_waiters();
+    task.bump_version();
+
+    runtime().spawn(async move {
+        run_transfer_task(task, cfg).await;
+    });
+    Ok(id.to_string())
+}
+
+/// Pause a queued or running task.
+/// 非终态任务可被暂停；已终态或已暂停任务为 no-op。
+#[uniffi::export]
+pub fn transfer_pause(task_id: String) -> Result<(), PandaError> {
+    let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
+    let mut tasks = transfer_tasks().lock().unwrap();
+    let task = tasks.get_mut(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
+    let status = *task.status.lock().unwrap();
+    if matches!(
+        status,
+        TransferStatusEnum::Completed | TransferStatusEnum::Failed | TransferStatusEnum::Cancelled
+    ) {
+        return Err(PandaError::Core("task is already terminal".to_string()));
+    }
+    task.paused.store(true, Ordering::Relaxed);
+    if matches!(status, TransferStatusEnum::Queued | TransferStatusEnum::Running) {
+        *task.status.lock().unwrap() = TransferStatusEnum::Paused;
+        task.bump_version();
+    }
+    Ok(())
+}
+
+/// Resume a paused task.
+/// 继续后会由工作线程重新竞争信号量或恢复 Running；非暂停任务为 no-op。
+#[uniffi::export]
+pub fn transfer_resume(task_id: String) -> Result<(), PandaError> {
+    let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
+    let mut tasks = transfer_tasks().lock().unwrap();
+    let task = tasks.get_mut(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
+    task.paused.store(false, Ordering::Relaxed);
+    let status = *task.status.lock().unwrap();
+    if status == TransferStatusEnum::Paused {
+        *task.status.lock().unwrap() = TransferStatusEnum::Queued;
+        task.bump_version();
+    }
+    task.resume_notify.notify_waiters();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -81,3 +81,19 @@ targets:
         TARGETED_DEVICE_FAMILY: "2"
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+
+schemes:
+  PandaSSH-macOS:
+    build:
+      targets:
+        PandaSSH-macOS: all
+    test:
+      targets:
+        - name: PandaSSH-macOSTests
+  PandaSSH-iOS:
+    build:
+      targets:
+        PandaSSH-iOS: all
+    test:
+      targets:
+        - name: PandaSSH-iOSTests

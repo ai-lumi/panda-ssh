@@ -316,6 +316,16 @@ void uniffi_panda_ffi_fn_func_save_host(RustBuffer host, RustCallStatus *_Nonnul
 void uniffi_panda_ffi_fn_func_save_snippet(RustBuffer snippet, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHECK_DOWNLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHECK_DOWNLOAD_CONFLICT
+RustBuffer uniffi_panda_ffi_fn_func_sftp_check_download_conflict(RustBuffer host_id, RustBuffer remote_path, RustBuffer local_path, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHECK_UPLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHECK_UPLOAD_CONFLICT
+RustBuffer uniffi_panda_ffi_fn_func_sftp_check_upload_conflict(RustBuffer host_id, RustBuffer local_path, RustBuffer remote_path, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CREATE_DIR
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CREATE_DIR
 void uniffi_panda_ffi_fn_func_sftp_create_dir(RustBuffer host_id, RustBuffer remote_path, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
@@ -373,7 +383,7 @@ void uniffi_panda_ffi_fn_func_shell_write(uint64_t handle, RustBuffer data, Rust
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_TRANSFER
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_TRANSFER
-RustBuffer uniffi_panda_ffi_fn_func_start_transfer(RustBuffer direction, RustBuffer host_id, RustBuffer local_path, RustBuffer remote_path, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_panda_ffi_fn_func_start_transfer(RustBuffer direction, RustBuffer host_id, RustBuffer local_path, RustBuffer remote_path, uint64_t size, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TEST_CONNECTION
@@ -392,6 +402,16 @@ RustBuffer uniffi_panda_ffi_fn_func_transfer_list(RustCallStatus *_Nonnull out_s
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_PAUSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_PAUSE
+void uniffi_panda_ffi_fn_func_transfer_pause(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_RESUME
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_RESUME
+void uniffi_panda_ffi_fn_func_transfer_resume(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_RETRY
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_RETRY
 RustBuffer uniffi_panda_ffi_fn_func_transfer_retry(RustBuffer task_id, RustCallStatus *_Nonnull out_status
@@ -400,6 +420,42 @@ RustBuffer uniffi_panda_ffi_fn_func_transfer_retry(RustBuffer task_id, RustCallS
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_STATUS
 RustBuffer uniffi_panda_ffi_fn_func_transfer_status(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_CANCEL
+void uniffi_panda_ffi_fn_func_batch_transfer_cancel(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_LIST
+RustBuffer uniffi_panda_ffi_fn_func_batch_transfer_list(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_STATUS
+RustBuffer uniffi_panda_ffi_fn_func_batch_transfer_status(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SCAN_LOCAL_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SCAN_LOCAL_BATCH
+RustBuffer uniffi_panda_ffi_fn_func_scan_local_batch(RustBuffer sources, RustBuffer dest_dir, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SCAN_REMOTE_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SCAN_REMOTE_BATCH
+RustBuffer uniffi_panda_ffi_fn_func_scan_remote_batch(RustBuffer host_id, RustBuffer sources, RustBuffer dest_dir, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_BATCH_DOWNLOAD
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_BATCH_DOWNLOAD
+RustBuffer uniffi_panda_ffi_fn_func_start_batch_download(RustBuffer host_id, RustBuffer sources, RustBuffer dest_dir, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_BATCH_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_BATCH_UPLOAD
+RustBuffer uniffi_panda_ffi_fn_func_start_batch_upload(RustBuffer host_id, RustBuffer sources, RustBuffer dest_dir, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_PANDA_FFI_RUSTBUFFER_ALLOC
@@ -746,6 +802,18 @@ uint16_t uniffi_panda_ffi_checksum_func_save_snippet(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CHECK_DOWNLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CHECK_DOWNLOAD_CONFLICT
+uint16_t uniffi_panda_ffi_checksum_func_sftp_check_download_conflict(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CHECK_UPLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CHECK_UPLOAD_CONFLICT
+uint16_t uniffi_panda_ffi_checksum_func_sftp_check_upload_conflict(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CREATE_DIR
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CREATE_DIR
 uint16_t uniffi_panda_ffi_checksum_func_sftp_create_dir(void
@@ -836,6 +904,18 @@ uint16_t uniffi_panda_ffi_checksum_func_transfer_list(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_PAUSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_PAUSE
+uint16_t uniffi_panda_ffi_checksum_func_transfer_pause(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_RESUME
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_RESUME
+uint16_t uniffi_panda_ffi_checksum_func_transfer_resume(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_RETRY
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_RETRY
 uint16_t uniffi_panda_ffi_checksum_func_transfer_retry(void
@@ -845,6 +925,48 @@ uint16_t uniffi_panda_ffi_checksum_func_transfer_retry(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_STATUS
 uint16_t uniffi_panda_ffi_checksum_func_transfer_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_CANCEL
+uint16_t uniffi_panda_ffi_checksum_func_batch_transfer_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_LIST
+uint16_t uniffi_panda_ffi_checksum_func_batch_transfer_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_STATUS
+uint16_t uniffi_panda_ffi_checksum_func_batch_transfer_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SCAN_LOCAL_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SCAN_LOCAL_BATCH
+uint16_t uniffi_panda_ffi_checksum_func_scan_local_batch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SCAN_REMOTE_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SCAN_REMOTE_BATCH
+uint16_t uniffi_panda_ffi_checksum_func_scan_remote_batch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_BATCH_DOWNLOAD
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_BATCH_DOWNLOAD
+uint16_t uniffi_panda_ffi_checksum_func_start_batch_download(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_BATCH_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_BATCH_UPLOAD
+uint16_t uniffi_panda_ffi_checksum_func_start_batch_upload(void
     
 );
 #endif

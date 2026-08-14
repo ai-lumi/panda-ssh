@@ -82,51 +82,36 @@ struct SnippetsView: View {
     // MARK: 列表
 
     private var list: some View {
-        ScrollView {
-            LazyVStack(spacing: 4) {
-                if model.snippets.isEmpty {
-                    Text("暂无片段")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity)
-                        .padding(20)
-                }
-                ForEach(model.snippets) { snippet in
-                    Button {
-                        selection = snippet.id
-                    } label: {
+        Group {
+            if model.snippets.isEmpty {
+                ContentUnavailableView("暂无片段", systemImage: "chevron.left.forwardslash.chevron.right")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: $selection) {
+                    ForEach(model.snippets) { snippet in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(snippet.title)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.callout.weight(.semibold))
                             HStack(spacing: 4) {
                                 ForEach(snippet.tags, id: \.self) { tag in
                                     Text(tag)
-                                        .font(.system(size: 10))
+                                        .font(.caption2)
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 1)
-                                        .background(Color.primary.opacity(0.06), in: Capsule())
+                                        .background(.regularMaterial, in: Capsule())
                                         .foregroundStyle(.secondary)
                                 }
                             }
                             Text(snippet.summary)
-                                .font(.system(size: 11.5))
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(
-                            (selection ?? model.snippets.first?.id) == snippet.id
-                                ? Color.accentColor.opacity(0.16) : .clear,
-                            in: RoundedRectangle(cornerRadius: 8)
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                        .tag(snippet.id)
                     }
-                    .buttonStyle(.plain)
                 }
+                .listStyle(.sidebar)
             }
-            .padding(8)
         }
         .frame(width: 280)
     }
@@ -145,7 +130,7 @@ struct SnippetsView: View {
                             .font(.caption2)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.06), in: Capsule())
+                            .background(.regularMaterial, in: Capsule())
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -155,12 +140,12 @@ struct SnippetsView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(snippet.code)
                         .font(.system(.callout, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.92))
+                        .foregroundStyle(.primary)
                         .textSelection(.enabled)
                         .padding(12)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(red: 0.12, green: 0.12, blue: 0.14), in: RoundedRectangle(cornerRadius: 8))
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                 HStack(spacing: 10) {
                     Button("复制") {
                         copyToPasteboard(snippet.code)

@@ -38,6 +38,11 @@ enum AppPaths {
     static var snippetsDirectoryURL: URL {
         configDirectory.appendingPathComponent("snippets")
     }
+
+    /// 日志文件目录(macOS: ~/.panda-ssh/logs/, iPadOS: App Group 容器/logs/)。
+    static var logsDirectoryURL: URL {
+        configDirectory.appendingPathComponent("logs")
+    }
 }
 
 /// Thin Swift-side wrapper over the uniffi-generated `panda_ffi` bindings.
@@ -112,6 +117,89 @@ final class PandaCoreBridge {
     /// 解析远端 SFTP 会话初始工作目录（通常为 home 目录）。
     func resolveSftpHomeDir(of hostID: String, password: String? = nil, passphrase: String? = nil, trustOnFirstUse: Bool = false) throws -> String {
         try sftpHomeDir(hostId: hostID, password: password, passphrase: passphrase, trustOnFirstUse: trustOnFirstUse)
+    }
+
+    /// 上传前预检查远端目标是否已存在。
+    func checkUploadConflict(
+        hostID: String,
+        localPath: String,
+        remotePath: String,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false
+    ) throws -> RemoteFileConflictRecord? {
+        try sftpCheckUploadConflict(
+            hostId: hostID,
+            localPath: localPath,
+            remotePath: remotePath,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse
+        )
+    }
+
+    /// 下载前预检查本地目标是否已存在。
+    func checkDownloadConflict(
+        hostID: String,
+        remotePath: String,
+        localPath: String,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false
+    ) throws -> RemoteFileConflictRecord? {
+        try sftpCheckDownloadConflict(
+            hostId: hostID,
+            remotePath: remotePath,
+            localPath: localPath,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse
+        )
+    }
+
+    /// 删除远端文件或空目录。
+    func removeRemoteFile(
+        hostID: String,
+        remotePath: String,
+        isDirectory: Bool,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false
+    ) throws {
+        if isDirectory {
+            try sftpRemoveDir(
+                hostId: hostID,
+                remotePath: remotePath,
+                password: password,
+                passphrase: passphrase,
+                trustOnFirstUse: trustOnFirstUse
+            )
+        } else {
+            try sftpRemoveFile(
+                hostId: hostID,
+                remotePath: remotePath,
+                password: password,
+                passphrase: passphrase,
+                trustOnFirstUse: trustOnFirstUse
+            )
+        }
+    }
+
+    /// 在远端创建目录（父目录必须已存在）。
+    func createRemoteDir(
+        hostID: String,
+        remotePath: String,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false
+    ) throws {
+        try sftpCreateDir(
+            hostId: hostID,
+            remotePath: remotePath,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse
+        )
     }
 
     // MARK: - 代码片段

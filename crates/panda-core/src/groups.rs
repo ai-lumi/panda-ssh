@@ -54,23 +54,36 @@ struct GroupsFile {
 /// 将全部分组存于单个 TOML 文件;路径由调用方注入,写入原子完成。
 pub struct TomlGroupStore {
     path: PathBuf,
+    /// 内存缓存，避免同一实例内重复解析 TOML。
+    cache: std::sync::Mutex<Option<Vec<Group>>>,
 }
 
 impl TomlGroupStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            cache: std::sync::Mutex::new(None),
+        }
     }
 
     fn read(&self) -> Result<Vec<Group>, Error> {
-        match std::fs::read_to_string(&self.path) {
+        {
+            let guard = self.cache.lock().unwrap();
+            if let Some(ref cached) = *guard {
+                return Ok(cached.clone());
+            }
+        }
+        let groups = match std::fs::read_to_string(&self.path) {
             Ok(text) => {
                 let file: GroupsFile = toml::from_str(&text)?;
-                Ok(file.groups)
+                file.groups
             }
             // 文件不存在 = 尚无分组
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e.into()),
-        }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        *self.cache.lock().unwrap() = Some(groups.clone());
+        Ok(groups)
     }
 
     fn write(&self, groups: &[Group]) -> Result<(), Error> {
@@ -78,7 +91,9 @@ impl TomlGroupStore {
             groups: groups.to_vec(),
         };
         let text = toml::to_string_pretty(&file)?;
-        write_atomic(&self.path, text.as_bytes())
+        write_atomic(&self.path, text.as_bytes())?;
+        *self.cache.lock().unwrap() = Some(groups.to_vec());
+        Ok(())
     }
 }
 

@@ -23,7 +23,18 @@ struct PandaSSHApp: App {
                 .environmentObject(model)
                 .environmentObject(workspace)
                 .environmentObject(transfers)
+                .environmentObject(Logger.shared)
         }
+        #if os(macOS)
+        Settings {
+            SettingsView()
+                .environmentObject(model)
+                .environmentObject(ToastCenter())
+        }
+        WindowGroup("日志", id: "panda-log") {
+            LogView(logger: Logger.shared)
+        }
+        #endif
     }
 }
 
@@ -37,6 +48,7 @@ enum SidebarPage: Equatable {
     case hosts
     case snippets
     case settings
+    case logs
 }
 
 /// 连接前检查的结果(阶段二在打开终端/SFTP 前据此弹对话框)。
@@ -89,6 +101,7 @@ final class AppModel: ObservableObject {
         groups = backend.allGroups()
         snippets = backend.allSnippets()
         lastError = backend.startupError
+        Logger.shared.info("配置加载完成; 主机数=\(hosts.count)", module: LogModule.config)
     }
 
     // MARK: 选中与页面切换
@@ -117,6 +130,7 @@ final class AppModel: ObservableObject {
 
     func showSnippets() { sidebarPage = .snippets }
     func showSettings() { sidebarPage = .settings }
+    func showLogs() { sidebarPage = .logs }
 
     // MARK: 主机
 

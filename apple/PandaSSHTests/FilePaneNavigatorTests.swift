@@ -163,7 +163,7 @@ final class FilePaneNavigatorTests: XCTestCase {
         _ = await session.localPane.reload()
         session.selectLocal("deploy.tar.gz")
 
-        let task = session.uploadSelected()
+        let task = await session.uploadSelected()
 
         XCTAssertNotNil(task)
         XCTAssertEqual(task?.direction, .upload)
@@ -178,29 +178,59 @@ final class FilePaneNavigatorTests: XCTestCase {
         _ = await session.remotePane.reload()
         session.selectRemote(".bashrc")
 
-        let task = session.downloadSelected()
+        let task = await session.downloadSelected()
 
         XCTAssertEqual(task?.direction, .download)
         XCTAssertEqual(task?.source, "/home/deploy/.bashrc")
         XCTAssertEqual(task?.destination, DemoFileSystem.localRoot + "/.bashrc")
     }
 
-    func testDirectoryTransferUsesPlaceholderSize() async {
-        let (session, _) = makeSession()
+    func testDirectoryTransferCreatesTaskGroup() async {
+        let (session, transfers) = makeSession()
+        session.scanLocalHandler = { paths, destDir in
+            paths.flatMap { path in
+                [
+                    BatchItemRecord(source: path, destination: destDir, size: 0, isDir: true),
+                    BatchItemRecord(source: path + "/a.txt", destination: destDir + "/a.txt", size: 100, isDir: false),
+                ]
+            }
+        }
+        session.scanRemoteHandler = { paths, destDir in
+            paths.flatMap { path in
+                [
+                    BatchItemRecord(source: path, destination: destDir, size: 0, isDir: true),
+                    BatchItemRecord(source: path + "/a.log", destination: destDir + "/a.log", size: 100, isDir: false),
+                ]
+            }
+        }
         _ = await session.localPane.reload()
         session.selectLocal("Documents")
-        XCTAssertEqual(session.uploadSelected()?.size, 3_145_728)
+        _ = await session.uploadSelected()
+
+        let uploadGroup = transfers.taskGroups.first { $0.name == "Documents" }
+        XCTAssertNotNil(uploadGroup)
+        XCTAssertEqual(uploadGroup?.tasks.count, 1)
+        XCTAssertEqual(uploadGroup?.tasks.first?.direction, .upload)
+        XCTAssertEqual(uploadGroup?.tasks.first?.source, DemoFileSystem.localRoot + "/Documents/a.txt")
 
         _ = await session.remotePane.reload()
         session.selectRemote("logs")
-        XCTAssertEqual(session.downloadSelected()?.size, 6_291_456)
+        _ = await session.downloadSelected()
+
+        let downloadGroup = transfers.taskGroups.first { $0.name == "logs" }
+        XCTAssertNotNil(downloadGroup)
+        XCTAssertEqual(downloadGroup?.tasks.count, 1)
+        XCTAssertEqual(downloadGroup?.tasks.first?.direction, .download)
+        XCTAssertEqual(downloadGroup?.tasks.first?.source, "/home/deploy/logs/a.log")
     }
 
-    func testUploadWithoutSelectionReturnsNil() {
+    func testUploadWithoutSelectionReturnsNil() async {
         let (session, transfers) = makeSession()
 
-        XCTAssertNil(session.uploadSelected())
-        XCTAssertNil(session.downloadSelected())
+        let uploadTask = await session.uploadSelected()
+        let downloadTask = await session.downloadSelected()
+        XCTAssertNil(uploadTask)
+        XCTAssertNil(downloadTask)
         XCTAssertTrue(transfers.tasks.isEmpty)
     }
 
@@ -225,6 +255,149 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         XCTAssertNil(session.selectedRemote)
         XCTAssertEqual(session.remotePath, "/home/deploy")
+    }
+
+    // MARK: - 多选与任务组
+
+    func testLocalMultiSelectFilesAndDirectoryCreatesGroupAndIndependentTasks() async {
+        let (session, transfers) = makeSession()
+        session.scanLocalHandler = { paths, destDir in
+            paths.flatMap { path in
+                if (path as NSString).lastPathComponent == "Documents" {
+                    return [
+                        BatchItemRecord(source: path, destination: destDir, size: 0, isDir: true),
+                        BatchItemRecord(source: path + "/roadmap.pdf", destination: destDir + "/roadmap.pdf", size: 100, isDir: false),
+                        BatchItemRecord(source: path + "/budget.xlsx", destination: destDir + "/budget.xlsx", size: 100, isDir: false),
+                    ]
+                }
+                return [BatchItemRecord(source: path, destination: destDir + "/" + (path as NSString).lastPathComponent, size: 100, isDir: false)]
+            }
+        }
+        _ = await session.localPane.reload()
+        session.isLocalMultiSelect = true
+        session.selectedLocalSet = ["deploy.tar.gz", "Documents"]
+
+        _ = await session.uploadSelected()
+
+        XCTAssertEqual(transfers.taskGroups.count, 1)
+        XCTAssertEqual(transfers.taskGroups.first?.name, "Documents")
+        XCTAssertEqual(transfers.taskGroups.first?.tasks.count, 2)
+        XCTAssertEqual(transfers.tasks.filter { $0.groupID == nil }.count, 1)
+        XCTAssertEqual(transfers.tasks.filter { $0.groupID == nil }.first?.name, "deploy.tar.gz")
+    }
+
+    func testRemoteMultiSelectPureFilesNoGroup() async {
+        let (session, transfers) = makeSession()
+        session.scanRemoteHandler = { paths, destDir in
+            paths.map { BatchItemRecord(source: $0, destination: destDir + "/" + ($0 as NSString).lastPathComponent, size: 100, isDir: false) }
+        }
+        _ = await session.remotePane.reload()
+        session.isRemoteMultiSelect = true
+        session.selectedRemoteSet = [".bashrc", "backup-2026-08-01.sql.gz"]
+
+        _ = await session.downloadSelected()
+
+        XCTAssertTrue(transfers.taskGroups.isEmpty)
+        XCTAssertEqual(transfers.tasks.count, 2)
+    }
+
+    func testMultiSelectWithoutSelectionReturnsNil() async {
+        let (session, transfers) = makeSession()
+        session.isLocalMultiSelect = true
+        session.isRemoteMultiSelect = true
+
+        let upload = await session.uploadSelected()
+        let download = await session.downloadSelected()
+
+        XCTAssertNil(upload)
+        XCTAssertNil(download)
+        XCTAssertTrue(transfers.tasks.isEmpty)
+    }
+
+    // MARK: - 选中模型
+
+    func testSelectLocalReplacesSetInSingleMode() async {
+        let (session, _) = makeSession()
+        _ = await session.localPane.reload()
+
+        session.selectLocal("notes.md", append: false)
+        XCTAssertEqual(session.selectedLocalSet, ["notes.md"])
+
+        session.selectLocal("deploy.tar.gz", append: false)
+        XCTAssertEqual(session.selectedLocalSet, ["deploy.tar.gz"])
+        XCTAssertEqual(session.selectedLocal, "deploy.tar.gz")
+    }
+
+    func testSelectLocalAppendTogglesMembership() async {
+        let (session, _) = makeSession()
+        _ = await session.localPane.reload()
+
+        session.selectLocal("notes.md", append: true)
+        XCTAssertEqual(session.selectedLocalSet, ["notes.md"])
+
+        session.selectLocal("deploy.tar.gz", append: true)
+        XCTAssertEqual(session.selectedLocalSet, ["notes.md", "deploy.tar.gz"])
+
+        session.selectLocal("notes.md", append: true)
+        XCTAssertEqual(session.selectedLocalSet, ["deploy.tar.gz"])
+    }
+
+    func testSelectRemoteReplacesSetInSingleMode() async {
+        let (session, _) = makeSession()
+        _ = await session.remotePane.reload()
+
+        session.selectRemote(".bashrc", append: false)
+        XCTAssertEqual(session.selectedRemoteSet, [".bashrc"])
+
+        session.selectRemote("app", append: false)
+        XCTAssertEqual(session.selectedRemoteSet, ["app"])
+    }
+
+    func testToggleMultiSelectClearsSelection() async {
+        let (session, _) = makeSession()
+        _ = await session.localPane.reload()
+        session.selectLocal("notes.md", append: false)
+
+        session.toggleLocalMultiSelect()
+
+        XCTAssertTrue(session.selectedLocalSet.isEmpty)
+        XCTAssertTrue(session.isLocalMultiSelect)
+    }
+
+    func testEnterDirectoryClearsSelectionSet() async {
+        let (session, _) = makeSession()
+        _ = await session.localPane.reload()
+        session.selectLocal("notes.md", append: false)
+
+        await session.enterLocal("Documents")
+
+        XCTAssertTrue(session.selectedLocalSet.isEmpty)
+        XCTAssertEqual(session.localPath, DemoFileSystem.localRoot + "/Documents")
+    }
+
+    func testGoUpClearsSelectionSet() async {
+        let (session, _) = makeSession()
+        _ = await session.remotePane.reload()
+        _ = await session.enterRemote("app")
+        session.selectRemote("current", append: false)
+
+        await session.goUpRemote()
+
+        XCTAssertTrue(session.selectedRemoteSet.isEmpty)
+        XCTAssertEqual(session.remotePath, "/home/deploy")
+    }
+
+    func testSelectedLocalOptionalReturnsFirst() async {
+        let (session, _) = makeSession()
+        _ = await session.localPane.reload()
+
+        XCTAssertNil(session.selectedLocal)
+
+        session.selectedLocalSet = ["notes.md"]
+        XCTAssertEqual(session.selectedLocal, "notes.md")
+
+        session.selectedLocalSet = ["notes.md", "deploy.tar.gz"]
+        XCTAssertTrue(session.selectedLocalSet.contains(session.selectedLocal ?? ""))
     }
 
     // MARK: - 字节格式化(与原型 fmtBytes 一致)

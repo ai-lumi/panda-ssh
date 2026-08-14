@@ -7,14 +7,13 @@
 //! existing `(host, keytype)` replaces the old record.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use base64ct::{Base64, Encoding};
 use sha2::{Digest, Sha256};
 
 use crate::Error;
 use crate::config::write_atomic;
-
-/// Result of checking a server key against the stored entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyStatus {
     /// Stored key matches the presented one.
@@ -52,22 +51,35 @@ pub fn fingerprint_sha256(openssh_key_str: &str) -> Result<String, Error> {
     let blob = Base64::decode_vec(b64)
         .map_err(|e| Error::Other(format!("bad base64 in public key: {e}")))?;
     let digest = Sha256::digest(&blob);
-    let hex = digest
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(":");
+    let mut hex = String::with_capacity(95); // 64 hex chars + 31 colons
+    for (i, b) in digest.iter().enumerate() {
+        if i > 0 {
+            hex.push(':');
+        }
+        use std::fmt::Write;
+        write!(&mut hex, "{b:02x}").unwrap();
+    }
     Ok(format!("SHA256:{hex}"))
 }
 
 /// A known-hosts file.
 pub struct KnownHosts {
     path: PathBuf,
+    /// 解析后的条目缓存，避免同一实例内重复读取文件。
+    cache: std::sync::Mutex<Option<KnownHostsCache>>,
+}
+
+struct KnownHostsCache {
+    entries: Vec<(String, String)>,
+    mtime: SystemTime,
 }
 
 impl KnownHosts {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            cache: std::sync::Mutex::new(None),
+        }
     }
 
     /// The known_hosts file this instance operates on.
@@ -76,13 +88,28 @@ impl KnownHosts {
     }
 
     /// Read all entries as `(hostname_token, key)` pairs.
+    /// 同一实例内会缓存结果，以文件 mtime 做失效校验。
     pub fn load(&self) -> Result<Vec<(String, String)>, Error> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(t) => t,
-            // Missing file means no known hosts yet.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        let current_mtime = match std::fs::metadata(&self.path) {
+            Ok(meta) => meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 文件不存在时，若缓存存在也清空（文件可能被外部删除）。
+                *self.cache.lock().unwrap() = None;
+                return Ok(Vec::new());
+            }
             Err(e) => return Err(e.into()),
         };
+
+        {
+            let guard = self.cache.lock().unwrap();
+            if let Some(ref cached) = *guard {
+                if cached.mtime == current_mtime {
+                    return Ok(cached.entries.clone());
+                }
+            }
+        }
+
+        let text = std::fs::read_to_string(&self.path)?;
         let mut entries = Vec::new();
         for line in text.lines() {
             let line = line.trim();
@@ -93,11 +120,15 @@ impl KnownHosts {
             let (Some(host), Some(keytype), Some(base64)) =
                 (parts.next(), parts.next(), parts.next())
             else {
-                // Skip malformed lines rather than failing the whole file.
                 continue;
             };
             entries.push((host.to_string(), format!("{keytype} {base64}")));
         }
+
+        *self.cache.lock().unwrap() = Some(KnownHostsCache {
+            entries: entries.clone(),
+            mtime: current_mtime,
+        });
         Ok(entries)
     }
 
@@ -179,7 +210,10 @@ impl KnownHosts {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        write_atomic(&self.path, format!("{}\n", lines.join("\n")).as_bytes())
+        write_atomic(&self.path, format!("{}\n", lines.join("\n")).as_bytes())?;
+        // 文件已修改，清除缓存以便下次读取最新内容。
+        *self.cache.lock().unwrap() = None;
+        Ok(())
     }
 
     /// Delete all records for `host:port` (every key type).
@@ -198,7 +232,9 @@ impl KnownHosts {
         } else {
             format!("{}\n", lines.join("\n"))
         };
-        write_atomic(&self.path, body.as_bytes())
+        write_atomic(&self.path, body.as_bytes())?;
+        *self.cache.lock().unwrap() = None;
+        Ok(())
     }
 
     /// Read the file contents; a missing file means "no known hosts yet".
