@@ -220,7 +220,9 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         try? connection?.write(Data(data))
     }
 
-    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        try? connection?.resize(cols: UInt64(newCols), rows: UInt64(newRows))
+    }
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}

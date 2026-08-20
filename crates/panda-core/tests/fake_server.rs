@@ -18,7 +18,7 @@ use panda_core::{
 use panda_core::connection_pool::ConnectionPool;
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, Pty};
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
@@ -125,6 +125,21 @@ impl russh::server::Handler for TestHandler {
         self.shell_channels.insert(channel);
         session.channel_success(channel)?;
         session.data(channel, b"Panda fake shell\n".to_vec())?;
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
         Ok(())
     }
 
@@ -2282,11 +2297,10 @@ async fn connection_pool_rebuilds_after_disconnect() {
 }
 
 #[tokio::test]
-async fn connection_pool_idle_timeout_reclaims_session() {
+async fn connection_pool_session_persists_without_timeout() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
     let pool = ConnectionPool::new();
-    pool.start_cleanup_task();
 
     let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
     let _session = pool
@@ -2300,53 +2314,13 @@ async fn connection_pool_idle_timeout_reclaims_session() {
         .await
         .unwrap();
 
-    assert_eq!(pool.len().await, 1);
-
-    // 等待超过空闲超时（30s）+ 扫描间隔（5s），让回收任务有机会执行。
-    tokio::time::sleep(Duration::from_secs(36)).await;
-
-    // 超时后池中条目被移除。底层连接可能已被服务器断开，
-    // 因此不调用 disconnect()，直接 drop Arc。
+    // 等待一段时间，验证无空闲超时回收
+    tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
-        pool.len().await, 0,
-        "stale session should be reclaimed after idle timeout"
+        pool.len().await,
+        1,
+        "session should persist without idle timeout"
     );
-}
-
-#[tokio::test]
-async fn connection_pool_active_session_not_reclaimed() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-    pool.start_cleanup_task();
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let _session = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_secs(20)).await;
-
-    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
-    let _session2 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts2,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(pool.len().await, 1, "active session should not be reclaimed");
 
     _session.disconnect().await.unwrap();
 }
@@ -2419,10 +2393,73 @@ async fn connection_pool_remove_deletes_entry() {
 }
 
 #[tokio::test]
-async fn connection_pool_cleanup_on_empty_pool_is_noop() {
+async fn connection_pool_disconnect_host_removes_entry() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
     let pool = ConnectionPool::new();
-    pool.start_cleanup_task();
 
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    assert_eq!(pool.len().await, 0, "cleanup on empty pool should be a no-op");
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let session = pool
+        .get_or_create(
+            "test".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pool.len().await, 1);
+
+    // disconnect_host 移除池条目
+    pool.disconnect_host("test").await;
+    assert_eq!(
+        pool.len().await,
+        0,
+        "disconnect_host should remove the entry"
+    );
+
+    // session 仍持有 Arc，不会 panic
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_pool_disconnect_host_does_not_affect_other_hosts() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = ConnectionPool::new();
+
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let session_a = pool
+        .get_or_create(
+            "host_a".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
+    let session_b = pool
+        .get_or_create(
+            "host_b".to_string(),
+            &host_cfg(port),
+            Credentials::Password(PASSWORD.to_string()),
+            &mut known_hosts2,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(pool.len().await, 2);
+
+    // 只断开 host_a，host_b 不受影响
+    pool.disconnect_host("host_a").await;
+    assert_eq!(pool.len().await, 1, "only host_a should be removed");
+
+    session_a.disconnect().await.unwrap();
+    session_b.disconnect().await.unwrap();
 }

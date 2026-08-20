@@ -12,9 +12,14 @@ struct PandaSSHApp: App {
         // 保证标签标题消歧时能拿到最新主机名,且两者与 App 同生命周期。
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
-        _workspace = StateObject(wrappedValue: WorkspaceStore { hostID in
-            model.hosts.first(where: { $0.id == hostID })?.name
-        })
+        _workspace = StateObject(wrappedValue: WorkspaceStore(
+            hostNameProvider: { hostID in
+                model.hosts.first(where: { $0.id == hostID })?.name
+            },
+            disconnectHandler: { hostID in
+                try? disconnectHost(hostId: hostID)
+            }
+        ))
     }
 
     var body: some Scene {

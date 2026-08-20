@@ -263,6 +263,11 @@ void uniffi_panda_ffi_fn_func_delete_host(RustBuffer id, RustCallStatus *_Nonnul
 void uniffi_panda_ffi_fn_func_delete_snippet(RustBuffer name, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DISCONNECT_HOST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DISCONNECT_HOST
+void uniffi_panda_ffi_fn_func_disconnect_host(RustBuffer host_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_HOST_KEY_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_HOST_KEY_STATUS
 RustBuffer uniffi_panda_ffi_fn_func_host_key_status(RustBuffer host, uint16_t port, RustCallStatus *_Nonnull out_status
@@ -374,6 +379,11 @@ uint64_t uniffi_panda_ffi_fn_func_shell_open(RustBuffer host_id, RustBuffer pass
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SHELL_READ
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SHELL_READ
 RustBuffer uniffi_panda_ffi_fn_func_shell_read(uint64_t handle, uint64_t max, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SHELL_RESIZE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SHELL_RESIZE
+void uniffi_panda_ffi_fn_func_shell_resize(uint64_t handle, uint64_t cols, uint64_t rows, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SHELL_WRITE
@@ -742,6 +752,12 @@ uint16_t uniffi_panda_ffi_checksum_func_delete_snippet(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DISCONNECT_HOST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DISCONNECT_HOST
+uint16_t uniffi_panda_ffi_checksum_func_disconnect_host(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_HOST_KEY_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_HOST_KEY_STATUS
 uint16_t uniffi_panda_ffi_checksum_func_host_key_status(void
@@ -871,6 +887,12 @@ uint16_t uniffi_panda_ffi_checksum_func_shell_open(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SHELL_READ
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SHELL_READ
 uint16_t uniffi_panda_ffi_checksum_func_shell_read(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SHELL_RESIZE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SHELL_RESIZE
+uint16_t uniffi_panda_ffi_checksum_func_shell_resize(void
     
 );
 #endif

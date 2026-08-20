@@ -758,6 +758,29 @@ pub fn shell_close(handle: u64) -> Result<(), PandaError> {
     runtime().block_on(async { Ok(session.close().await?) })
 }
 
+/// Notify the remote PTY that the terminal window has been resized.
+#[uniffi::export]
+pub fn shell_resize(handle: u64, cols: u64, rows: u64) -> Result<(), PandaError> {
+    let sessions = shell_sessions().lock().unwrap();
+    let session = sessions
+        .get(&handle)
+        .ok_or(PandaError::UnknownShellHandle(handle))?;
+    Ok(session.resize(cols as u32, rows as u32)?)
+}
+
+/// 断开指定主机的全部 SSH 连接，从连接缓存中移除。
+/// 当用户关闭最后一个指向该主机的标签页时调用。
+/// 若有正在进行的操作持有会话引用，会话在操作完成后断开。
+#[uniffi::export]
+pub fn disconnect_host(host_id: String) -> Result<(), PandaError> {
+    runtime().block_on(async {
+        panda_core::connection_pool::global_pool()
+            .disconnect_host(&host_id)
+            .await;
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Transfer task registry
 // ---------------------------------------------------------------------------

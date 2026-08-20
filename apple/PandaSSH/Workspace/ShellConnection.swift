@@ -7,6 +7,8 @@ protocol ShellConnection: AnyObject {
     func write(_ data: Data) throws
     /// 非阻塞读取远端 shell 已产生的输出（最多 `max` 字节）。
     func read(max: UInt64) throws -> Data
+    /// 通知远端 PTY 窗口尺寸变更。
+    func resize(cols: UInt64, rows: UInt64) throws
     /// 关闭 shell 通道并断开 SSH 连接。
     func close() throws
 }
@@ -41,6 +43,10 @@ final class PandaShellConnection: ShellConnection {
         try shellRead(handle: handle, max: max)
     }
 
+    func resize(cols: UInt64, rows: UInt64) throws {
+        try shellResize(handle: handle, cols: cols, rows: rows)
+    }
+
     func close() throws {
         try shellClose(handle: handle)
     }
@@ -60,6 +66,8 @@ final class MockShellConnection: ShellConnection {
         buffer.removeFirst(count)
         return Data(chunk)
     }
+
+    func resize(cols: UInt64, rows: UInt64) throws {}
 
     func close() throws {}
 }

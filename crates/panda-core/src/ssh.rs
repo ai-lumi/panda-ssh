@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use russh::client::{self, AuthResult, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
-use russh::{ChannelMsg, Disconnect};
+use russh::{ChannelMsg, Disconnect, Pty};
 use tokio::sync::mpsc;
 
 use crate::config::HostConfig;
@@ -20,6 +20,34 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default timeout for one `exec` call; a command that never finishes must
 /// not block the caller forever.
 const EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Terminal type advertised to the remote shell.
+const TERM_TYPE: &str = "xterm-256color";
+
+/// Default PTY window size (columns × rows).
+const DEFAULT_COLS: u32 = 80;
+const DEFAULT_ROWS: u32 = 24;
+
+/// Standard terminal modes for interactive PTY sessions.
+///
+/// Enables: signal generation, canonical (line-buffered) input, character
+/// echo, erase/kill echoing, extended functions, output processing,
+/// newline-to-CRLF conversion and 8-bit data.
+///
+/// Note: TTY_OP_END is NOT included — russh automatically appends it
+/// when encoding the SSH packet, and including it here would cause the
+/// declared length to mismatch the actual encoded bytes.
+static STANDARD_TERMINAL_MODES: &[(Pty, u32)] = &[
+    (Pty::ISIG, 1),      // enable signal generation (Ctrl-C → SIGINT)
+    (Pty::ICANON, 1),    // canonical / line-buffered mode
+    (Pty::ECHO, 1),      // echo input characters
+    (Pty::ECHOE, 1),     // echo erase character
+    (Pty::ECHOK, 1),     // echo kill character
+    (Pty::IEXTEN, 1),    // extended functions
+    (Pty::OPOST, 1),     // output processing
+    (Pty::ONLCR, 1),     // NL → CR+NL
+    (Pty::CS8, 1),       // 8-bit data
+];
 
 /// Secret material for one connection attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -294,6 +322,8 @@ pub struct ShellSession {
     #[allow(dead_code)]
     session: Arc<SshSession>,
     writer: mpsc::Sender<Vec<u8>>,
+    /// Resize 命令发送端，由 resize() 方法使用。
+    resize_tx: mpsc::Sender<(u32, u32)>,
     reader: Option<tokio::task::JoinHandle<()>>,
     output: Arc<Mutex<Vec<u8>>>,
     closed: AtomicBool,
@@ -301,12 +331,38 @@ pub struct ShellSession {
 
 impl ShellSession {
     /// Open a shell channel on `session` and start the background reader.
+    ///
+    /// Requests a PTY (pseudo-terminal) from the server with standard
+    /// terminal modes and the `TERM` environment variable before starting
+    /// the remote shell, so the shell runs with full terminal semantics
+    /// (ANSI escape codes, line editing, job control).
     pub async fn open(session: Arc<SshSession>) -> Result<Self> {
         let mut channel = session.open_session_channel().await?;
+
+        // 1. Allocate a pseudo-terminal on the server.
+        channel
+            .request_pty(
+                false,
+                TERM_TYPE,
+                DEFAULT_COLS,
+                DEFAULT_ROWS,
+                0,
+                0,
+                STANDARD_TERMINAL_MODES,
+            )
+            .await?;
+
+        // 2. Advertise the terminal type via the `TERM` env var.
+        //    set-env is a best-effort request; servers that do not support
+        //    it will silently ignore the failure.
+        let _ = channel.set_env(false, "TERM", TERM_TYPE).await;
+
+        // 3. Start the remote shell process.
         channel.request_shell(true).await?;
 
         let output = Arc::new(Mutex::new(Vec::new()));
         let (writer, mut rx) = mpsc::channel::<Vec<u8>>(64);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(8);
         let output_reader = output.clone();
         let reader = tokio::spawn(async move {
             loop {
@@ -319,6 +375,9 @@ impl ShellSession {
                         if channel.data(&data[..]).await.is_err() {
                             break;
                         }
+                    }
+                    Some((cols, rows)) = resize_rx.recv() => {
+                        let _ = channel.window_change(cols, rows, 0, 0).await;
                     }
                     msg = channel.wait() => {
                         match msg {
@@ -340,6 +399,7 @@ impl ShellSession {
         Ok(Self {
             session,
             writer,
+            resize_tx,
             reader: Some(reader),
             output,
             closed: AtomicBool::new(false),
@@ -354,6 +414,21 @@ impl ShellSession {
         self.writer
             .try_send(data.to_vec())
             .map_err(|_| Error::Other("failed to send data to shell".into()))
+    }
+
+    /// Notify the server that the PTY window has been resized to
+    /// `cols` × `rows` characters.
+    ///
+    /// The actual SSH channel request is sent asynchronously by the
+    /// background reader task; failures are ignored (the shell keeps
+    /// working even if the server does not support window-change).
+    pub fn resize(&self, cols: u32, rows: u32) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::ShellSessionClosed);
+        }
+        self.resize_tx
+            .try_send((cols, rows))
+            .map_err(|_| Error::Other("failed to send resize notification".into()))
     }
 
     /// Read up to `max` bytes that the remote shell has produced.
