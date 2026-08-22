@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use panda_ffi::{
-    accept_unknown_host_key, batch_transfer_cancel, batch_transfer_list, batch_transfer_status,
-    delete_host, host_key_status, init_store, list_hosts, save_host, scan_local_batch,
-    scan_remote_batch, sftp_check_download_conflict, sftp_check_upload_conflict, sftp_create_dir,
-    sftp_download, sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file, sftp_upload,
-    shell_close, shell_open, shell_read, shell_write, start_batch_download, start_batch_upload,
-    start_transfer, test_connection, transfer_cancel, transfer_list, transfer_pause, transfer_retry,
-    transfer_resume, transfer_status, AuthMethodEnum, BatchTransferStatusEnum, HostConfigRecord,
-    KnownHostStatusEnum, PandaError, TransferDirectionEnum, TransferStatusEnum,
+    accept_unknown_host_key, batch_transfer_cancel, batch_transfer_list, batch_transfer_resolve_conflict,
+    batch_transfer_status, delete_host, host_key_status, init_store, list_hosts, save_host,
+    scan_local_batch, scan_remote_batch, sftp_check_download_conflict, sftp_check_upload_conflict,
+    sftp_create_dir, sftp_download, sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file,
+    sftp_upload, shell_close, shell_open, shell_read, shell_write, start_batch_download,
+    start_batch_upload, start_transfer, test_connection, transfer_cancel, transfer_list,
+    transfer_pause, transfer_retry, transfer_resume, transfer_status, AuthMethodEnum,
+    BatchTransferStatusEnum, HostConfigRecord, KnownHostStatusEnum, PandaError, TransferDirectionEnum,
+    TransferStatusEnum,
 };
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
@@ -2487,6 +2488,9 @@ fn ffi_batch_upload_overwrites_existing_target() {
         None,
     )
     .unwrap();
+    // 目标已存在 → 等待覆盖确认；决策覆盖后任务完成。
+    wait_for_batch_conflict(&second_id);
+    batch_transfer_resolve_conflict(second_id.clone(), true).unwrap();
     wait_for_batch_status(&second_id, BatchTransferStatusEnum::Completed);
 
     cleanup_store();
@@ -2637,4 +2641,280 @@ fn wait_for_batch_status(task_id: &str, expected: BatchTransferStatusEnum) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("batch task did not reach expected status");
+}
+
+/// 等待批量任务进入 WaitingForConflict 并返回其快照。
+fn wait_for_batch_conflict(task_id: &str) -> panda_ffi::BatchTransferStatusRecord {
+    for _ in 0..200 {
+        let record = batch_transfer_status(task_id.to_string()).unwrap();
+        if matches!(record.status, BatchTransferStatusEnum::WaitingForConflict) {
+            return record;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("batch task did not reach WaitingForConflict");
+}
+
+/// 批量上传目标已存在 → 任务进入 WaitingForConflict 且携带完整冲突元数据；
+/// 决策覆盖后目标内容被替换。
+#[test]
+fn ffi_batch_upload_conflict_waits_and_overwrites() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "batch-conflict-overwrite");
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-batch-conflict-overwrite-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"new content").unwrap();
+
+    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    // 远端目标已存在。
+    sftp_upload(
+        host.id.clone(),
+        file.to_string_lossy().into_owned(),
+        "/remote/a.txt".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    std::fs::write(&file, b"new content").unwrap();
+
+    let task_id = start_batch_upload(
+        host.id.clone(),
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    let record = wait_for_batch_conflict(&task_id);
+    let conflict = record.pending_conflict.expect("应携带冲突信息");
+    assert_eq!(conflict.item_source, file.to_string_lossy().into_owned());
+    assert_eq!(conflict.item_destination, "/remote/a.txt");
+    assert_eq!(conflict.source_size, 11, "b\"new content\" 长度应为 11");
+    assert_eq!(conflict.target_size, 11);
+    assert!(conflict.source_mtime.is_some());
+    assert!(conflict.target_mtime.is_some());
+
+    // 决策覆盖 → 任务完成，目标内容被替换。
+    batch_transfer_resolve_conflict(task_id.clone(), true).unwrap();
+    wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
+
+    let back = dir.join("back.txt");
+    sftp_download(
+        host.id.clone(),
+        "/remote/a.txt".into(),
+        back.to_string_lossy().into_owned(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&back).unwrap(), b"new content");
+
+    cleanup_store();
+}
+
+/// 批量上传目标已存在，决策跳过 → 任务完成且目标内容保持不变。
+#[test]
+fn ffi_batch_upload_conflict_skip_keeps_target() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "batch-conflict-skip");
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-batch-conflict-skip-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"new content").unwrap();
+
+    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    // 远端目标已存在（旧内容）。
+    let existing = dir.join("existing.txt");
+    std::fs::write(&existing, b"old content").unwrap();
+    sftp_upload(
+        host.id.clone(),
+        existing.to_string_lossy().into_owned(),
+        "/remote/a.txt".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let task_id = start_batch_upload(
+        host.id.clone(),
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    let record = wait_for_batch_conflict(&task_id);
+    assert!(record.pending_conflict.is_some());
+
+    // 决策跳过 → 任务完成，目标内容保持旧值。
+    batch_transfer_resolve_conflict(task_id.clone(), false).unwrap();
+    wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
+
+    let back = dir.join("back.txt");
+    sftp_download(
+        host.id.clone(),
+        "/remote/a.txt".into(),
+        back.to_string_lossy().into_owned(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&back).unwrap(), b"old content");
+
+    cleanup_store();
+}
+
+/// 取消等待确认中的批量任务 → 状态最终为 Cancelled，无悬空等待；
+/// 随后 resolve 应报错而非悬挂或改变状态。
+#[test]
+fn ffi_batch_transfer_cancel_while_waiting_conflict() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "batch-conflict-cancel");
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-batch-conflict-cancel-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"new content").unwrap();
+
+    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_upload(
+        host.id.clone(),
+        file.to_string_lossy().into_owned(),
+        "/remote/a.txt".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let task_id = start_batch_upload(
+        host.id.clone(),
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    wait_for_batch_conflict(&task_id);
+
+    batch_transfer_cancel(task_id.clone()).unwrap();
+    wait_for_batch_status(&task_id, BatchTransferStatusEnum::Cancelled);
+
+    // 无悬空等待：决策通道已被取消消费，resolve 报错且状态不变。
+    assert!(matches!(
+        batch_transfer_resolve_conflict(task_id.clone(), true),
+        Err(PandaError::Core(_))
+    ));
+    assert_eq!(
+        batch_transfer_status(task_id.clone()).unwrap().status,
+        BatchTransferStatusEnum::Cancelled
+    );
+
+    cleanup_store();
+}
+
+/// 对未知任务 resolve 报 UnknownTransferTask。
+#[test]
+fn ffi_batch_transfer_resolve_unknown_task_returns_error() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+
+    assert!(matches!(
+        batch_transfer_resolve_conflict(Uuid::new_v4().to_string(), true),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+
+    cleanup_store();
+}
+
+/// 批量上传连接被拒 → 任务 Failed 且携带错误信息。
+#[test]
+fn ffi_batch_upload_connection_refused_fails() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let host = save_test_host(unused_port(), "batch-upload-refused");
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-batch-upload-refused-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let task_id = start_batch_upload(
+        host.id,
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(50));
+        let record = batch_transfer_status(task_id.clone()).unwrap();
+        if matches!(record.status, BatchTransferStatusEnum::Failed) {
+            assert!(!record.error.as_deref().unwrap_or("").is_empty());
+            cleanup_store();
+            return;
+        }
+    }
+    panic!("批量上传连接被拒应失败");
+}
+
+/// 批量上传 SFTP 子系统被拒 → 任务 Failed。
+#[test]
+fn ffi_batch_upload_subsystem_rejected_fails() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server_rejecting_sftp();
+    let host = save_test_host(port, "batch-upload-no-sftp");
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-batch-upload-no-sftp-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let task_id = start_batch_upload(
+        host.id,
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    for _ in 0..400 {
+        std::thread::sleep(Duration::from_millis(50));
+        let record = batch_transfer_status(task_id.clone()).unwrap();
+        if matches!(record.status, BatchTransferStatusEnum::Failed) {
+            cleanup_store();
+            return;
+        }
+    }
+    panic!("批量上传 SFTP 子系统被拒应失败");
 }

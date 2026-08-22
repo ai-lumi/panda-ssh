@@ -28,13 +28,11 @@ struct HostKeyMismatchError: Error, Equatable {
 /// Mock 与真实实现可以互换而不改 View。
 ///
 /// 实现方:
-/// - `MockBackend`(DEBUG 默认):全内存,预置原型演示数据,不碰 FFI/钥匙串/iCloud。
-/// - `PandaCoreBackend`(Release 默认):主机、分组与代码片段走 Rust FFI + 钥匙串 + iCloud 同步。
+/// - `MockBackend`(DEBUG 默认):全内存,预置原型演示数据,不碰 FFI/钥匙串。
+/// - `PandaCoreBackend`(Release 默认):主机、分组与代码片段走 Rust FFI + 钥匙串。
 protocol AppBackend: AnyObject {
     /// 启动阶段的错误(如 Rust store 初始化失败),无错为 nil。
     var startupError: String? { get }
-    /// 远端配置变更回调(真实后端的 iCloud 同步用);实现方在主队列调用。
-    var onRemoteChange: (() -> Void)? { get set }
 
     // MARK: 主机
 

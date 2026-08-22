@@ -1,11 +1,10 @@
 import Foundation
 
 /// 全内存 Mock 后端:预置原型(prototype/index.html)的演示数据,
-/// 增删改只在内存生效,不触碰 FFI、钥匙串与 iCloud。
+/// 增删改只在内存生效,不触碰 FFI、钥匙串与外部存储。
 /// 让阶段一的 UI 可以在 Xcode 里完整验证;阶段二连接流程同样以它为数据源。
 final class MockBackend: AppBackend {
     let startupError: String? = nil
-    var onRemoteChange: (() -> Void)?
 
     private var hosts: [HostEntry]
     private var groups: [HostGroup]

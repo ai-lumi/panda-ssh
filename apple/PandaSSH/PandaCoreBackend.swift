@@ -1,12 +1,10 @@
 import Foundation
 
 /// 真实后端:主机与分组配置走 Rust FFI(hosts.toml / groups.toml),
-/// 密钥材料走同步钥匙串,iCloud Key-Value 同步 hosts.toml。
-/// 代码片段暂无真实存储,以内存空实现占位,接口与 Mock 一致,
-/// 换实现时 View 不需要改动。
+/// 密钥材料走系统钥匙串。代码片段暂无真实存储,以内存空实现占位,
+/// 接口与 Mock 一致,换实现时 View 不需要改动。
 final class PandaCoreBackend: AppBackend {
     private(set) var startupError: String?
-    var onRemoteChange: (() -> Void)?
 
     /// Reject 探测缓存:hostID → 呈现密钥与指纹(信任后移除)。
     /// 只从主 actor 访问(AppModel 的调用路径)。
@@ -19,12 +17,6 @@ final class PandaCoreBackend: AppBackend {
         do {
             try PandaCoreBridge.shared.start()
             try PandaCoreBridge.shared.initializeSnippets(at: AppPaths.snippetsDirectoryURL)
-            if let remote = ConfigSync.shared.pullSnapshot() {
-                _ = ConfigSync.shared.apply(snapshot: remote)
-            }
-            ConfigSync.shared.startObserving { [weak self] in
-                self?.onRemoteChange?()
-            }
             Logger.shared.info("FFI 初始化成功", module: LogModule.ffi)
         } catch {
             startupError = error.localizedDescription
@@ -87,7 +79,6 @@ final class PandaCoreBackend: AppBackend {
         entry.passphraseSaved = passphraseSaved
         do {
             try PandaCoreBridge.shared.save(host: entry.toConfigRecord())
-            pushConfig()
             return true
         } catch {
             startupError = error.localizedDescription
@@ -101,7 +92,6 @@ final class PandaCoreBackend: AppBackend {
             // 级联删除主机凭据;ref 命名与 HostEditView 一致,删不存在项是 no-op。
             keychain.delete(for: "host.\(id).password")
             keychain.delete(for: "host.\(id).passphrase")
-            pushConfig()
         } catch {
             startupError = error.localizedDescription
         }
@@ -112,7 +102,6 @@ final class PandaCoreBackend: AppBackend {
         record.groupId = groupID
         do {
             try PandaCoreBridge.shared.save(host: record)
-            pushConfig()
         } catch {
             startupError = error.localizedDescription
         }
@@ -192,7 +181,6 @@ final class PandaCoreBackend: AppBackend {
         }
         do {
             try PandaCoreBridge.shared.save(host: record)
-            pushConfig()
         } catch {
             startupError = error.localizedDescription
         }
@@ -212,7 +200,6 @@ final class PandaCoreBackend: AppBackend {
         let group = HostGroup(id: UUID().uuidString, name: name, parentID: parentID)
         do {
             try PandaCoreBridge.shared.save(group: GroupRecord(id: group.id, name: name, parentId: parentID))
-            pushConfig()
         } catch {
             startupError = error.localizedDescription
         }
@@ -223,7 +210,6 @@ final class PandaCoreBackend: AppBackend {
         guard let existing = try? PandaCoreBridge.shared.allGroups().first(where: { $0.id == id }) else { return }
         do {
             try PandaCoreBridge.shared.save(group: GroupRecord(id: id, name: name, parentId: existing.parentId))
-            pushConfig()
         } catch {
             startupError = error.localizedDescription
         }
@@ -231,10 +217,8 @@ final class PandaCoreBackend: AppBackend {
 
     func deleteGroup(id: String) {
         do {
-            // 级联在 Rust core 完成:组内(含子分组)主机 group_id 清空、子分组一并删除;
-            // hosts.toml 被改写,需要重新上传同步
+            // 级联在 Rust core 完成:组内(含子分组)主机 group_id 清空、子分组一并删除。
             try PandaCoreBridge.shared.removeGroup(id: id)
-            pushConfig()
         } catch {
             startupError = error.localizedDescription
         }
@@ -260,13 +244,6 @@ final class PandaCoreBackend: AppBackend {
         } catch {
             startupError = error.localizedDescription
         }
-    }
-
-    // MARK: 同步(行为与重构前 AppModel 一致)
-
-    /// 本地保存/删除后上传配置快照。
-    private func pushConfig() {
-        ConfigSync.shared.push()
     }
 
     private func existingPasswordRef(for id: String) -> String? {

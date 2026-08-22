@@ -156,6 +156,33 @@ final class LoggerBufferTests: XCTestCase {
         }
         wait(for: [exp], timeout: 2)
     }
+
+    /// 日志模块名白名单:默认模块名不得产生 spec 未定义的 `App`。
+    func testDefaultModuleNameIsInWhitelist() {
+        let (logger, _) = makeLogger()
+        logger.log("默认模块名")
+
+        let exp = expectation(description: "默认模块名在规范白名单内")
+        DispatchQueue.main.async {
+            guard let entry = logger.entries.first else {
+                XCTFail("应有一条日志"); exp.fulfill(); return
+            }
+            XCTAssertTrue(
+                ["SSH", "SFTP", "Transfer", "HostKey", "Config", "FFI"].contains(entry.module),
+                "默认模块名 \(entry.module) 不在规范白名单中"
+            )
+            XCTAssertFalse(entry.formatted.contains("[App]"), "不应出现 App 模块名")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2)
+    }
+
+    /// 显式传入白名单外模块名的调用点应被修正(此处验证白名单辅助常量本身)。
+    func testWhitelistedModuleNamesMatchSpec() {
+        let modules = [LogModule.ssh, LogModule.sftp, LogModule.transfer,
+                       LogModule.hostKey, LogModule.config, LogModule.ffi]
+        XCTAssertEqual(modules, ["SSH", "SFTP", "Transfer", "HostKey", "Config", "FFI"])
+    }
 }
 
 // MARK: - Logger 文件日志与轮转测试

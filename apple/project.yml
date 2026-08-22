@@ -18,6 +18,7 @@ targetTemplates:
       - path: PandaSSH
       - path: Rust/Generated
         excludes: ["*.h", "*.modulemap", "module.modulemap"]
+      - path: ../assets
     dependencies:
       - package: SwiftTerm
       - framework: Rust/PandaCoreFFI.xcframework
@@ -37,6 +38,7 @@ targets:
       base:
         CODE_SIGN_IDENTITY: "-"
         INFOPLIST_KEY_NSHumanReadableCopyright: "Panda SSH"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-macOS
       configs:
         # Local dev builds use ad-hoc signing; iCloud / App Groups /
         # keychain-sharing entitlements require a paid developer team and a
@@ -77,8 +79,9 @@ targets:
     platform: iOS
     settings:
       base:
-        CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-iOS-Dev.entitlements
         TARGETED_DEVICE_FAMILY: "2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-iOS
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
 

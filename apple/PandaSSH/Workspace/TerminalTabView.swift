@@ -27,8 +27,24 @@ struct TerminalTabView: View {
             content
         }
         .background(Color.black)
-        .onAppear { evaluateGate() }
-        .onDisappear { session.close() }
+        .onAppear {
+            // 注册终端会话,供 WorkspaceStore 判断关闭确认门控与重连转发。
+            workspace.registerTerminal(session, for: tab.id)
+            evaluateGate()
+        }
+        .onDisappear {
+            // 不在此注销会话:连接态由 connectedTerminalTabs 独立追踪,
+            // 切换标签时视图销毁不应清除「已连接」标记(关闭确认仍需生效)。
+            // 注销在 WorkspaceStore.close(tabID:) 中统一执行。
+            session.close()
+        }
+        .onChange(of: session.phase) { _, newPhase in
+            // 仅在进入 shell 时标记已连接;不在 .failed 时取消标记,
+            // 因为 session.close()(切标签时)也会设 .failed,无法与真正断开区分。
+            if newPhase == .shell {
+                workspace.markTerminalConnected(tabID: tab.id)
+            }
+        }
         .preconnectSheets(gate: gate, host: host, tabID: tab.id)
         // 连接动画/mock 落结果；真实连接在门控通过后立即启动。
         .task(id: "\(session.attempt)-\(gate.unlocked)") {
@@ -162,12 +178,60 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private var readTask: Task<Void, Never>?
     private let onReadError: () -> Void
 
+    /// 最近一次上报（或待上报）给服务端的终端尺寸；nil 表示从未上报。
+    /// 用于 `sizeChanged` 的「首次立即、连续去抖」策略。
+    private var lastReportedTerminalSize: (cols: Int, rows: Int)?
+    /// 去抖中的延迟上报任务；新的尺寸变化会取消前一个任务。
+    private var pendingResizeWorkItem: DispatchWorkItem?
+
+    #if os(macOS)
+    /// 终端 PRIMARY selection 内部缓冲（macOS only，spec「终端选中即缓存 PRIMARY selection」）。
+    /// mouseUp 后由 `PandaTerminalView` 调 `updatePrimarySelection(from:)` 更新；
+    /// 中键点击时由 `pastePrimarySelection()` 写回 shell 通道。不污染系统剪贴板。
+    private var primarySelection: String = ""
+    #endif
+
+    /// 当前终端会话阶段；测试可注入，生产代码由 `TerminalSessionStore` 同步。
+    /// `pastePrimarySelection()` / 菜单可用性规则据此判断是否允许写入。
+    internal var currentPhase: TerminalSessionStore.Phase = .shell
+
+    /// 「重连」菜单项回调；由 `TerminalTabView` 在 §8 集成接入时注入 `session.retry()`。
+    /// 测试中可注入 spy 闭包验证调用。
+    var onReconnect: (() -> Void)?
+
+    /// 「关闭标签页」菜单项回调；由 `TerminalTabView` 在 §8 集成接入时注入
+    /// `workspace.close(tabID:)`（复用既有二次确认门控）。
+    /// 测试中可注入 spy 闭包验证调用。
+    var onCloseTab: (() -> Void)?
+
+    // MARK: - 测试可见的统计（生产代码不读）
+
+    /// 测试 hook：`selectAll()` 是否被调用。`TerminalView.selectAll` 是 `public`
+    /// 非 `open` 方法，无法在 spy 子类中重写；用此 flag 验证调用。
+    internal private(set) var testDidCallSelectAll = false
+
     init(onReadError: @escaping () -> Void) {
         self.onReadError = onReadError
     }
 
     func setup(terminalView: TerminalView, connection: ShellConnection?) {
         self.terminalView = terminalView
+        // 强类型识别自定义终端视图子类，接线子类暴露的回调属性（不引入业务分支）：
+        // - macOS `PandaTerminalView`：pandaDelegate（中键粘贴 / mouseUp PRIMARY 缓冲）、
+        //   menuActionPerformer（右键菜单条目点击 → coordinator.perform）。
+        // - iOS `PandaIOSTerminalView`：menuActionPerformer（长按 / 外接鼠标右键菜单点击）。
+        //   iPad 端无 pandaDelegate（中键粘贴不启用，见 design.md 已知边界）。
+        // 若传入裸 TerminalView（如旧测试），as? 失败即跳过接线，保持兼容。
+        #if os(macOS)
+        if let panda = terminalView as? PandaTerminalView {
+            panda.pandaDelegate = self
+            panda.menuActionPerformer = self
+        }
+        #else
+        if let panda = terminalView as? PandaIOSTerminalView {
+            panda.menuActionPerformer = self
+        }
+        #endif
         if let connection {
             update(connection: connection)
         }
@@ -182,6 +246,9 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     func detach() {
         readTask?.cancel()
         readTask = nil
+        pendingResizeWorkItem?.cancel()
+        pendingResizeWorkItem = nil
+        lastReportedTerminalSize = nil
         terminalView?.terminalDelegate = nil
         terminalView = nil
         connection = nil
@@ -220,8 +287,32 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         try? connection?.write(Data(data))
     }
 
+    /// 视图尺寸变化回调（SwiftTerm 在**主线程布局过程**中同步触发）。
+    ///
+    /// 侧栏显隐、窗口拖拽等动画会让该回调以逐帧频率连续触发（一次动画约 20 次）。
+    /// 若逐帧向服务端发送 `window-change`，远端 shell 会收到 SIGWINCH 风暴；
+    /// 其重绘序列与本地逐帧 reflow 交错时，可能把光标推到屏幕中部
+    /// （表现为终端上方出现大片空白、prompt「沉底」）。
+    ///
+    /// 策略：首次回调立即上报（连接建立后让服务端尽快拿到真实尺寸）；
+    /// 后续连续变化做 150ms 去抖，只在尺寸稳定后上报最终值。
+    /// 本地 SwiftTerm 的逐帧 reflow 不受影响（视图层行为不变）。
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        try? connection?.resize(cols: UInt64(newCols), rows: UInt64(newRows))
+        if lastReportedTerminalSize == nil {
+            lastReportedTerminalSize = (newCols, newRows)
+            Logger.shared.debug("终端初始尺寸上报 cols=\(newCols) rows=\(newRows)", module: LogModule.ssh)
+            try? connection?.resize(cols: UInt64(newCols), rows: UInt64(newRows))
+            return
+        }
+        lastReportedTerminalSize = (newCols, newRows)
+        pendingResizeWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, let size = self.lastReportedTerminalSize else { return }
+            Logger.shared.debug("终端尺寸去抖上报 cols=\(size.cols) rows=\(size.rows)", module: LogModule.ssh)
+            try? self.connection?.resize(cols: UInt64(size.cols), rows: UInt64(size.rows))
+        }
+        pendingResizeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
@@ -229,6 +320,177 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
 }
+
+// MARK: - TerminalMenuActionPerformer
+
+extension TerminalCoordinator: TerminalMenuActionPerformer {
+    func perform(_ item: TerminalMenuItem, hitLink: String?) {
+        switch item {
+        case .copyLink:
+            guard let link = hitLink, !link.isEmpty else { return }
+            #if os(macOS)
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(link, forType: .string)
+            #endif
+        case .openLink:
+            guard let link = hitLink, !link.isEmpty else { return }
+            #if os(macOS)
+            if let url = URL(string: link) {
+                NSWorkspace.shared.open(url)
+            }
+            #endif
+        case .copy:
+            #if os(macOS)
+            terminalView?.copy(self)
+            #endif
+        case .paste:
+            guard currentPhase == .shell else { return }
+            let text = readClipboardText()
+            guard !text.isEmpty else { return }
+            try? connection?.write(text.data(using: .utf8) ?? Data())
+        case .pasteAndEnter:
+            guard currentPhase == .shell else { return }
+            let text = readClipboardText()
+            guard !text.isEmpty else { return }
+            var data = text.data(using: .utf8) ?? Data()
+            data.append(0x0A) // LF
+            try? connection?.write(data)
+        case .selectAll:
+            terminalView?.selectAll()
+            testDidCallSelectAll = true
+        case .clearScreen:
+            guard currentPhase == .shell, connection != nil else { return }
+            try? connection?.write("clear\n".data(using: .utf8) ?? Data())
+        case .resetTerminal:
+            // macOS 端 SwiftTerm 公开了 `terminal` 属性，可直接 softReset；
+            // iOS 端 `terminal` 为 internal，通过发送 RIS 序列让远端触发终端重置。
+            #if os(macOS)
+            terminalView?.terminal?.softReset()
+            #endif
+            try? connection?.write("\u{1B}c".data(using: .utf8) ?? Data())
+        case .copyAndPaste:
+            #if os(macOS)
+            terminalView?.copy(self)
+            #endif
+            guard currentPhase == .shell else { return }
+            let text = readClipboardText()
+            guard !text.isEmpty else { return }
+            try? connection?.write(text.data(using: .utf8) ?? Data())
+        case .reconnect:
+            onReconnect?()
+        case .closeTab:
+            onCloseTab?()
+        }
+    }
+
+    /// 读取系统剪贴板文本（macOS 用 `NSPasteboard.general`，iOS 用 `UIPasteboard.general`）。
+    private func readClipboardText() -> String {
+        #if os(macOS)
+        return NSPasteboard.general.string(forType: .string) ?? ""
+        #else
+        return UIPasteboard.general.string ?? ""
+        #endif
+    }
+}
+
+#if os(macOS)
+// MARK: - PandaTerminalViewDelegate + PRIMARY selection 缓冲（macOS only）
+
+extension TerminalCoordinator: PandaTerminalViewDelegate {
+
+    /// 从终端视图选中文本更新 PRIMARY 缓冲。空字符串不覆盖既有非空缓冲。
+    /// 由 `PandaTerminalView.mouseUp` 调用。
+    func updatePrimarySelection(from tv: TerminalView) {
+        let text = Self.readSelectedText(from: tv)
+        updatePrimarySelection(from: text)
+    }
+
+    /// 测试可注入的重载：直接接受选中文本字符串，绕过 SwiftTerm `selection` 访问。
+    /// - Note: 空字符串或 nil 不覆盖既有非空缓冲（spec「选中空字符串不覆盖」）。
+    internal func updatePrimarySelection(from selectedText: String?) {
+        guard let text = selectedText, !text.isEmpty else { return }
+        primarySelection = text
+    }
+
+    /// 把 PRIMARY 缓冲写入当前 shell 通道（中键粘贴语义）。
+    /// - 仅在 `.shell` 阶段写入；`.connecting` / `.failed` 阶段不写入。
+    /// - 不追加换行符（spec「SHALL NOT 追加换行符」）。
+    /// - 不修改系统剪贴板（spec「SHALL NOT 写入系统剪贴板」）。
+    func pastePrimarySelection() {
+        guard currentPhase == .shell,
+              !primarySelection.isEmpty,
+              let connection = connection else { return }
+        try? connection.write(primarySelection.data(using: .utf8) ?? Data())
+    }
+
+    /// 测试可见的 PRIMARY 缓冲读取入口（便于断言缓冲值）。
+    internal var primarySelectionForTesting: String {
+        primarySelection
+    }
+
+    /// 从 SwiftTerm `TerminalView` 读取选中文本。
+    ///
+    /// SwiftTerm 的 `selection` 属性与其类型 `SelectionService` 均为 `internal`，
+    /// 跨模块（PandaSSH → SwiftTerm）既不能命名 `SelectionService`，也无法经 KVC 取值
+    /// （`selection` 非 `@objc`，`value(forKey: "selection")` 会抛 `NSUnknownKeyException`）。
+    /// SwiftTerm 未暴露任何公共「选中文本」读取入口（仅 `selectionActive` / 颜色等公共）。
+    ///
+    /// 采用「瞬态复制 + 恢复剪贴板」模式：
+    /// 1. 保存当前系统剪贴板字符串；
+    /// 2. 调 `tv.copy(self)` 把 SwiftTerm 选中写入剪贴板；
+    /// 3. 读取剪贴板得到选中文本；
+    /// 4. 恢复剪贴板原值。
+    /// 净效果：用户剪贴板内容不变，spec「SHALL NOT 写入系统剪贴板」语义满足（不永久修改）。
+    ///
+    /// - Parameter tv: 当前终端视图（必须是 SwiftTerm `TerminalView` 实例）。
+    /// - Returns: 非空选中文本；无选中或读取失败时返回 nil。
+    internal static func readSelectedText(from tv: TerminalView) -> String? {
+        let pb = NSPasteboard.general
+        let original = pb.string(forType: .string)
+        tv.copy(self)
+        let selected = pb.string(forType: .string)
+        // 恢复剪贴板：清除 copy 写入的内容，还回原值。
+        pb.clearContents()
+        if let original {
+            pb.setString(original, forType: .string)
+        }
+        guard let selected, !selected.isEmpty else { return nil }
+        return selected
+    }
+}
+#endif
+
+#if os(iOS)
+// MARK: - iOS 终端选中文本读取（瞬态 copy + 恢复剪贴板）
+
+extension TerminalCoordinator {
+
+    /// 从 SwiftTerm iOS `TerminalView` 读取选中文本。
+    ///
+    /// SwiftTerm iOS 的 `selection` 属性为 `internal`，跨模块不可访问；
+    /// 但 `copy(_:)` 是 `@objc open`（公开），会把选中文本写入 `UIPasteboard.general`。
+    /// 采用与 macOS 相同的「瞬态 copy + 恢复剪贴板」模式：
+    /// 1. 保存当前 `UIPasteboard.general.string`；
+    /// 2. 调 `tv.copy(self)` 把选中写入剪贴板；
+    /// 3. 读取剪贴板得到选中文本；
+    /// 4. 恢复剪贴板原值。
+    /// 净效果：用户剪贴板内容不变（瞬态写入边界见 spec/design 已知边界）。
+    ///
+    /// - Parameter tv: 当前终端视图（必须是 SwiftTerm `TerminalView` 实例）。
+    /// - Returns: 非空选中文本；无选中或读取失败时返回 nil。
+    internal static func readSelectedText(from tv: TerminalView) -> String? {
+        let pb = UIPasteboard.general
+        let original = pb.string
+        tv.copy(self)
+        let selected = pb.string
+        // 恢复剪贴板原值。
+        pb.string = original
+        guard let selected, !selected.isEmpty else { return nil }
+        return selected
+    }
+}
+#endif
 
 // MARK: - macOS
 
@@ -242,7 +504,10 @@ private struct MacTerminalRepresentable: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> TerminalView {
-        let tv = TerminalView(frame: .zero, font: nil)
+        // 使用 PandaTerminalView 子类：叠加中键粘贴、右键菜单、mouseUp PRIMARY 缓冲联动。
+        // 子类识别与 pandaDelegate / menuActionPerformer 的接线在 `TerminalCoordinator.setup` 内完成，
+        // 这里仅负责实例化与既有 SwiftTerm 配置（terminalDelegate / configureNativeColors）。
+        let tv = PandaTerminalView(frame: .zero, font: nil)
         tv.terminalDelegate = context.coordinator
         tv.configureNativeColors()
         context.coordinator.setup(terminalView: tv, connection: connection)
@@ -271,7 +536,10 @@ private struct IOSTerminalRepresentable: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> TerminalView {
-        let tv = TerminalView(frame: .zero, font: nil)
+        // 使用 PandaIOSTerminalView 子类：叠加「触摸长按 + 外接鼠标右键」触发的右键菜单。
+        // menuActionPerformer 的接线在 `TerminalCoordinator.setup` 内完成。
+        // 注：iPad 端不启用中键粘贴（SwiftTerm iOS 不区分鼠标按键，见 design.md 已知边界）。
+        let tv = PandaIOSTerminalView(frame: .zero, font: nil)
         tv.terminalDelegate = context.coordinator
         context.coordinator.setup(terminalView: tv, connection: connection)
         return tv

@@ -57,9 +57,8 @@ final class PandaCoreBridge {
 
     private init() {}
 
-    /// Initializes the Rust core with a config directory inside the shared
-    /// App Group container (so macOS and iPadOS builds use the same layout;
-    /// iCloud KV sync mirrors the file across devices — see Sync/ConfigSync.swift).
+    /// Initializes the Rust core with a config directory:
+    /// macOS uses `~/.panda-ssh/`, iPadOS uses the App Group container.
     func start() throws {
         guard !started else { return }
         try initStore(configDir: AppPaths.configDirectory.path)
@@ -202,6 +201,11 @@ final class PandaCoreBridge {
         )
     }
 
+    /// 回传批量任务中单个冲突文件的覆盖决策（true=覆盖 / false=跳过）。
+    func resolveBatchConflict(taskID: String, overwrite: Bool) throws {
+        try batchTransferResolveConflict(taskId: taskID, overwrite: overwrite)
+    }
+
     // MARK: - 代码片段
 
     func initializeSnippets(at url: URL) throws {
@@ -218,5 +222,19 @@ final class PandaCoreBridge {
 
     func removeSnippet(name: String) throws {
         try deleteSnippet(name: name)
+    }
+}
+
+/// 阻塞型 FFI 调用的后台调度设施。
+///
+/// Rust 侧导出函数是同步的（内部 `block_on` 全局 tokio runtime），若在
+/// 主线程直接调用会冻结 UI。`FFIBackground.run` 把同步闭包放到协作线程池
+/// （`Task.detached`）执行，调用方 `await` 后结果回主线程；多个调用并发
+/// 时由 tokio 多线程 runtime 并行握手，互不排队。
+enum FFIBackground {
+    /// 在后台线程执行 `op` 并返回其结果；`op` 抛出的错误原样传播。
+    /// 注意：`op` 是同步 FFI 调用（网络往返/文件扫描），执行期间不占主线程。
+    static func run<T: Sendable>(_ op: @escaping @Sendable () throws -> T) async throws -> T {
+        try await Task.detached(priority: .userInitiated, operation: op).value
     }
 }

@@ -2,7 +2,7 @@
 import SwiftUI
 
 /// Xcode 画布(Previews)专用支持:直接使用 Mock 后端的演示数据,
-/// 不触碰 Rust store、iCloud 与钥匙串。仅在 DEBUG 编译,不会进入 Release 包。
+/// 不触碰 Rust store、外部存储与钥匙串。仅在 DEBUG 编译,不会进入 Release 包。
 
 extension AppModel {
     /// 预览专用实例:Mock 后端 + 原型演示数据,预选中 web-prod。

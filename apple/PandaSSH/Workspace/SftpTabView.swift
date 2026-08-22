@@ -27,14 +27,36 @@ struct SftpTabView: View {
     /// 连接尝试序号:重试时 +1,驱动 .task 重跑连接动画。
     @State private var attempt = 0
     @State private var panelOpen = false
-    /// 待确认删除的条目;nil 表示未触发删除确认。
-    @State private var deleteCandidate: (entry: FileEntry, local: Bool)? = nil
+    /// 待确认删除的条目名称列表;nil 表示未触发删除确认。
+    /// 多选右键删除时含多个名称,单选/未选中右键时仅 1 个。
+    @State private var deleteCandidate: (names: [String], local: Bool)? = nil
+    /// 本地/远程路径导航编辑态:点击面包屑进入输入,回车跳转、Esc/失焦取消(item 7)。
+    @State private var localPathEditing = false
+    @State private var localPathInput = ""
+    @State private var remotePathEditing = false
+    @State private var remotePathInput = ""
+    @FocusState private var localPathFocused: Bool
+    @FocusState private var remotePathFocused: Bool
 
     init(tab: WorkspaceTab, host: HostEntry, transfers: TransferStore) {
         self.tab = tab
         self.host = host
         // 会话与面板共享同一个全局 TransferStore(与原型全局传输列表一致)
         _session = StateObject(wrappedValue: SftpSessionStore(host: host, transfers: transfers))
+    }
+
+    /// 单文件与批量冲突弹窗合并为同一个 sheet：优先展示单文件确认，
+    /// 关闭时清除对应来源的等待状态。
+    private var activeConflictBinding: Binding<PendingConflict?> {
+        Binding(
+            get: { session.pendingConflict ?? session.batchPendingConflict },
+            set: { newValue in
+                if newValue == nil {
+                    session.pendingConflict = nil
+                    session.batchPendingConflict = nil
+                }
+            }
+        )
     }
 
     var body: some View {
@@ -61,9 +83,13 @@ struct SftpTabView: View {
                 }
             }
         }
-        .sheet(item: $session.pendingConflict) { conflict in
+        .sheet(item: activeConflictBinding) { conflict in
             OverwriteConfirmationSheet(conflict: conflict) { overwrite in
-                session.resolveConflict(overwrite: overwrite)
+                if session.pendingConflict?.id == conflict.id {
+                    session.resolveConflict(overwrite: overwrite)
+                } else {
+                    session.resolveBatchConflict(overwrite: overwrite)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,20 +154,30 @@ struct SftpTabView: View {
                 guard let candidate = deleteCandidate else { return }
                 deleteCandidate = nil
                 Task {
-                    let error = candidate.local
-                        ? await session.deleteLocal(name: candidate.entry.name)
-                        : await session.deleteRemote(name: candidate.entry.name)
-                    if let error {
-                        toast.show("删除 \(candidate.entry.name) 失败：\(error)")
+                    let result: (deleted: Int, failed: [(name: String, error: String)])
+                    if candidate.local {
+                        result = await session.deleteLocalBatch(names: candidate.names)
                     } else {
-                        toast.show("已删除 \(candidate.entry.name)")
+                        result = await session.deleteRemoteBatch(names: candidate.names)
+                    }
+                    if result.failed.isEmpty {
+                        toast.show(candidate.names.count > 1 ? "已删除 \(result.deleted) 项" : "已删除 \(candidate.names[0])")
+                    } else if result.deleted > 0 {
+                        toast.show("已删除 \(result.deleted) 项，\(result.failed.count) 项失败")
+                    } else {
+                        let details = result.failed.map { "\($0.name): \($0.error)" }.joined(separator: "；")
+                        toast.show("删除失败：\(details)")
                     }
                 }
             }
             Button("取消", role: .cancel) { deleteCandidate = nil }
         }, message: {
             if let candidate = deleteCandidate {
-                Text("确定要删除「\(candidate.entry.name)」吗？此操作不可撤销。")
+                if candidate.names.count > 1 {
+                    Text("确定要删除 \(candidate.names.count) 项吗？此操作不可撤销。")
+                } else {
+                    Text("确定要删除「\(candidate.names[0])」吗？此操作不可撤销。")
+                }
             }
         })
     }
@@ -187,7 +223,7 @@ struct SftpTabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// 栏头:标题(点击回根目录) + 返回上级 + 面包屑 + 右侧操作按钮。
+    /// 栏头:标题(点击回根目录) + 返回上级 + 面包屑(可点击编辑路径) + 右侧操作按钮。
     private func paneHead(nav: FilePaneNavigator, local: Bool) -> some View {
         HStack(spacing: 6) {
             Button {
@@ -212,6 +248,53 @@ struct SftpTabView: View {
             .foregroundStyle(nav.canGoUp ? Color.primary : Color.secondary.opacity(0.4))
             .disabled(!nav.canGoUp)
             .accessibilityLabel("返回上级")
+            // 面包屑:点击进入路径输入态;输入态展示 TextField,回车跳转、Esc/失焦取消(item 7)。
+            pathEditor(nav: nav, local: local)
+            Button {
+                Task {
+                    local ? await session.localPane.reload() : await session.remotePane.reload()
+                }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("刷新当前目录")
+
+            paneHeadActions(local: local)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    /// 面包屑 / 路径输入切换:默认展示面包屑,点击切为 TextField。
+    @ViewBuilder
+    private func pathEditor(nav: FilePaneNavigator, local: Bool) -> some View {
+        let editing = local ? localPathEditing : remotePathEditing
+        if editing {
+            TextField("输入路径", text: local ? $localPathInput : $remotePathInput)
+                .font(.caption)
+                .textFieldStyle(.plain)
+                .focused(local ? $localPathFocused : $remotePathFocused)
+                .onSubmit {
+                    let target = local ? localPathInput : remotePathInput
+                    Task {
+                        let ok = local ? await session.navigateLocal(to: target) : await session.navigateRemote(to: target)
+                        if !ok { toast.show("无法访问路径：\(target)") }
+                        endPathEditing(local: local)
+                    }
+                }
+                #if os(macOS)
+                .onExitCommand { endPathEditing(local: local) }
+                #endif
+                .onChange(of: local ? localPathFocused : remotePathFocused) { _, focused in
+                    // 失焦时退出编辑态、回到面包屑(不跳转)。
+                    if !focused { endPathEditing(local: local) }
+                }
+                .onAppear {
+                    if local { localPathFocused = true } else { remotePathFocused = true }
+                }
+        } else {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 2) {
                     // 栏头左侧已经显示「本地」或「远程 — host.name」，
@@ -232,21 +315,23 @@ struct SftpTabView: View {
                     }
                 }
             }
-            Button {
-                Task {
-                    local ? await session.localPane.reload() : await session.remotePane.reload()
-                }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("刷新当前目录")
-
-            paneHeadActions(local: local)
+            .contentShape(Rectangle())
+            .onTapGesture { startPathEditing(nav: nav, local: local) }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+    }
+
+    private func startPathEditing(nav: FilePaneNavigator, local: Bool) {
+        if local {
+            localPathInput = nav.path
+            localPathEditing = true
+        } else {
+            remotePathInput = nav.path
+            remotePathEditing = true
+        }
+    }
+
+    private func endPathEditing(local: Bool) {
+        if local { localPathEditing = false } else { remotePathEditing = false }
     }
 
     @ViewBuilder
@@ -282,7 +367,7 @@ struct SftpTabView: View {
 
     private func pickAndUploadLocalFiles() async {
         guard let picked = await SystemLocalFilePicker.shared.pickFiles() else { return }
-        let tasks = session.upload(localPaths: picked.paths)
+        let tasks = await session.upload(localPaths: picked.paths)
         if let first = tasks.first {
             toast.show("已加入批量上传队列：\(first.name) 等 \(tasks.count) 项")
             panelOpen = true
@@ -386,9 +471,11 @@ struct SftpTabView: View {
                     if local {
                         localDragRect = nil
                         localDragBaseSelection = []
+                        session.localAnchor = anchorFromSelection(entries: nav.entries, selected: session.selectedLocalSet)
                     } else {
                         remoteDragRect = nil
                         remoteDragBaseSelection = []
+                        session.remoteAnchor = anchorFromSelection(entries: nav.entries, selected: session.selectedRemoteSet)
                     }
                 }
         )
@@ -412,8 +499,47 @@ struct SftpTabView: View {
         #endif
     }
 
-    /// 处理条目单击:根据是否多选模式与 ⌘ 键状态更新选中集合。
+    /// 当前是否按下 Shift 键(macOS 专用;iPadOS 始终返回 false)。
+    private var isShiftKeyPressed: Bool {
+        #if os(macOS)
+        NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+        #else
+        false
+        #endif
+    }
+
+    /// 处理条目单击:根据 Shift/⌘ 修饰键与多选模式更新选中集合。
+    /// - Shift+单击:从 anchor 到当前条目的范围选择。
+    /// - ⌘+Shift+单击:将范围追加到当前选中集合。
+    /// - 无修饰键/仅 ⌘:保持原有单选/追加行为。
     private func handleRowTap(entry: FileEntry, local: Bool, multiSelect: Bool) {
+        if isShiftKeyPressed {
+            let anchor = local ? session.localAnchor : session.remoteAnchor
+            if isCommandKeyPressed {
+                if let anchor = anchor {
+                    local
+                        ? session.appendLocalRange(from: anchor, to: entry.name)
+                        : session.appendRemoteRange(from: anchor, to: entry.name)
+                } else {
+                    // 无 anchor 时 ⌘+Shift+单击回退为追加单选。
+                    local
+                        ? session.selectLocal(entry.name, append: true)
+                        : session.selectRemote(entry.name, append: true)
+                }
+            } else {
+                if let anchor = anchor {
+                    local
+                        ? session.selectLocalRange(from: anchor, to: entry.name)
+                        : session.selectRemoteRange(from: anchor, to: entry.name)
+                } else {
+                    // 无 anchor 时 Shift+单击回退为单选并设立 anchor。
+                    local
+                        ? session.selectLocal(entry.name, append: false)
+                        : session.selectRemote(entry.name, append: false)
+                }
+            }
+            return
+        }
         let append = multiSelect || isCommandKeyPressed
         if local {
             session.selectLocal(entry.name, append: append)
@@ -453,16 +579,14 @@ struct SftpTabView: View {
         .onTapGesture {
             handleRowTap(entry: entry, local: local, multiSelect: multiSelect)
         }
-        // 目录行附加双击进入手势;与单击手势互不阻塞。
-        .applyIf(entry.isDirectory) {
-            $0.simultaneousGesture(
-                TapGesture(count: 2).onEnded {
-                    Task {
-                        local ? await session.enterLocal(entry.name) : await session.enterRemote(entry.name)
-                    }
+        // 双击:目录进入、文件触发传输(item 6);与单击选中手势互不阻塞。
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                Task {
+                    local ? await session.doubleClickLocal(entry: entry) : await session.doubleClickRemote(entry: entry)
                 }
-            )
-        }
+            }
+        )
         .contextMenu { fileContextMenu(entry: entry, local: local, multiSelect: multiSelect) }
     }
 
@@ -479,40 +603,50 @@ struct SftpTabView: View {
     }
 
     /// 文件/目录右键(macOS)/长按(iPadOS)菜单。
+    /// 多选模式下右键选中集合内条目 → 菜单文案含数量、action 作用于整个选中集合;
+    /// 右键未选中条目 → action 先置为唯一选中再执行(item 5)。
     @ViewBuilder
     private func fileContextMenu(entry: FileEntry, local: Bool, multiSelect: Bool) -> some View {
-        if multiSelect {
-            EmptyView()
-        } else {
-            if entry.isDirectory {
-                Button {
-                    Task {
-                        local ? await session.enterLocal(entry.name) : await session.enterRemote(entry.name)
-                    }
-                } label: {
-                    Label("进入", systemImage: "arrow.forward")
+        let selectedSet = local ? session.selectedLocalSet : session.selectedRemoteSet
+        let count = selectedSet.count
+        let collective = multiSelect && selectedSet.contains(entry.name) && count > 1
+        let actionLabel = { (verb: String) -> String in collective ? "\(verb) \(count) 项" : verb }
+        if entry.isDirectory {
+            Button {
+                Task {
+                    local ? await session.enterLocal(entry.name) : await session.enterRemote(entry.name)
                 }
-            }
-            if local {
-                Button {
-                    session.selectLocal(entry.name)
-                    Task { await session.uploadSelected() }
-                } label: {
-                    Label("上传", systemImage: "arrow.up")
-                }
-            } else {
-                Button {
-                    session.selectRemote(entry.name)
-                    Task { await session.downloadSelected() }
-                } label: {
-                    Label("下载", systemImage: "arrow.down")
-                }
-            }
-            Button(role: .destructive) {
-                deleteCandidate = (entry, local)
             } label: {
-                Label("删除", systemImage: "trash")
+                Label("进入", systemImage: "arrow.forward")
             }
+        }
+        if local {
+            Button {
+                Task { await session.contextUpload(entry: entry) }
+            } label: {
+                Label(actionLabel("上传"), systemImage: "arrow.up")
+            }
+        } else {
+            Button {
+                Task { await session.contextDownload(entry: entry) }
+            } label: {
+                Label(actionLabel("下载"), systemImage: "arrow.down")
+            }
+        }
+        Button(role: .destructive) {
+            // 多选右键选中集合内条目 → 删除整个集合;否则仅删除右键条目(item 5 修复)。
+            if collective {
+                deleteCandidate = (Array(selectedSet), local)
+            } else {
+                // 右键未选中条目 → 先置为唯一选中(与上传/下载一致)
+                if !selectedSet.contains(entry.name) {
+                    if local { session.selectLocal(entry.name, append: false) }
+                    else { session.selectRemote(entry.name, append: false) }
+                }
+                deleteCandidate = ([entry.name], local)
+            }
+        } label: {
+            Label(actionLabel("删除"), systemImage: "trash")
         }
     }
 
@@ -623,6 +757,12 @@ struct SftpTabView: View {
         } else {
             session.selectedRemoteSet = finalSelection
         }
+    }
+
+    /// 根据最终选中集合按列表顺序返回第一个被选中的条目名，作为范围选择 anchor。
+    /// 空集合时返回 nil。
+    private func anchorFromSelection(entries: [FileEntry], selected: Set<String>) -> String? {
+        entries.first { selected.contains($0.name) }?.name
     }
 }
 

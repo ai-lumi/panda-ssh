@@ -19,9 +19,10 @@ uniffi::setup_scaffolding!();
 
 mod batch_transfer;
 pub use batch_transfer::{
-    batch_transfer_cancel, batch_transfer_list, batch_transfer_status, scan_local_batch,
-    scan_remote_batch, start_batch_download, start_batch_upload, BatchItemRecord,
-    BatchTransferDirectionEnum, BatchTransferStatusEnum, BatchTransferStatusRecord,
+    batch_transfer_cancel, batch_transfer_list, batch_transfer_resolve_conflict,
+    batch_transfer_status, scan_local_batch, scan_remote_batch, start_batch_download,
+    start_batch_upload, BatchConflictRecord, BatchItemRecord, BatchTransferDirectionEnum,
+    BatchTransferStatusEnum, BatchTransferStatusRecord,
 };
 
 // ---------------------------------------------------------------------------

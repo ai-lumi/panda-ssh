@@ -70,7 +70,7 @@ struct LogView: View {
 
 private func previewLogger() -> Logger {
     let logger = Logger(configDirectory: nil)
-    logger.info("应用启动", module: "App")
+    logger.info("应用启动", module: LogModule.config)
     logger.info("已连接 host=192.168.1.1:22", module: "SSH")
     logger.warning("主机密钥变更 host=10.0.0.5:22; 已知指纹=SHA256:abc…; 呈现指纹=SHA256:def…", module: "HostKey")
     logger.error("连接失败 host=192.168.1.1:22; 原因=认证失败", module: "SSH")

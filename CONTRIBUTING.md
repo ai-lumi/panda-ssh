@@ -25,7 +25,7 @@
 | Rust | 1.93+（stable） | 核心库 | rustup（见镜像节） |
 | XcodeGen | latest | 从 `apple/project.yml` 生成 .xcodeproj | `brew install xcodegen` |
 | Node.js | ≥ 20.19 | OpenSpec CLI（npx 即用，可不全局装） | brew / nvm |
-| Apple Developer 账号 | 免费可开发，**付费（$99/年）才可启用 iCloud 同步与真机分发** | 签名 | developer.apple.com |
+| Apple Developer 账号 | 免费可开发，**付费（$99/年）才可真机分发** | 签名 | developer.apple.com |
 
 > Linux 前端（GTK4）尚未开始，当前开发必须在 macOS 上进行。
 
@@ -198,9 +198,9 @@ xcodebuild -project apple/PandaSSH.xcodeproj -scheme PandaSSH-macOS -configurati
 open ~/Library/Developer/Xcode/DerivedData/PandaSSH-*/Build/Products/Debug/PandaSSH.app
 ```
 
-**iPadOS 模拟器**：Xcode 里选 PandaSSH-iOS scheme + 一台 iPad 模拟器运行。（真机/iCloud 同步需要付费开发者账号签名，见下节。）
+**iPadOS 模拟器**：Xcode 里选 PandaSSH-iOS scheme + 一台 iPad 模拟器运行。（真机分发需要付费开发者账号签名，见下节。）
 
-Debug 构建使用 `PandaSSH-macOS-Dev.entitlements`（仅沙箱+网络）：App Group / iCloud KV 不可用，配置会回退到 Documents 目录，同步功能静默降级——这是预期行为，不是 bug。
+Debug 构建使用 `PandaSSH-macOS-Dev.entitlements`（仅沙箱+网络）：App Group 不可用时配置会回退到 Documents 目录——这是预期行为，不是 bug。
 
 ## 7. 打包与发布
 
@@ -208,7 +208,7 @@ Debug 构建使用 `PandaSSH-macOS-Dev.entitlements`（仅沙箱+网络）：App
 
 **macOS（开发者 ID 分发，绕开 App Store）**：
 1. 在 `apple/project.yml` 的 macOS target 把 `CODE_SIGN_IDENTITY` 换成 `Apple Development`/`Developer ID Application` 并填 `DEVELOPMENT_TEAM`。
-2. Release 构建自动使用完整 entitlements（`PandaSSH-macOS.entitlements`，含 iCloud KV + App Groups）——需要在 Apple Developer 后台为 App ID 开启 iCloud 与 App Groups 能力。
+2. Release 构建使用 `PandaSSH-macOS.entitlements`（沙箱关闭 + 网络客户端）。
 3. `xcodebuild -scheme PandaSSH-macOS -configuration Release archive` 导出后公证（`xcrun notarytool submit`）再分发。
 
 **iPadOS（App Store / TestFlight）**：
@@ -217,7 +217,7 @@ Debug 构建使用 `PandaSSH-macOS-Dev.entitlements`（仅沙箱+网络）：App
 
 **发布前检查清单**（随功能完善扩充）：
 - [ ] server-management 提案落地：TOFU 确认式交互取代静默 `AcceptAndStore`（spec 中的发布门禁）
-- [ ] 完整 entitlements 下的真机联调（iCloud KV + 同步钥匙串漫游实测）
+- [ ] 真机联调（系统钥匙串行为实测）
 - [ ] `cargo test` / 双端 xcodebuild 全绿
 - [ ] 第三方依赖许可证清单（Apache-2.0 兼容性已在 AGENTS.md 约束）
 

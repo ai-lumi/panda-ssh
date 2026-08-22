@@ -443,6 +443,11 @@ RustBuffer uniffi_panda_ffi_fn_func_batch_transfer_list(RustCallStatus *_Nonnull
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_RESOLVE_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_RESOLVE_CONFLICT
+void uniffi_panda_ffi_fn_func_batch_transfer_resolve_conflict(RustBuffer task_id, int8_t overwrite, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_STATUS
 RustBuffer uniffi_panda_ffi_fn_func_batch_transfer_status(RustBuffer task_id, RustCallStatus *_Nonnull out_status
@@ -959,6 +964,12 @@ uint16_t uniffi_panda_ffi_checksum_func_batch_transfer_cancel(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_LIST
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_LIST
 uint16_t uniffi_panda_ffi_checksum_func_batch_transfer_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_RESOLVE_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_BATCH_TRANSFER_RESOLVE_CONFLICT
+uint16_t uniffi_panda_ffi_checksum_func_batch_transfer_resolve_conflict(void
     
 );
 #endif

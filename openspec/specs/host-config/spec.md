@@ -2,7 +2,7 @@
 
 ## Purpose
 
-主机配置的建模与持久化：主机列表以 TOML 文件存储，密钥材料（密码、私钥口令）只存系统钥匙串，配置文件仅存引用 key。macOS 与 iPadOS 共用同一份布局，存储路径由宿主 App 注入（App Group 容器）。
+主机配置的建模与持久化：主机列表以 TOML 文件存储，密钥材料（密码、私钥口令）只存系统钥匙串，配置文件仅存引用 key。macOS 与 iPadOS 共用同一份布局，存储路径由宿主 App 注入（macOS 为 `~/.panda-ssh/`，iPadOS 为 App Group 容器）。
 ## Requirements
 ### Requirement: 主机配置数据模型
 

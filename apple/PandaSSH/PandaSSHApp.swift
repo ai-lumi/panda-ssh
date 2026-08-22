@@ -5,20 +5,25 @@ struct PandaSSHApp: App {
     @StateObject private var model: AppModel
     @StateObject private var workspace: WorkspaceStore
     /// 全局传输任务队列(与原型全局传输列表一致,各 SFTP 标签共享)。
-    @StateObject private var transfers = TransferStore()
+    /// 在 init 中与 workspace 共享同一实例(注入到 WorkspaceStore 协调连接释放)。
+    @StateObject private var transfers: TransferStore
 
     init() {
-        // 先建 AppModel,再把主机名查询闭包注入工作区 store,
-        // 保证标签标题消歧时能拿到最新主机名,且两者与 App 同生命周期。
+        // 先建 AppModel 与 TransferStore,再把主机名查询闭包与传输队列注入工作区
+        // store,保证标签标题消歧时能拿到最新主机名、关闭标签时能协调连接释放,
+        // 且三者与 App 同生命周期。
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
+        let transfers = TransferStore()
+        _transfers = StateObject(wrappedValue: transfers)
         _workspace = StateObject(wrappedValue: WorkspaceStore(
             hostNameProvider: { hostID in
                 model.hosts.first(where: { $0.id == hostID })?.name
             },
             disconnectHandler: { hostID in
                 try? disconnectHost(hostId: hostID)
-            }
+            },
+            transferStore: transfers
         ))
     }
 
@@ -31,9 +36,16 @@ struct PandaSSHApp: App {
                 .environmentObject(Logger.shared)
         }
         #if os(macOS)
+        // 隐藏标题栏:让内容区延伸到窗口顶部,自定义工具带与红绿灯对齐;
+        // 同时移除标题栏上的 App 名称文字(任务 4.2 / 提案「标题栏不出现 App 名称」)。
+        .windowStyle(.hiddenTitleBar)
+        #endif
+
+        #if os(macOS)
         Settings {
             SettingsView()
                 .environmentObject(model)
+                .environmentObject(workspace)
                 .environmentObject(ToastCenter())
         }
         WindowGroup("日志", id: "panda-log") {
@@ -70,14 +82,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var groups: [HostGroup] = []
     @Published private(set) var snippets: [Snippet] = []
     @Published var lastError: String?
-    /// 侧栏当前选中的主机;标签栏「+」新建入口据此工作。
+    /// 侧栏当前选中的主机;新建标签页入口据此工作。
     @Published var selectedHostID: String?
     /// 侧栏当前选中的分组;与主机选中互斥(单一选中语义)。
     @Published var selectedGroupID: String?
     /// 主区页面分支(侧栏底部入口切换)。
     @Published var sidebarPage: SidebarPage = .hosts
-    /// iCloud 同步演示开关:状态栏与设置页联动,纯演示不落盘。
-    @Published var iCloudSyncEnabled = true
+    /// 侧栏弹层(添加主机/新建分组等)的统一状态。
+    /// 提升到模型层:入口按钮(macOS 在侧栏列顶部工具栏)与右键菜单共用,
+    /// sheet 统一挂在根视图(HostListView)。
+    @Published var sidebarSheet: SidebarSheetKind?
+    /// 侧栏显隐控制(与 NavigationSplitView 绑定)。
+    @Published var columnVisibility: NavigationSplitViewVisibility = .all
 
     let backend: any AppBackend
 
@@ -85,10 +101,6 @@ final class AppModel: ObservableObject {
 
     init(backend: any AppBackend) {
         self.backend = backend
-        backend.onRemoteChange = { [weak self] in
-            // ConfigSync 的回调已在主队列;包一层 Task 保证 @MainActor 语义
-            Task { @MainActor [weak self] in self?.reload() }
-        }
         lastError = backend.startupError
         reload()
     }

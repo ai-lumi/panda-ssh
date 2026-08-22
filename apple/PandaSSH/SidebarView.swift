@@ -1,6 +1,52 @@
 import SwiftUI
 
-/// 侧栏:搜索框 + 工具栏 + 分组树 + 底部固定入口(代码片段/设置)。
+/// 侧栏弹层枚举,供 SidebarView 与相关 sheet 共享。
+enum SidebarSheetKind: Identifiable {
+    /// defaultGroupID 为 nil 表示按当前选中态自动推断(选中分组 > 选中主机所在分组)
+    case addHost(defaultGroupID: String?)
+    case editHost(HostEntry)
+    /// parent 为 nil 表示在根级新建
+    case newGroup(parent: HostGroup?)
+    case renameGroup(HostGroup)
+
+    var id: String {
+        switch self {
+        case .addHost(let gid): "addHost-\(gid ?? "auto")"
+        case .editHost(let host): "editHost-\(host.id)"
+        case .newGroup(let parent): "newGroup-\(parent?.id ?? "root")"
+        case .renameGroup(let group): "renameGroup-\(group.id)"
+        }
+    }
+}
+
+extension SidebarSheetKind {
+    /// 根据弹层类型生成对应的 sheet 内容视图。
+    @MainActor
+    @ViewBuilder
+    func sheetContent(model: AppModel, workspace: WorkspaceStore, toast: ToastCenter) -> some View {
+        switch self {
+        case .addHost(let defaultGroupID):
+            HostEditView(host: nil, defaultGroupID: defaultGroupID ?? model.groupIDForNewHost)
+        case .editHost(let host):
+            HostEditView(host: host)
+        case .newGroup(let parent):
+            GroupNameSheet(
+                title: parent == nil ? "新建分组" : "新建子分组",
+                message: parent.map { "在「\($0.name)」下创建子分组：" } ?? "在根级创建新分组："
+            ) { name in
+                model.createGroup(name: name, parentID: parent?.id)
+                toast.show("分组已创建")
+            }
+        case .renameGroup(let group):
+            GroupNameSheet(title: "重命名分组", initial: group.name) { name in
+                model.renameGroup(id: group.id, name: name)
+                toast.show("分组已重命名")
+            }
+        }
+    }
+}
+
+/// 侧栏:搜索框 + 分组树 + 底部固定入口(代码片段/设置)。
 /// 布局与交互参照 prototype/index.html;右键菜单 macOS/iPadOS 统一走 contextMenu
 /// (macOS 右键、iPadOS 长按)。
 struct SidebarView: View {
@@ -12,39 +58,19 @@ struct SidebarView: View {
     #endif
 
     @State private var searchText = ""
-    @State private var sheet: SheetKind?
     @State private var hostPendingDelete: HostEntry?
     @State private var groupPendingDelete: HostGroup?
-
-    /// 侧栏弹层
-    private enum SheetKind: Identifiable {
-        /// defaultGroupID 为 nil 表示按当前选中态自动推断(选中分组 > 选中主机所在分组)
-        case addHost(defaultGroupID: String?)
-        case editHost(HostEntry)
-        /// parent 为 nil 表示在根级新建
-        case newGroup(parent: HostGroup?)
-        case renameGroup(HostGroup)
-
-        var id: String {
-            switch self {
-            case .addHost(let gid): "addHost-\(gid ?? "auto")"
-            case .editHost(let host): "editHost-\(host.id)"
-            case .newGroup(let parent): "newGroup-\(parent?.id ?? "root")"
-            case .renameGroup(let group): "renameGroup-\(group.id)"
-            }
-        }
-    }
 
     private var callbacks: SidebarCallbacks {
         SidebarCallbacks(
             openTerminal: { workspace.openTerminal(hostID: $0.id) },
             openSFTP: { workspace.openSFTP(hostID: $0.id) },
-            editHost: { sheet = .editHost($0) },
+            editHost: { model.sidebarSheet = .editHost($0) },
             deleteHost: { hostPendingDelete = $0 },
-            newSubgroup: { sheet = .newGroup(parent: $0) },
-            renameGroup: { sheet = .renameGroup($0) },
+            newSubgroup: { model.sidebarSheet = .newGroup(parent: $0) },
+            renameGroup: { model.sidebarSheet = .renameGroup($0) },
             deleteGroup: { groupPendingDelete = $0 },
-            addHostInGroup: { sheet = .addHost(defaultGroupID: $0.id) }
+            addHostInGroup: { model.sidebarSheet = .addHost(defaultGroupID: $0.id) }
         )
     }
 
@@ -58,50 +84,17 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            #if os(macOS)
+            sidebarTopBar
+            searchField
+            #endif
             treeView
             Divider()
             bottomEntries
         }
-        .navigationTitle("熊猫 SSH")
-        // 原生搜索框与工具栏(macOS/iPadOS 均由系统渲染,折叠行为可靠)
+        #if os(iOS)
         .searchable(text: $searchText, placement: .sidebar, prompt: "搜索主机")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    sheet = .addHost(defaultGroupID: nil)
-                } label: {
-                    Label("添加主机", systemImage: "plus")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    sheet = .newGroup(parent: nil)
-                } label: {
-                    Label("新建分组", systemImage: "folder.badge.plus")
-                }
-            }
-        }
-        .sheet(item: $sheet) { kind in
-            switch kind {
-            case .addHost(let defaultGroupID):
-                HostEditView(host: nil, defaultGroupID: defaultGroupID ?? model.groupIDForNewHost)
-            case .editHost(let host):
-                HostEditView(host: host)
-            case .newGroup(let parent):
-                GroupNameSheet(
-                    title: parent == nil ? "新建分组" : "新建子分组",
-                    message: parent.map { "在「\($0.name)」下创建子分组：" } ?? "在根级创建新分组："
-                ) { name in
-                    model.createGroup(name: name, parentID: parent?.id)
-                    toast.show("分组已创建")
-                }
-            case .renameGroup(let group):
-                GroupNameSheet(title: "重命名分组", initial: group.name) { name in
-                    model.renameGroup(id: group.id, name: name)
-                    toast.show("分组已重命名")
-                }
-            }
-        }
+        #endif
         .alert("删除主机", isPresented: hasPendingHost, presenting: hostPendingDelete) { host in
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
@@ -130,6 +123,66 @@ struct SidebarView: View {
     private var hasPendingGroup: Binding<Bool> {
         Binding(get: { groupPendingDelete != nil }, set: { if !$0 { groupPendingDelete = nil } })
     }
+
+    #if os(macOS)
+    /// 侧栏顶部工具条(系统工具栏已由 MainWindowChrome 移除)。
+    /// macOS 26 起分栏浮动面板强制位于标题栏下方,本工具条随侧栏列布局,
+    /// 不再与红绿灯同一水平线(系统行为,见 MainWindowChrome 注释)。
+    /// 左侧为窗口拖拽区,右端两个容器靠右布局:
+    /// 容器 1 为添加按钮组(添加主机/新建分组),容器 2 为侧栏切换按钮。
+    /// 分栏最小宽度(220pt)保证容器完整显示;拖到最小宽度以下系统自动隐藏侧栏。
+    private var sidebarTopBar: some View {
+        HStack(spacing: 8) {
+            WindowDragView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 容器 1:添加按钮组
+            HStack(spacing: 12) {
+                Button {
+                    model.sidebarSheet = .addHost(defaultGroupID: nil)
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("添加主机")
+                Button {
+                    model.sidebarSheet = .newGroup(parent: nil)
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                }
+                .help("新建分组")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+            // 容器 2:侧栏切换按钮
+            Button {
+                withAnimation { model.columnVisibility = .detailOnly }
+            } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .help("隐藏侧栏")
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .frame(height: 38)
+    }
+
+    private var searchField: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("搜索主机", text: $searchText)
+                .textFieldStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+    #endif
 
     // MARK: 分组树
 
@@ -187,7 +240,11 @@ struct SidebarView: View {
                 }
             }
         }
+        #if os(macOS)
+        .listStyle(.plain)
+        #else
         .listStyle(.sidebar)
+        #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

@@ -2,7 +2,8 @@
 
 ## Purpose
 
-基于 russh 的 SSH 客户端会话：密码与密钥两种认证、命令执行、连接超时控制。本期不做交互式 shell 数据流（终端对接属于后续变更）。
+基于 russh 的 SSH 客户端会话：密码与密钥两种认证、命令执行、连接超时控制、交互式 shell 会话。
+
 ## Requirements
 ### Requirement: 建立会话
 
@@ -43,4 +44,23 @@
 
 - **WHEN** 执行的命令在超时时间内不结束
 - **THEN** 返回 `Timeout` 错误，调用方线程不被永久阻塞
+
+### Requirement: 交互式 shell 会话
+
+系统 SHALL 支持在已认证的 SSH 会话上建立交互式 shell 会话。Shell 会话 MUST 先分配 PTY（伪终端），再请求远程 shell，使远程 shell 运行在正确的终端语义环境中（ANSI 转义码、行编辑、作业控制）。Shell 会话 MUST 支持双向数据流：客户端输入字节通过 SSH 通道发送到服务端 PTY，服务端 PTY 输出由客户端读取并传递给终端视图。Shell 会话 MUST 支持窗口尺寸动态调整。
+
+#### Scenario: 成功建立 shell 会话
+
+- **WHEN** 客户端请求打开交互式 shell
+- **THEN** PTY 分配成功，远程 shell 启动，双向数据流就绪
+
+#### Scenario: PTY 分配失败
+
+- **WHEN** 服务端拒绝 PTY 分配
+- **THEN** 返回明确的错误，SHALL NOT 建立无 PTY 的 shell 会话
+
+#### Scenario: shell 会话关闭
+
+- **WHEN** 客户端关闭 shell 会话
+- **THEN** shell 通道被关闭，底层 SSH 连接保持（以便连接池复用）
 

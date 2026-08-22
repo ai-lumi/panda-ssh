@@ -212,7 +212,6 @@ final class PreconnectGateTests: XCTestCase {
 /// 只支撑 preconnect 决策的最小后端,其余方法为空实现。
 private final class FakeBackend: AppBackend {
     let startupError: String? = nil
-    var onRemoteChange: (() -> Void)?
 
     var hostKeyStatusValue: HostKeyGateStatus = .unknown
     var probeResult: PresentedHostKey? = PresentedHostKey(

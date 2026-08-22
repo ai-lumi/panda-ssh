@@ -5,7 +5,7 @@ context: |
   Tech stack: Rust workspace (panda-core 核心库: russh/russh-sftp/tokio/serde+toml;
   panda-ffi: uniffi 绑定) + SwiftUI 多平台 App (macOS 14+ / iPadOS 17+, SwiftTerm
   终端, XcodeGen 生成工程)。Linux GTK4 后期复用 panda-core。
-  配置共享: iCloud Key-Value Storage + iCloud 同步钥匙串；密钥材料只进钥匙串，
+  配置共享: 本地 TOML 文件 + 系统钥匙串；密钥材料只进钥匙串，
   配置文件仅存引用。
   开发方法: 强制 TDD（先写失败测试再实现，red-green-refactor）；Rust 侧
   cargo test，Swift 侧可测逻辑用 XCTest。

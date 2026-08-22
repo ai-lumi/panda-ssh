@@ -18,8 +18,8 @@
 ### 2. 强制测试驱动开发（TDD）
 
 - 严格 red-green-refactor：**先写会失败的测试，再写最小实现让它通过，然后重构**。没有先写失败测试的实现代码不予接受。
-- Rust 侧：`cargo test` 必须全绿；核心逻辑（config、hostkey、ssh、sftp 的可测部分）必须有单元测试；外部依赖（真实 SSH 服务器、钥匙串、iCloud）通过 trait 抽象隔离，用 fake/mock 测试。
-- Swift 侧：可测逻辑（配置同步、钥匙串封装、模型层）用 XCTest；纯 UI 布局不强制测试。
+- Rust 侧：`cargo test` 必须全绿；核心逻辑（config、hostkey、ssh、sftp 的可测部分）必须有单元测试；外部依赖（真实 SSH 服务器、钥匙串）通过 trait 抽象隔离，用 fake/mock 测试。
+- Swift 侧：可测逻辑（钥匙串封装、模型层）用 XCTest；纯 UI 布局不强制测试。
 - 覆盖率门禁：所有代码分支必须有测试覆盖，覆盖率不得低于 95%。提交前必须满足 `lines >= 95%` 且 `regions >= 95%`。
 - 用例门禁：每个功能模块的测试用例必须覆盖三类场景——正常流程、意外操作（错误输入/失败路径）、边界条件（空值/极限值/临界状态）。
 - 提交前运行 `cargo test`（及改动的 Swift target 测试），红了不许提交。
@@ -51,7 +51,7 @@ xcodebuild -project apple/PandaSSH.xcodeproj -scheme PandaSSH-macOS build
 
 Swift 双端共享源码中，平台条件编译只允许用于**界面与平台服务差异**：
 
-- 允许：UI 差异（颜色/键盘类型/悬停/最小窗口尺寸）、剪贴板（`NSPasteboard` vs `UIPasteboard`）、文件选择器（`NSOpenPanel` vs `UIDocumentPicker`）、钥匙串、iCloud KV 等平台服务调用。
+- 允许：UI 差异（颜色/键盘类型/悬停/最小窗口尺寸）、剪贴板（`NSPasteboard` vs `UIPasteboard`）、文件选择器（`NSOpenPanel` vs `UIDocumentPicker`）、钥匙串等平台服务调用。
 - 不允许：业务逻辑分支（配置、分组、主机密钥、SSH、SFTP、传输、片段的规则或算法）——这些只能写在 `crates/panda-core`，Swift 侧经 FFI 调用；禁止用 `#if os()` 让某一端走不同的业务行为。
 
 ### 架构评审检查清单

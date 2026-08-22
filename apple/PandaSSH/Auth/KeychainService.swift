@@ -10,8 +10,8 @@ protocol KeychainService {
     func delete(for ref: String)
 }
 
-/// 系统钥匙串实现：同步钥匙串（kSecAttrSynchronizable），
-/// 允许 iCloud Keychain 跨设备漫游；不设显式 access group。
+/// 系统钥匙串实现：使用 kSecAttrSynchronizable 写入钥匙串，
+/// 是否漫游由用户系统设置决定；不设显式 access group。
 final class SystemKeychain: KeychainService {
     static let shared = SystemKeychain()
 

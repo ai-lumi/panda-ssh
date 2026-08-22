@@ -20,7 +20,7 @@
 
 ### Requirement: 保存密码
 
-系统 SHALL 允许用户选择保存密码，保存的密码 MUST 存放于系统钥匙串（iCloud 同步），配置文件只存引用，MUST NOT 明文存储。
+系统 SHALL 允许用户选择保存密码，保存的密码 MUST 存放于系统钥匙串，配置文件只存引用，MUST NOT 明文存储。
 
 #### Scenario: 保存密码并自动填充
 

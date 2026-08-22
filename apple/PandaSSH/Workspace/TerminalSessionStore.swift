@@ -27,6 +27,16 @@ final class TerminalSessionStore: ObservableObject {
     private var pendingPassword: String?
     private var pendingPassphrase: String?
 
+    /// 连接打开器注入点：返回 FFI shell handle。默认真实实现 `PandaShellConnection.open`；
+    /// 测试注入慢速/失败 fake 以验证后台调度。必须可 Sendable 跨线程传递。
+    var connectionOpener: @Sendable (String, String?, String?, Bool) throws -> UInt64 = {
+        hostID, password, passphrase, trustOnFirstUse in
+        try PandaShellConnection.open(
+            hostID: hostID, password: password, passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse
+        )
+    }
+
     init(host: HostEntry) {
         self.host = host
     }
@@ -41,9 +51,11 @@ final class TerminalSessionStore: ObservableObject {
             return
         }
         let conn = MockShellConnection()
-        let welcome = "\u{1B}[32m✓\u{1B}[0m \u{1B}[2m已建立连接\u{1B}[0m\n"
-            + "Last login: \(Date())\n"
-            + "Welcome to \(host.name)\n"
+        // 换行用 \r\n：真实 PTY 输出经 ONLCR 映射后都是 \r\n；
+        // 裸 \n 只下移光标不回车，演示文本会呈阶梯状右移。
+        let welcome = "\u{1B}[32m✓\u{1B}[0m \u{1B}[2m已建立连接\u{1B}[0m\r\n"
+            + "Last login: \(Date())\r\n"
+            + "Welcome to \(host.name)\r\n"
         try? conn.write(welcome.data(using: .utf8) ?? Data())
         connection = conn
         phase = .shell
@@ -51,21 +63,21 @@ final class TerminalSessionStore: ObservableObject {
 
     /// 使用真实 SSH 连接建立 shell 会话。
     /// `password`/`passphrase` 由调用方（钥匙串或手动输入）提供。
+    /// 完整握手（`shellOpen`）在后台线程执行，不阻塞主线程；
+    /// 多个标签的连接可并行握手（tokio 多线程 runtime 并发 block_on）。
     func connect(record: HostConfigRecord, password: String?, passphrase: String?) {
         guard phase == .connecting else { return }
         pendingRecord = record
         pendingPassword = password
         pendingPassphrase = passphrase
 
+        let opener = connectionOpener
         Task { @MainActor in
             do {
-                let conn = try PandaShellConnection(
-                    hostID: record.id,
-                    password: password,
-                    passphrase: passphrase,
-                    trustOnFirstUse: false
-                )
-                self.connection = conn
+                let handle = try await FFIBackground.run {
+                    try opener(record.id, password, passphrase, false)
+                }
+                self.connection = PandaShellConnection(handle: handle)
                 self.phase = .shell
                 Logger.shared.info("已连接 host=\(record.host):\(record.port)", module: LogModule.ssh)
             } catch {

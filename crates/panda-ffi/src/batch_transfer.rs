@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use panda_core::{
     execute_batch_download, execute_batch_upload, scan_local_sources, scan_remote_sources,
@@ -33,9 +34,23 @@ pub enum BatchTransferDirectionEnum {
 pub enum BatchTransferStatusEnum {
     Queued,
     Running,
+    /// 单个目标文件已存在，暂停等待 UI 覆盖确认。
+    WaitingForConflict,
     Completed,
     Failed,
     Cancelled,
+}
+
+/// 批量传输中单个文件的覆盖确认信息。
+/// 与单文件传输的 `RemoteFileConflictRecord` 同构，额外携带源/目标路径。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BatchConflictRecord {
+    pub item_source: String,
+    pub item_destination: String,
+    pub source_size: u64,
+    pub source_mtime: Option<u64>,
+    pub target_size: u64,
+    pub target_mtime: Option<u64>,
 }
 
 /// FFI-friendly snapshot of a batch transfer task.
@@ -50,6 +65,8 @@ pub struct BatchTransferStatusRecord {
     pub transferred: u64,
     pub status: BatchTransferStatusEnum,
     pub error: Option<String>,
+    /// 等待覆盖确认时的冲突信息；其余状态为 None。
+    pub pending_conflict: Option<BatchConflictRecord>,
 }
 
 /// FFI-friendly single item in a batch scan result.
@@ -79,6 +96,10 @@ struct BatchTransferTask {
     status: Arc<Mutex<BatchTransferStatusEnum>>,
     error: Arc<Mutex<Option<String>>>,
     cancel: Arc<AtomicBool>,
+    /// 等待覆盖确认时对外暴露的冲突信息。
+    pending_conflict: Arc<Mutex<Option<BatchConflictRecord>>>,
+    /// 冲突决策回传通道：Swift 调用 `batch_transfer_resolve_conflict` 时经此发送。
+    conflict_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<ConflictResolution>>>>,
 }
 
 impl BatchTransferTask {
@@ -93,6 +114,7 @@ impl BatchTransferTask {
             transferred: self.transferred.load(Ordering::Relaxed),
             status: *self.status.lock().unwrap(),
             error: self.error.lock().unwrap().clone(),
+            pending_conflict: self.pending_conflict.lock().unwrap().clone(),
         }
     }
 }
@@ -229,6 +251,8 @@ fn start_batch_transfer(
         status: Arc::new(Mutex::new(BatchTransferStatusEnum::Queued)),
         error: Arc::new(Mutex::new(None)),
         cancel: Arc::new(AtomicBool::new(false)),
+        pending_conflict: Arc::new(Mutex::new(None)),
+        conflict_tx: Arc::new(Mutex::new(None)),
     };
     batch_transfer_tasks()
         .lock()
@@ -295,9 +319,34 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
     };
 
     let options = BatchTransferOptions::default();
-    // 默认覆盖已存在目标；后续可通过新增 resolve_conflict FFI 改为暂停确认。
-    let conflict_cb = Arc::new(|_item: &panda_core::BatchItem, _info: &panda_core::FileConflictInfo| {
-        ConflictResolution::Overwrite
+    // 目标已存在时暂停该文件，向 Swift 暴露冲突信息并等待决策；
+    // Swift 调用 batch_transfer_resolve_conflict 回传覆盖/跳过。
+    let pending_conflict = task.pending_conflict.clone();
+    let conflict_tx = task.conflict_tx.clone();
+    let task_status = task.status.clone();
+    let conflict_cb = Arc::new(move |item: &panda_core::BatchItem, info: &panda_core::FileConflictInfo| {
+        // 记录冲突信息并进入等待状态，供 Swift 轮询呈现。
+        *pending_conflict.lock().unwrap() = Some(BatchConflictRecord {
+            item_source: item.source.clone(),
+            item_destination: item.destination.clone(),
+            source_size: info.source_size,
+            source_mtime: info.source_mtime,
+            target_size: info.target_size,
+            target_mtime: info.target_mtime,
+        });
+        *task_status.lock().unwrap() = BatchTransferStatusEnum::WaitingForConflict;
+
+        // 创建一次性决策通道；batch_transfer_resolve_conflict / cancel 经此回传。
+        let rx = {
+            let (tx, rx) = std::sync::mpsc::channel();
+            *conflict_tx.lock().unwrap() = Some(tx);
+            rx
+        };
+        // 同步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
+        match rx.recv_timeout(Duration::from_secs(300)) {
+            Ok(ConflictResolution::Overwrite) => ConflictResolution::Overwrite,
+            Ok(ConflictResolution::Skip) | Err(_) => ConflictResolution::Skip,
+        }
     });
 
     let scan_result = match task.direction {
@@ -357,7 +406,8 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
 
     match outcome {
         Ok(outcome) => {
-            if outcome.cancelled {
+            // 等待覆盖确认期间被取消：即使最后一项刚被跳过，也以取消收尾。
+            if outcome.cancelled || task.cancel.load(Ordering::Relaxed) {
                 *task.status.lock().unwrap() = BatchTransferStatusEnum::Cancelled;
             } else if !outcome.errors.is_empty() {
                 *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
@@ -406,7 +456,8 @@ pub fn batch_transfer_list() -> Result<Vec<BatchTransferStatusRecord>, PandaErro
     Ok(records)
 }
 
-/// Cancel a queued or running batch task.
+/// Cancel a queued, running or conflict-waiting batch task.
+/// 若任务正等待覆盖确认，唤醒等待者（按跳过处理）后由取消标志终止。
 #[uniffi::export]
 pub fn batch_transfer_cancel(task_id: String) -> Result<(), PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
@@ -415,9 +466,54 @@ pub fn batch_transfer_cancel(task_id: String) -> Result<(), PandaError> {
         .get_mut(&id)
         .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     task.cancel.store(true, Ordering::Relaxed);
+    // 正在等待覆盖确认：唤醒等待者（发送 Skip），执行循环将在下一轮检测取消。
+    if let Some(tx) = task.conflict_tx.lock().unwrap().take() {
+        let _ = tx.send(ConflictResolution::Skip);
+    }
     let status = *task.status.lock().unwrap();
     if status == BatchTransferStatusEnum::Queued {
         *task.status.lock().unwrap() = BatchTransferStatusEnum::Cancelled;
     }
+    Ok(())
+}
+
+/// 回传批量任务中单个冲突文件的覆盖决策。
+/// `overwrite=true` 覆盖写入；`false` 跳过该项目。任务随后继续处理后续项目。
+/// 仅对处于 `WaitingForConflict` 状态的任务有效。
+#[uniffi::export]
+pub fn batch_transfer_resolve_conflict(task_id: String, overwrite: bool) -> Result<(), PandaError> {
+    let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
+    let task = {
+        let tasks = batch_transfer_tasks().lock().unwrap();
+        tasks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| PandaError::UnknownTransferTask(task_id.clone()))?
+    };
+    {
+        let status = *task.status.lock().unwrap();
+        if !matches!(status, BatchTransferStatusEnum::WaitingForConflict) {
+            return Err(PandaError::Core(
+                "batch task is not waiting for a conflict decision".to_string(),
+            ));
+        }
+    }
+    // 取出一次性决策通道并回传决策；失败说明等待者已消失（如被取消）。
+    let tx = task
+        .conflict_tx
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| PandaError::Core("no pending conflict decision channel".to_string()))?;
+    let decision = if overwrite {
+        ConflictResolution::Overwrite
+    } else {
+        ConflictResolution::Skip
+    };
+    tx.send(decision)
+        .map_err(|_| PandaError::Core("conflict decision channel closed".to_string()))?;
+    // 清空待确认信息并回到 Running，任务继续执行。
+    *task.pending_conflict.lock().unwrap() = None;
+    *task.status.lock().unwrap() = BatchTransferStatusEnum::Running;
     Ok(())
 }

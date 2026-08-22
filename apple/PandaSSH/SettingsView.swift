@@ -1,51 +1,302 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 设置页:macOS 走原生 Settings Scene(cmd+,),iPadOS 走侧栏入口 + sheet。
-/// 内容用原生 Form + .formStyle(.grouped),不再手绘卡片。
+/// macOS 端使用 TabView 分标签，与参考图一致：通用、外观、连接、终端、标签页、高级。
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var toast: ToastCenter
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @State private var importError: String?
+    @State private var importSuccess: String?
+    @State private var showImportPicker = false
 
     var body: some View {
-        Form {
-            Section {
-                Toggle("iCloud 同步", isOn: iCloudBinding)
-                LabeledContent("片段存储目录") {
-                    Text("规划中").foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("同步")
-            } footer: {
-                Text("通过 iCloud Key-Value Storage 同步主机配置与代码片段")
-            }
-            Section("关于") {
-                LabeledContent("版本", value: "Panda SSH 0.1.0 · Rust core v0.1")
-                LabeledContent("开源协议", value: "Apache-2.0")
-                LabeledContent("技术栈", value: "Rust（russh / russh-sftp）+ SwiftUI · uniffi 绑定")
-            }
-        }
-        .formStyle(.grouped)
-        #if os(iOS)
-        .navigationTitle("设置")
+        #if os(macOS)
+        macOSBody
+        #else
+        iOSBody
         #endif
     }
 
-    /// iCloud 开关联动(纯演示,不落盘)
-    private var iCloudBinding: Binding<Bool> {
-        Binding(
-            get: { model.iCloudSyncEnabled },
-            set: { newValue in
-                model.iCloudSyncEnabled = newValue
-                toast.show(newValue ? "iCloud 同步已开启" : "iCloud 同步已暂停")
+    #if os(macOS)
+    private var macOSBody: some View {
+        TabView {
+            generalTab
+                .tabItem {
+                    Label("通用", systemImage: "gear")
+                }
+            appearanceTab
+                .tabItem {
+                    Label("外观", systemImage: "paintbrush")
+                }
+            placeholderTab(title: "连接", systemImage: "link", message: "连接设置即将上线")
+                .tabItem {
+                    Label("连接", systemImage: "link")
+                }
+            placeholderTab(title: "终端", systemImage: "terminal", message: "终端设置即将上线")
+                .tabItem {
+                    Label("终端", systemImage: "terminal")
+                }
+            placeholderTab(title: "高级", systemImage: "gearshape.2", message: "高级设置即将上线")
+                .tabItem {
+                    Label("高级", systemImage: "gearshape.2")
+                }
+        }
+        .frame(width: 560, height: 420)
+        .alert("导入失败", isPresented: .constant(importError != nil)) {
+            Button("确定") { importError = nil }
+        } message: {
+            Text(importError ?? "")
+        }
+        .alert("导入成功", isPresented: .constant(importSuccess != nil)) {
+            Button("确定") { importSuccess = nil }
+        } message: {
+            Text(importSuccess ?? "")
+        }
+    }
+    #endif
+
+    private var iOSBody: some View {
+        Form {
+            configSection
+            aboutSection
+        }
+        .formStyle(.grouped)
+        .navigationTitle("设置")
+        .alert("导入失败", isPresented: .constant(importError != nil)) {
+            Button("确定") { importError = nil }
+        } message: {
+            Text(importError ?? "")
+        }
+        .alert("导入成功", isPresented: .constant(importSuccess != nil)) {
+            Button("确定") { importSuccess = nil }
+        } message: {
+            Text(importSuccess ?? "")
+        }
+    }
+
+    // MARK: - 通用标签
+
+    private var generalTab: some View {
+        Form {
+            configSection
+            aboutSection
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - 外观标签
+
+    private var appearanceTab: some View {
+        Form {
+            Section {
+                Picker("页签栏溢出模式", selection: $workspace.tabBarOverflowMode) {
+                    ForEach(TabBarOverflowMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                // radioGroup 仅 macOS 可用；iPadOS 用分段控件（纯 UI 差异）。
+                #if os(macOS)
+                .pickerStyle(.radioGroup)
+                #else
+                .pickerStyle(.segmented)
+                #endif
+            } header: {
+                Text("页签栏")
+            } footer: {
+                Text("滚动模式支持鼠标滚轮横向翻页；多行显示模式下页签会自动换行。")
             }
-        )
+        }
+        .formStyle(.grouped)
+    }
+
+    private func placeholderTab(title: String, systemImage: String, message: String) -> some View {
+        Form {
+            Section {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 40)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - 标签页标签
+
+    // MARK: - 配置导入/导出
+
+    private var configSection: some View {
+        Section("配置") {
+            Button("导出配置…") {
+                exportConfig()
+            }
+            Button("导入配置…") {
+                showImportPicker = true
+            }
+            #if os(macOS)
+            .sheet(isPresented: $showImportPicker) {
+                MacImportPicker { result in
+                    handleImportResult(result)
+                }
+            }
+            #else
+            .sheet(isPresented: $showImportPicker) {
+                IOSImportPicker { result in
+                    handleImportResult(result)
+                }
+            }
+            #endif
+        }
+    }
+
+    private var aboutSection: some View {
+        Section("关于") {
+            LabeledContent("版本", value: "Panda SSH 0.1.0 · Rust core v0.1")
+            LabeledContent("开源协议", value: "Apache-2.0")
+            LabeledContent("技术栈", value: "Rust（russh / russh-sftp）+ SwiftUI · uniffi 绑定")
+        }
+    }
+
+    // MARK: - 导出
+
+    private func exportConfig() {
+        do {
+            let data = try ConfigExporter.export(configDir: AppPaths.configDirectory)
+            #if os(macOS)
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "panda-config.pandassh"
+            panel.allowedContentTypes = [UTType(filenameExtension: "pandassh")!]
+            if panel.runModal() == .OK, let url = panel.url {
+                try data.write(to: url)
+            }
+            #else
+            // iPadOS: 写入临时目录并分享
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("panda-config.pandassh")
+            try data.write(to: tempURL)
+            let activity = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
+            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let root = scene.windows.first?.rootViewController {
+                root.present(activity, animated: true)
+            }
+            #endif
+        } catch {
+            importError = "导出失败: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - 导入处理
+
+    private func handleImportResult(_ result: Result<Data, Error>) {
+        switch result {
+        case .success(let data):
+            do {
+                let importResult = try ConfigImporter.import(pandasshData: data, configDir: AppPaths.configDirectory)
+                model.reload()
+                let backupInfo = importResult.backedUpFiles.isEmpty
+                    ? ""
+                    : "\n已备份文件: \(importResult.backedUpFiles.joined(separator: ", "))"
+                importSuccess = "配置导入成功。密码/口令需重新输入或依赖钥匙串漫游。\(backupInfo)"
+            } catch ConfigImporter.ImportError.versionMismatch {
+                importError = "配置格式版本过高，请升级 App 后重试。"
+            } catch ConfigImporter.ImportError.invalidArchive {
+                importError = "配置文件损坏或格式不正确。"
+            } catch {
+                importError = "导入失败: \(error.localizedDescription)"
+            }
+        case .failure(let error):
+            importError = "选择文件失败: \(error.localizedDescription)"
+        }
     }
 }
+
+// MARK: - macOS 导入文件选择器
+
+#if os(macOS)
+private struct MacImportPicker: View {
+    let onComplete: (Result<Data, Error>) -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear {
+                let panel = NSOpenPanel()
+                panel.allowsMultipleSelection = false
+                panel.canChooseDirectories = false
+                panel.allowedContentTypes = [UTType(filenameExtension: "pandassh")!]
+                if panel.runModal() == .OK, let url = panel.url {
+                    do {
+                        let data = try Data(contentsOf: url)
+                        onComplete(.success(data))
+                    } catch {
+                        onComplete(.failure(error))
+                    }
+                } else {
+                    onComplete(.failure(NSError(domain: "UserCancelled", code: -1)))
+                }
+            }
+    }
+}
+#endif
+
+// MARK: - iPadOS 导入文件选择器
+
+#if os(iOS)
+private struct IOSImportPicker: UIViewControllerRepresentable {
+    let onComplete: (Result<Data, Error>) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType(filenameExtension: "pandassh")!])
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onComplete: onComplete)
+    }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onComplete: (Result<Data, Error>) -> Void
+
+        init(onComplete: @escaping (Result<Data, Error>) -> Void) {
+            self.onComplete = onComplete
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else {
+                onComplete(.failure(NSError(domain: "NoSelection", code: -1)))
+                return
+            }
+            do {
+                let data = try Data(contentsOf: url)
+                onComplete(.success(data))
+            } catch {
+                onComplete(.failure(error))
+            }
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onComplete(.failure(NSError(domain: "UserCancelled", code: -1)))
+        }
+    }
+}
+#endif
 
 #if DEBUG
 #Preview("设置") {
     SettingsView()
         .environmentObject(AppModel.previewModel())
-        .environmentObject(ToastCenter())
+        .environmentObject(WorkspaceStore.previewStore())
 }
 #endif

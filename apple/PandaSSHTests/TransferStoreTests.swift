@@ -537,6 +537,50 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertEqual(task?.progress, 1)
     }
 
+    func testBatchTaskWaitingForConflictCarriesConflictAndStaysQueued() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+        let id = store.addBatchUpload(sources: ["/tmp/a.txt"], destDir: "/r")
+
+        let conflict = PendingConflict(
+            name: "a.txt",
+            sourceSize: 100,
+            sourceDate: Date(timeIntervalSince1970: 1_700_000_000),
+            targetSize: 200,
+            targetDate: Date(timeIntervalSince1970: 1_700_000_100)
+        )
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .queued, pendingConflict: conflict)
+        store.tick()
+
+        let task = store.tasks.first { $0.id == id }
+        // 等待覆盖确认的批量任务在 UI 状态机中呈现为排队（等待徽标）。
+        XCTAssertEqual(task?.status, .queued)
+        XCTAssertEqual(task?.pendingConflict, conflict)
+    }
+
+    func testBatchTaskConflictClearedAfterResolve() {
+        let spy = BatchTransferSourceSpy()
+        let store = TransferStore(source: spy, batchSource: spy)
+        let id = store.addBatchUpload(sources: ["/tmp/a.txt"], destDir: "/r")
+
+        let conflict = PendingConflict(
+            name: "a.txt",
+            sourceSize: 100,
+            sourceDate: nil,
+            targetSize: 200,
+            targetDate: nil
+        )
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .queued, pendingConflict: conflict)
+        store.tick()
+        XCTAssertNotNil(store.tasks.first { $0.id == id }?.pendingConflict)
+
+        // Rust 决策后 pending_conflict 置空，任务继续（模拟 running）。
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .running, pendingConflict: nil)
+        store.tick()
+        XCTAssertNil(store.tasks.first { $0.id == id }?.pendingConflict)
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .running)
+    }
+
     // MARK: - 任务组
 
     func testGroupedTasksAggregateIntoTaskGroup() {
@@ -614,6 +658,36 @@ final class TransferStoreTests: XCTestCase {
         let task = store.tasks.first { $0.id == id }
         XCTAssertEqual(task?.groupID, groupID)
         XCTAssertEqual(task?.groupName, groupName)
+    }
+
+    // MARK: - 按主机取消(删除主机级联)
+
+    func testCancelAllForHostCancelsOnlyThatHost() {
+        let store = makeStore()
+        let h1a = store.add(direction: .upload, name: "a", size: 10_000_000, source: "/l/a", destination: "/r/a", hostID: "h1")
+        let h1b = store.add(direction: .upload, name: "b", size: 10_000_000, source: "/l/b", destination: "/r/b", hostID: "h1")
+        let h2 = store.add(direction: .upload, name: "c", size: 10_000_000, source: "/l/c", destination: "/r/c", hostID: "h2")
+        // 第四个任务排队(并发上限 3),仍属活跃集合
+        let h1c = store.add(direction: .upload, name: "d", size: 10_000_000, source: "/l/d", destination: "/r/d", hostID: "h1")
+
+        store.cancelAll(forHostID: "h1")
+
+        XCTAssertEqual(store.tasks.first { $0.id == h1a }?.status, .cancelled)
+        XCTAssertEqual(store.tasks.first { $0.id == h1b }?.status, .cancelled)
+        XCTAssertEqual(store.tasks.first { $0.id == h1c }?.status, .cancelled)
+        XCTAssertEqual(store.tasks.first { $0.id == h2 }?.status, .running)
+    }
+
+    func testCancelAllForHostSkipsTerminalTasks() {
+        let store = makeStore()
+        let done = store.add(direction: .upload, name: "a", size: 10_000, source: "/l/a", destination: "/r/a", hostID: "h1")
+        drain(store)
+        XCTAssertEqual(store.tasks.first { $0.id == done }?.status, .done)
+
+        store.cancelAll(forHostID: "h1")
+
+        // 终态任务不被重复取消
+        XCTAssertEqual(store.tasks.first { $0.id == done }?.status, .done)
     }
 
 }
@@ -720,7 +794,7 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
 
     func listBatchTransfers() -> [BatchTransferRecord] { tasks }
 
-    func setBatchTask(id: UUID, totalSize: UInt64, transferred: UInt64, status: TransferStatus) {
+    func setBatchTask(id: UUID, totalSize: UInt64, transferred: UInt64, status: TransferStatus, pendingConflict: PendingConflict? = nil) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[index] = BatchTransferRecord(
             id: id,
@@ -732,7 +806,8 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
             sources: tasks[index].sources,
             destDir: tasks[index].destDir,
             hostID: tasks[index].hostID,
-            error: nil
+            error: nil,
+            pendingConflict: pendingConflict
         )
     }
 
@@ -752,7 +827,8 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
             sources: sources,
             destDir: destDir,
             hostID: "",
-            error: nil
+            error: nil,
+            pendingConflict: nil
         )
     }
 
@@ -767,7 +843,8 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
             sources: record.sources,
             destDir: record.destDir,
             hostID: record.hostID,
-            error: record.error
+            error: record.error,
+            pendingConflict: record.pendingConflict
         )
     }
 }

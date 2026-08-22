@@ -178,6 +178,7 @@ private struct TransferRow: View {
                     .foregroundStyle(.red)
                     .lineLimit(2)
             }
+            conflictNotice
             progressBar
             HStack(spacing: 8) {
                 Text("\(task.percent)%")
@@ -193,6 +194,23 @@ private struct TransferRow: View {
         }
         .padding(.horizontal, indented ? 8 : 10)
         .padding(.vertical, indented ? 5 : 8)
+    }
+
+    /// 批量任务等待覆盖确认时的提示行。
+    @ViewBuilder
+    private var conflictNotice: some View {
+        if let conflict = task.pendingConflict {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle")
+                    .foregroundStyle(Color.orange)
+                Text("“\(conflict.name)” 已存在，等待覆盖确认")
+                    .lineLimit(1)
+                Spacer()
+            }
+            .font(.caption2)
+            .foregroundStyle(.orange)
+            .padding(.top, 2)
+        }
     }
 
     /// 原生线性进度条:完成绿色、失败红色,其余强调色。

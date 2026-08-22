@@ -14,16 +14,27 @@ protocol ShellConnection: AnyObject {
 }
 
 /// 真实 SSH shell 连接：持有 FFI 返回的句柄。
+/// `open` 是耗时的完整握手（DNS/网络/认证/PTY），调用方应将其放到
+/// 后台线程执行（见 `FFIBackground`），再在拿到 handle 后主线程组装对象。
 final class PandaShellConnection: ShellConnection {
     private let handle: UInt64
 
-    init(
+    /// 测试辅助：暴露底层 FFI handle。
+    var handleForTesting: UInt64 { handle }
+
+    init(handle: UInt64) {
+        self.handle = handle
+    }
+
+    /// 同步建立 SSH shell 连接（FFI `shellOpen`，完整握手）。
+    /// 阻塞调用，务必经 `FFIBackground.run` 在后台线程执行。
+    static func open(
         hostID: String,
         password: String?,
         passphrase: String?,
         trustOnFirstUse: Bool = false
-    ) throws {
-        handle = try shellOpen(
+    ) throws -> UInt64 {
+        try shellOpen(
             hostId: hostID,
             password: password,
             passphrase: passphrase,

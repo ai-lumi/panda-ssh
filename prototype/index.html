@@ -426,7 +426,7 @@ const IC = {
   up: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" stroke="#0A84FF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   down: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5" stroke="#30d158" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   back: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  cloud: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M4.5 12.5a3 3 0 01-.4-6 4.2 4.2 0 018.2 1 2.8 2.8 0 01-.8 5H4.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  cloud: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M4.5 12.5a3 3 0 01-.4-6 4.2 4.2 0 018.2 1 2.8 2.8 0 01-.8 5H4.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>', // 预留：跨设备同步图标
   lock: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="currentColor" stroke-width="1.3"/></svg>',
   key: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="10.5" r="3" stroke="currentColor" stroke-width="1.3"/><path d="M7.8 8.2L13 3M11 5l2 2M9.5 6.5l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
 };
@@ -487,7 +487,6 @@ const state = {
   tabs: [],              // {id,type:'terminal'|'sftp',hostId,title}
   activeTab: null,
   search: "",
-  icloud: true,
   sessions: {},          // tabId -> 终端/SFTP 会话状态
   transfers: [],         // 传输任务
   xferOpen: {},          // tabId -> bool
@@ -640,9 +639,7 @@ function renderSidebar() {
   // 状态栏
   $("#hostcount").textContent = state.hosts.length + " 台主机";
   const sync = $("#sync");
-  sync.innerHTML = state.icloud
-    ? `<span class="dot ok" style="display:inline-block"></span>${IC.cloud} iCloud 已同步`
-    : `<span class="dot plain" style="display:inline-block"></span>${IC.cloud} 同步已暂停`;
+  sync.innerHTML = `<span class="dot plain" style="display:inline-block"></span>本地存储`;
   // 侧栏底部按钮高亮
   $("#btn-snippets").classList.toggle("active", state.view === "snippets");
   $("#btn-settings").classList.toggle("active", state.view === "settings");
@@ -1522,10 +1519,6 @@ function renderSettings(c) {
     <div class="set-body">
       <div class="set-card">
         <div class="set-row">
-          <div class="lab">iCloud 同步<div class="sub">通过 iCloud Key-Value Storage 同步主机配置与代码片段</div></div>
-          <button class="switch ${state.icloud ? "on" : ""}" id="set-icloud"></button>
-        </div>
-        <div class="set-row">
           <div class="lab">片段存储目录<div class="sub">代码片段在本地库中的存储位置（规划中）</div></div>
           <button class="btn" id="set-dir" style="height:26px;font-size:12px">选择…</button>
         </div>
@@ -1538,11 +1531,6 @@ function renderSettings(c) {
       <div class="note-text" style="text-align:left">此页面为交互原型演示，所有设置仅保存在当前页面会话中。</div>
     </div>
   </div>`;
-  $("#set-icloud").addEventListener("click", () => {
-    state.icloud = !state.icloud;
-    renderAll();
-    toast(state.icloud ? "iCloud 同步已开启" : "iCloud 同步已暂停");
-  });
   $("#set-dir").addEventListener("click", () => showFilePicker(() => toast("目录已更新（模拟）")));
 }
 
@@ -1561,11 +1549,6 @@ $("#btn-add-group").addEventListener("click", () => promptTextSheet("新建分�
 }));
 $("#btn-snippets").addEventListener("click", () => { state.view = "snippets"; renderAll(); });
 $("#btn-settings").addEventListener("click", () => { state.view = "settings"; renderAll(); });
-$("#sync").addEventListener("click", () => {
-  state.icloud = !state.icloud;
-  renderAll();
-  toast(state.icloud ? "iCloud 同步已恢复" : "同步已暂停");
-});
 $("#tabplus").addEventListener("click", e => {
   e.stopPropagation(); // 阻止 document 级点击监听把刚弹出的菜单立刻关掉
   const h = state.selHostId ? hostById(state.selHostId) : null;

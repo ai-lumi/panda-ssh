@@ -57,6 +57,8 @@ struct TransferTask: Identifiable, Equatable {
     var groupID: UUID?
     /// 所属任务组名称;nil 表示不属于任何组。
     var groupName: String?
+    /// 批量任务等待覆盖确认时的冲突信息；非 nil 表示任务暂停等待用户决策。
+    var pendingConflict: PendingConflict?
     /// 实时速度（字节/秒）。
     var liveSpeed: Int64 = 0
     /// 总速度（字节/秒），从开始到当前的平均速率。
@@ -89,6 +91,7 @@ struct TransferTask: Identifiable, Equatable {
         self.batchDestDir = record.batchDestDir
         self.groupID = record.groupID
         self.groupName = record.groupName
+        self.pendingConflict = record.pendingConflict
     }
 }
 
@@ -118,6 +121,8 @@ struct TransferRecord: Equatable {
     let groupID: UUID?
     /// 所属任务组名称;nil 表示不属于任何组。
     let groupName: String?
+    /// 批量任务等待覆盖确认时的冲突信息；非 nil 表示任务暂停等待用户决策。
+    let pendingConflict: PendingConflict?
 }
 
 /// 传输任务数据来源抽象。真实实现调用 Rust FFI;模拟实现保留原
@@ -197,6 +202,8 @@ struct BatchTransferRecord: Equatable {
     let destDir: String
     let hostID: String
     let error: String?
+    /// 等待覆盖确认时的冲突信息；非 nil 表示任务暂停等待用户决策。
+    let pendingConflict: PendingConflict?
 }
 
 // MARK: - 真实 FFI 源
@@ -459,7 +466,8 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
             batchSources: [],
             batchDestDir: "",
             groupID: task.groupID,
-            groupName: task.groupName
+            groupName: task.groupName,
+            pendingConflict: nil
         )
     }
 
@@ -516,7 +524,7 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
         batchTasks.map { mockBatchRecord($0) }
     }
 
-    private func mockBatchRecord(_ task: MockBatchTask) -> BatchTransferRecord {
+private func mockBatchRecord(_ task: MockBatchTask) -> BatchTransferRecord {
         BatchTransferRecord(
             id: UUID(uuidString: task.id) ?? UUID(),
             direction: task.direction,
@@ -527,7 +535,8 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
             sources: task.sources,
             destDir: task.destDir,
             hostID: task.hostID,
-            error: nil
+            error: nil,
+            pendingConflict: nil
         )
     }
 
@@ -571,8 +580,6 @@ final class TransferStore: ObservableObject {
     private var pausedTaskIDs: Set<UUID> = []
     /// 任务 id 到任务组注册的映射;任务组由 Swift 侧在创建任务时注入。
     private var groupRegistry: [UUID: GroupRegistration] = [:]
-    /// 上一次轮询时所有任务的 version 总和；用于增量检测。
-    private var lastVersionSum: UInt64 = 0
 
     init(source: any TransferSource, batchSource: (any BatchTransferSource)? = nil) {
         self.source = source
@@ -692,8 +699,8 @@ final class TransferStore: ObservableObject {
     }
 
     /// 进度步进:真实源仅刷新列表,模拟源同时推进状态机。
-    /// 利用 Rust 侧版本号检测增量变化；无变化时跳过 UI 更新。
-    /// 批量任务无版本号，始终纳入比较。
+    /// 每步都重新构造任务视图并与当前 tasks 比较,仅在真正变化时写入,
+    /// 既保证模拟源进度被刷新,也避免 FFI 侧无变化时重复触发 UI。
     func tick(seconds dt: Double = 0.1) {
         source.tick()
         let now = Date()
@@ -702,16 +709,11 @@ final class TransferStore: ObservableObject {
             records += batchSource.listBatchTransfers()
                 .map { injectGroup(into: TransferRecord(batchRecord: $0)) }
         }
-        let versionSum = records.reduce(0) { $0 + $1.version }
-        let hasChange = versionSum != lastVersionSum || records.count != tasks.count
-        lastVersionSum = versionSum
-        if hasChange {
-            let next = records
-                .map { makeTask(from: $0, at: now) }
-                .filter { !hiddenIDs.contains($0.id) }
-            if next != tasks {
-                tasks = next
-            }
+        let next = records
+            .map { makeTask(from: $0, at: now) }
+            .filter { !hiddenIDs.contains($0.id) }
+        if next != tasks {
+            tasks = next
         }
         adjustPollingFrequency()
     }
@@ -780,6 +782,17 @@ final class TransferStore: ObservableObject {
             .forEach { resume(id: $0.id) }
     }
 
+    /// 取消指定主机的全部活跃传输任务(running/queued/paused)。
+    /// 用于删除主机时级联清理:主机已删除,其传输任务无意义。
+    func cancelAll(forHostID hostID: String) {
+        tasks.filter { $0.hostID == hostID && Self.isActiveStatus($0.status) }
+            .forEach { cancel(id: $0.id) }
+    }
+
+    private static func isActiveStatus(_ status: TransferStatus) -> Bool {
+        status == .running || status == .queued || status == .paused
+    }
+
     /// 清除所有终态任务(已完成/失败/已取消),保留进行中、排队与暂停(与原型一致)。
     func clearFinished() {
         if let mock = source as? MockTransferSource {
@@ -835,7 +848,8 @@ final class TransferStore: ObservableObject {
             batchSources: record.batchSources,
             batchDestDir: record.batchDestDir,
             groupID: registration.groupID,
-            groupName: registration.groupName
+            groupName: registration.groupName,
+            pendingConflict: record.pendingConflict
         )
     }
 
@@ -982,6 +996,7 @@ private extension TransferRecord {
         self.name = (source as NSString).lastPathComponent
         self.groupID = nil
         self.groupName = nil
+        self.pendingConflict = nil
     }
 }
 
@@ -1001,6 +1016,8 @@ private extension TransferStatus {
         switch batchStatus {
         case .queued: self = .queued
         case .running: self = .running
+        // 等待覆盖确认：UI 状态机无独立状态，呈现为排队等待（弹窗由 SftpSessionStore 处理）。
+        case .waitingForConflict: self = .queued
         case .completed: self = .done
         case .failed: self = .failed
         case .cancelled: self = .cancelled
@@ -1024,6 +1041,9 @@ private extension TransferRecord {
         self.batchDestDir = batchRecord.destDir
         self.source = batchRecord.sources.first ?? ""
         self.destination = batchRecord.destDir
+        self.groupID = nil
+        self.groupName = nil
+        self.pendingConflict = batchRecord.pendingConflict
         let count = batchRecord.sources.count
         if count == 0 {
             self.name = "批量\(batchRecord.direction == .upload ? "上传" : "下载")"
@@ -1032,8 +1052,6 @@ private extension TransferRecord {
         } else {
             self.name = "\((self.source as NSString).lastPathComponent) 等 \(count) 项"
         }
-        self.groupID = nil
-        self.groupName = nil
     }
 }
 
@@ -1048,6 +1066,15 @@ private extension BatchTransferRecord {
         self.sources = ffiRecord.sources
         self.destDir = ffiRecord.destDir
         self.error = ffiRecord.error
+        self.pendingConflict = ffiRecord.pendingConflict.map { conflict in
+            PendingConflict(
+                name: (conflict.itemDestination as NSString).lastPathComponent,
+                sourceSize: conflict.sourceSize,
+                sourceDate: conflict.sourceMtime.map { Date(timeIntervalSince1970: Double($0)) },
+                targetSize: conflict.targetSize,
+                targetDate: conflict.targetMtime.map { Date(timeIntervalSince1970: Double($0)) }
+            )
+        }
         let count = ffiRecord.sources.count
         if count == 0 {
             self.name = "批量\(self.direction == .upload ? "上传" : "下载")"

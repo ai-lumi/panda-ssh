@@ -95,8 +95,9 @@ final class Logger: ObservableObject {
 
     // MARK: - 日志记录
 
-    /// 记录一条日志。
-    func log(_ message: String, level: LogLevel = .info, module: String = "App") {
+    /// 记录一条日志。`module` 必须使用规范模块名
+    /// （SSH / SFTP / Transfer / HostKey / Config / FFI）；默认 `Config` 归入配置/通用类别。
+    func log(_ message: String, level: LogLevel = .info, module: String = LogModule.config) {
         let entry = LogEntry(
             timestamp: Date(),
             level: level,
