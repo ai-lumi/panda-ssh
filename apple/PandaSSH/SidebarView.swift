@@ -99,6 +99,23 @@ struct SidebarView: View {
         #endif
         #if os(iOS)
         .searchable(text: $searchText, placement: .sidebar, prompt: "搜索主机")
+        // iPadOS 添加入口:macOS 在侧栏顶部自绘工具条,iPadOS 用系统导航栏按钮。
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.sidebarSheet = .addHost(defaultGroupID: nil)
+                } label: {
+                    Label("添加主机", systemImage: "plus")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.sidebarSheet = .newGroup(parent: nil)
+                } label: {
+                    Label("新建分组", systemImage: "folder.badge.plus")
+                }
+            }
+        }
         #endif
         .alert("删除主机", isPresented: hasPendingHost, presenting: hostPendingDelete) { host in
             Button("取消", role: .cancel) {}
