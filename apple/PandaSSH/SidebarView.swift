@@ -92,6 +92,11 @@ struct SidebarView: View {
             Divider()
             bottomEntries
         }
+        #if os(macOS)
+        // 配合保留的系统工具栏(见 MainWindowChrome),忽略顶部安全区,
+        // 让侧栏面板内容融入标题栏(与红绿灯同一水平线)。
+        .ignoresSafeArea(.container, edges: .top)
+        #endif
         #if os(iOS)
         .searchable(text: $searchText, placement: .sidebar, prompt: "搜索主机")
         #endif
@@ -125,9 +130,8 @@ struct SidebarView: View {
     }
 
     #if os(macOS)
-    /// 侧栏顶部工具条(系统工具栏已由 MainWindowChrome 移除)。
-    /// macOS 26 起分栏浮动面板强制位于标题栏下方,本工具条随侧栏列布局,
-    /// 不再与红绿灯同一水平线(系统行为,见 MainWindowChrome 注释)。
+    /// 侧栏顶部工具条(与红绿灯同一水平线;系统工具栏由 MainWindowChrome 保留,
+    /// 配合侧栏列 ignoresSafeArea 融入标题栏,见 MainWindowChrome 注释)。
     /// 左侧为窗口拖拽区,右端两个容器靠右布局:
     /// 容器 1 为添加按钮组(添加主机/新建分组),容器 2 为侧栏切换按钮。
     /// 分栏最小宽度(220pt)保证容器完整显示;拖到最小宽度以下系统自动隐藏侧栏。

@@ -96,20 +96,10 @@ struct WorkspaceView: View {
 
     #if os(macOS)
     private var macOSTabBar: some View {
-        // 系统工具栏已由 MainWindowChrome 移除:侧栏隐藏时在此提供
-        // 「显示侧栏」按钮(侧栏可见时切换按钮在侧栏顶部工具条);
-        // 整行背景挂 WindowDragView,空白处可拖拽窗口。
+        // 系统工具栏保留(见 MainWindowChrome):侧栏显隐由系统工具栏的
+        // 切换按钮负责(隐藏侧栏时系统把它放在标题栏红绿灯右侧),
+        // 这里不再自绘「显示侧栏」按钮;整行背景挂 WindowDragView,空白处可拖拽窗口。
         HStack(spacing: 4) {
-            if model.columnVisibility == .detailOnly {
-                Button {
-                    withAnimation { model.columnVisibility = .all }
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .buttonStyle(.plain)
-                .help("显示侧栏")
-                .padding(.horizontal, 8)
-            }
             WorkspaceTabBar()
                 .environmentObject(model)
                 .environmentObject(workspace)

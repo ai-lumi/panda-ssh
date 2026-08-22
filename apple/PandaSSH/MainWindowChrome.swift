@@ -2,50 +2,33 @@
 import SwiftUI
 import AppKit
 
-/// 主窗口 chrome 配置(持续生效,非一次性):
-/// 隐藏标题文字、透明标题栏、内容延伸到窗口顶部、移除系统工具栏。
-/// 系统工具栏会带来空白背景带与自带的侧栏切换按钮,且无法自定义容器布局;
-/// 移除后顶部区域完全由 SwiftUI 自绘(侧栏顶部工具条 / 页签栏)。
-/// macOS 26 上隐藏侧栏时系统会重新创建 NSToolbar(注入侧栏切换按钮),
-/// 一次性配置会被覆盖,因此用 KVO + layout 钩子持续把 toolbar 重新置 nil。
-/// 注:macOS 26 的分栏浮动面板强制把侧栏内容置于标题栏下方,
-/// 无可见工具栏时系统不再支持侧栏融入标题栏(实测,见 openspec 相关迭代记录)。
+/// 主窗口 chrome 配置:隐藏标题文字、透明标题栏、内容延伸到窗口顶部。
+/// macOS 26:保留系统工具栏——Tahoe 的分栏浮动面板只有在窗口持有可见
+/// 工具栏时才会融入标题栏(面板顶部延伸到红绿灯行);移除工具栏时系统强制
+/// 把侧栏面板压在标题栏下方。代价是 detail 区顶部有一条系统工具栏绘制带,
+/// 且侧栏隐藏时系统会在标题栏放置自带的侧栏切换按钮(自绘的显隐按钮已移除)。
+/// 注:此行为与现行 workspace spec「主窗口工具栏精简」不一致,待 spec 更新。
 struct MainWindowChrome: NSViewRepresentable {
-    func makeNSView(context: Context) -> ChromeView { ChromeView() }
-    func updateNSView(_ nsView: ChromeView, context: Context) { nsView.applyChrome() }
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
 
-    final class ChromeView: NSView {
-        private var toolbarObservation: NSKeyValueObservation?
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { configure(nsView.window) }
+    }
 
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            toolbarObservation?.invalidate()
-            toolbarObservation = window?.observe(\.toolbar, options: [.new]) { [weak self] window, _ in
-                // 系统重建工具栏(隐藏侧栏/分栏状态变化)时立即移除
-                if window.toolbar != nil { self?.applyChrome() }
-            }
-            applyChrome()
-        }
-
-        override func layout() {
-            super.layout()
-            applyChrome()
-        }
-
-        func applyChrome() {
-            guard let window else { return }
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.styleMask.insert(.fullSizeContentView)
-            if window.toolbar != nil {
-                window.toolbar = nil
-            }
-        }
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
     }
 }
 
 /// 窗口拖拽区:透明视图,mouseDownCanMoveWindow = true。
-/// 系统工具栏移除后,顶部自绘区域的空白处用它保留拖拽窗口能力。
+/// 顶部自绘区域的空白处用它保留拖拽窗口能力。
 struct WindowDragView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { DragView() }
     func updateNSView(_ nsView: NSView, context: Context) {}
