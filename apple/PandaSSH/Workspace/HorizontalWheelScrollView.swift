@@ -1,6 +1,94 @@
 import SwiftUI
 
 #if os(macOS)
+/// 页签滚动边界的纯值快照。所有输入先归一化，避免窗口动画或尚未布局时
+/// 出现负宽度、非有限值与越界偏移。
+struct TabBarScrollMetrics: Equatable {
+    enum PageDirection {
+        case backward
+        case forward
+    }
+
+    static let revealPadding = 8.0
+
+    let contentWidth: Double
+    let viewportWidth: Double
+    let offset: Double
+    let maximumOffset: Double
+
+    var needsScroll: Bool {
+        viewportWidth > 0 && maximumOffset > 0.5
+    }
+
+    var canScrollBackward: Bool {
+        needsScroll && offset > 0.5
+    }
+
+    var canScrollForward: Bool {
+        needsScroll && offset < maximumOffset - 0.5
+    }
+
+    static func resolve(
+        contentWidth: Double,
+        viewportWidth: Double,
+        offset: Double
+    ) -> TabBarScrollMetrics {
+        let safeContentWidth = finiteNonnegative(contentWidth)
+        let safeViewportWidth = finiteNonnegative(viewportWidth)
+        let maximumOffset = max(0, safeContentWidth - safeViewportWidth)
+        let safeOffset = clamp(
+            offset.isFinite ? offset : 0,
+            lower: 0,
+            upper: maximumOffset
+        )
+        return TabBarScrollMetrics(
+            contentWidth: safeContentWidth,
+            viewportWidth: safeViewportWidth,
+            offset: safeOffset,
+            maximumOffset: maximumOffset
+        )
+    }
+
+    func pageTarget(direction: PageDirection) -> Double {
+        let delta = direction == .backward ? -viewportWidth : viewportWidth
+        return Self.clamp(offset + delta, lower: 0, upper: maximumOffset)
+    }
+
+    /// AppKit 的滚轮 delta 为正时内容应向起点移动，因此这里使用 `offset - delta`。
+    func wheelTarget(delta: Double) -> Double {
+        guard delta.isFinite else { return offset }
+        return Self.clamp(offset - delta, lower: 0, upper: maximumOffset)
+    }
+
+    /// 返回让目标页签完整可识别的最小偏移；过宽页签优先显示其前缘。
+    func revealedOffset(itemMinX: Double, itemMaxX: Double) -> Double {
+        guard itemMinX.isFinite, itemMaxX.isFinite, viewportWidth > 0 else { return offset }
+        let lower = min(itemMinX, itemMaxX)
+        let upper = max(itemMinX, itemMaxX)
+        let paddedLower = max(0, lower - Self.revealPadding)
+        let paddedUpper = min(contentWidth, upper + Self.revealPadding)
+
+        if paddedUpper - paddedLower >= viewportWidth {
+            return Self.clamp(paddedLower, lower: 0, upper: maximumOffset)
+        }
+        if paddedLower < offset {
+            return Self.clamp(paddedLower, lower: 0, upper: maximumOffset)
+        }
+        if paddedUpper > offset + viewportWidth {
+            return Self.clamp(paddedUpper - viewportWidth, lower: 0, upper: maximumOffset)
+        }
+        return offset
+    }
+
+    private static func finiteNonnegative(_ value: Double) -> Double {
+        value.isFinite ? max(0, value) : 0
+    }
+
+    private static func clamp(_ value: Double, lower: Double, upper: Double) -> Double {
+        min(max(value, lower), upper)
+    }
+}
+
 /// 横向滚动状态控制器：暴露滚动边界状态与按页翻页动作。
 final class TabBarScrollController: ObservableObject {
     /// 内容宽度是否超出可见宽度（决定是否显示翻页按钮）
@@ -12,9 +100,38 @@ final class TabBarScrollController: ObservableObject {
 
     var scrollLeftAction: (() -> Void)?
     var scrollRightAction: (() -> Void)?
+    var revealAction: ((CGRect) -> Void)?
+
+    private var tabFrames: [UUID: CGRect] = [:]
+    private var pendingRevealTabID: UUID?
 
     func scrollLeft() { scrollLeftAction?() }
     func scrollRight() { scrollRightAction?() }
+
+    func updateTabFrame(_ frame: CGRect, for tabID: UUID) {
+        guard frame.minX.isFinite, frame.maxX.isFinite else { return }
+        tabFrames[tabID] = frame
+        if pendingRevealTabID == tabID {
+            pendingRevealTabID = nil
+            revealAction?(frame)
+        }
+    }
+
+    func retainTabIDs(_ tabIDs: Set<UUID>) {
+        tabFrames = tabFrames.filter { tabIDs.contains($0.key) }
+        if let pendingRevealTabID, !tabIDs.contains(pendingRevealTabID) {
+            self.pendingRevealTabID = nil
+        }
+    }
+
+    func reveal(tabID: UUID) {
+        if let frame = tabFrames[tabID] {
+            pendingRevealTabID = nil
+            revealAction?(frame)
+        } else {
+            pendingRevealTabID = tabID
+        }
+    }
 }
 
 /// 支持鼠标滚轮横向滚动的页签容器。
@@ -111,8 +228,6 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
         var scrollView: NSScrollView?
         var hostingView: NSHostingView<Content>?
         var container: HeightConstrainedContainer?
-        private var pendingNeedsScroll: Bool?
-        private var needsScrollWorkItem: DispatchWorkItem?
 
         init(controller: TabBarScrollController) {
             self.controller = controller
@@ -125,15 +240,25 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
             controller.scrollRightAction = { [weak self] in
                 self?.scroll(byPage: 1)
             }
+            controller.revealAction = { [weak self] frame in
+                self?.reveal(frame: frame)
+            }
         }
 
         func startObserving() {
             guard let scrollView else { return }
             scrollView.contentView.postsBoundsChangedNotifications = true
+            scrollView.contentView.postsFrameChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(updateScrollState),
                 name: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(updateScrollState),
+                name: NSView.frameDidChangeNotification,
                 object: scrollView.contentView
             )
             NotificationCenter.default.addObserver(
@@ -147,48 +272,62 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
 
         @objc func updateScrollState() {
             guard let scrollView, let documentView = scrollView.documentView else { return }
-            let contentWidth = documentView.frame.width
-            let visibleWidth = scrollView.contentView.bounds.width
-            let currentX = scrollView.contentView.bounds.origin.x
+            let metrics = TabBarScrollMetrics.resolve(
+                contentWidth: Double(documentView.frame.width),
+                viewportWidth: Double(scrollView.contentView.bounds.width),
+                offset: Double(scrollView.contentView.bounds.origin.x)
+            )
 
-            let newNeedsScroll = contentWidth > visibleWidth
-            let newCanScrollLeft = currentX > 0
-            let newCanScrollRight = currentX < contentWidth - visibleWidth - 1
+            let normalizedX = CGFloat(metrics.offset)
+            if abs(scrollView.contentView.bounds.origin.x - normalizedX) > 0.5 {
+                scrollView.contentView.scroll(to: NSPoint(x: normalizedX, y: 0))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
 
             Task { @MainActor in
-                if self.controller.canScrollLeft != newCanScrollLeft {
-                    self.controller.canScrollLeft = newCanScrollLeft
+                if self.controller.needsScroll != metrics.needsScroll {
+                    self.controller.needsScroll = metrics.needsScroll
                 }
-                if self.controller.canScrollRight != newCanScrollRight {
-                    self.controller.canScrollRight = newCanScrollRight
+                if self.controller.canScrollLeft != metrics.canScrollBackward {
+                    self.controller.canScrollLeft = metrics.canScrollBackward
                 }
-            }
-
-            // needsScroll 加 400ms 防抖：侧栏显隐等窗口动画期间可见宽度逐帧变化，
-            // 若实时更新会让翻页按钮随动画反复显隐（闪动）；
-            // 400ms 覆盖系统 split view 动画时长，动画结束后才一次性应用稳定值。
-            // canScrollLeft/Right 仍实时更新（只影响禁用态，不改变按钮有无）。
-            pendingNeedsScroll = newNeedsScroll
-            needsScrollWorkItem?.cancel()
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self, let pending = self.pendingNeedsScroll else { return }
-                if self.controller.needsScroll != pending {
-                    self.controller.needsScroll = pending
+                if self.controller.canScrollRight != metrics.canScrollForward {
+                    self.controller.canScrollRight = metrics.canScrollForward
                 }
             }
-            needsScrollWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: workItem)
         }
 
         /// 按页翻页：direction -1 为向左，1 为向右，自动夹取不越界。
         private func scroll(byPage direction: CGFloat) {
             guard let scrollView, let documentView = scrollView.documentView else { return }
-            let contentWidth = documentView.frame.width
-            let pageWidth = scrollView.contentView.bounds.width
-            let currentX = scrollView.contentView.bounds.origin.x
-            var newX = currentX + direction * pageWidth
-            newX = max(0, min(newX, contentWidth - pageWidth))
-            scrollView.contentView.animator().setBoundsOrigin(NSPoint(x: newX, y: 0))
+            let metrics = TabBarScrollMetrics.resolve(
+                contentWidth: Double(documentView.frame.width),
+                viewportWidth: Double(scrollView.contentView.bounds.width),
+                offset: Double(scrollView.contentView.bounds.origin.x)
+            )
+            let pageDirection: TabBarScrollMetrics.PageDirection = direction < 0 ? .backward : .forward
+            scroll(to: metrics.pageTarget(direction: pageDirection))
+        }
+
+        private func reveal(frame: CGRect) {
+            guard let scrollView, let documentView = scrollView.documentView else { return }
+            let metrics = TabBarScrollMetrics.resolve(
+                contentWidth: Double(documentView.frame.width),
+                viewportWidth: Double(scrollView.contentView.bounds.width),
+                offset: Double(scrollView.contentView.bounds.origin.x)
+            )
+            let target = metrics.revealedOffset(
+                itemMinX: Double(frame.minX),
+                itemMaxX: Double(frame.maxX)
+            )
+            scroll(to: target)
+        }
+
+        private func scroll(to target: Double) {
+            guard let scrollView else { return }
+            let point = NSPoint(x: CGFloat(target), y: 0)
+            scrollView.contentView.scroll(to: point)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
 
         deinit {
@@ -221,10 +360,13 @@ final class WheelForwardingScrollView: NSScrollView {
             delta = event.scrollingDeltaY
         }
 
-        var newX = contentView.bounds.origin.x - delta
-        newX = max(0, min(newX, contentWidth - visibleWidth))
-
-        contentView.scroll(to: NSPoint(x: newX, y: 0))
+        let metrics = TabBarScrollMetrics.resolve(
+            contentWidth: Double(contentWidth),
+            viewportWidth: Double(visibleWidth),
+            offset: Double(contentView.bounds.origin.x)
+        )
+        let newX = metrics.wheelTarget(delta: Double(delta))
+        contentView.scroll(to: NSPoint(x: CGFloat(newX), y: 0))
         reflectScrolledClipView(contentView)
     }
 }

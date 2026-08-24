@@ -26,7 +26,8 @@ struct SftpTabView: View {
     @State private var phase: Phase = .connecting
     /// 连接尝试序号:重试时 +1,驱动 .task 重跑连接动画。
     @State private var attempt = 0
-    @State private var panelOpen = false
+    @State private var presentationState = SFTPPresentationState(layout: .dualPane)
+    @State private var transferPresentationState = TransferPanelPresentationState()
     /// 待确认删除的条目名称列表;nil 表示未触发删除确认。
     /// 多选右键删除时含多个名称,单选/未选中右键时仅 1 个。
     @State private var deleteCandidate: (names: [String], local: Bool)? = nil
@@ -37,6 +38,14 @@ struct SftpTabView: View {
     @State private var remotePathInput = ""
     @FocusState private var localPathFocused: Bool
     @FocusState private var remotePathFocused: Bool
+
+    private var minimumInteractiveLength: Double {
+        #if os(macOS)
+        24
+        #else
+        44
+        #endif
+    }
 
     init(tab: WorkspaceTab, host: HostEntry, transfers: TransferStore) {
         self.tab = tab
@@ -113,38 +122,22 @@ struct SftpTabView: View {
         }
     }
 
-    // MARK: - 双栏浏览器
+    // MARK: - 响应式文件浏览器
 
     private var browser: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                toolbar
-                Divider()
-                HStack(spacing: 0) {
-                    pane(local: true)
-                    Divider()
-                    pane(local: false)
+        GeometryReader { geometry in
+            let policy = layoutPolicy(availableWidth: geometry.size.width)
+            browserSurface(policy: policy)
+                .onAppear {
+                    presentationState.updateLayout(policy.sftpPresentation)
+                    transferPresentationState.updatePresentation(policy.transferPresentation)
                 }
-            }
-
-            // 抽屉式传输面板：悬浮在主窗口上方，不挤占空间
-            if panelOpen {
-                Color.black.opacity(0.15)
-                    .ignoresSafeArea()
-                    .onTapGesture { panelOpen = false }
-                    .transition(.opacity)
-
-                HStack {
-                    Spacer()
-                    TransferPanelView(store: transfers)
-                        .frame(width: 340)
-                        .background(.regularMaterial)
-                        .shadow(color: .black.opacity(0.2), radius: 16, x: -4, y: 0)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                .onChange(of: policy.sftpPresentation) { _, presentation in
+                    presentationState.updateLayout(presentation)
                 }
-                .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.25), value: panelOpen)
-            }
+                .onChange(of: policy.transferPresentation) { _, presentation in
+                    transferPresentationState.updatePresentation(presentation)
+                }
         }
         .alert("确认删除", isPresented: .init(
             get: { deleteCandidate != nil },
@@ -182,13 +175,124 @@ struct SftpTabView: View {
         })
     }
 
-    private var toolbar: some View {
+    @ViewBuilder
+    private func browserSurface(policy: WorkspaceLayoutPolicy) -> some View {
+        #if os(macOS)
+        ZStack {
+            browserColumns(policy: policy)
+
+            if transferPresentationState.isPresented {
+                Color.black.opacity(0.15)
+                    .ignoresSafeArea()
+                    .onTapGesture { transferPresentationState.dismiss() }
+                    .transition(.opacity)
+
+                HStack(spacing: 0) {
+                    Spacer()
+                    TransferPanelView(store: transfers)
+                        .frame(width: 340)
+                        .background(.regularMaterial)
+                        .shadow(color: .black.opacity(0.2), radius: 16, x: -4, y: 0)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+                .ignoresSafeArea()
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: transferPresentationState.isPresented)
+        #else
+        browserColumns(policy: policy)
+            .inspector(isPresented: panelBinding(for: .inspector, policy: policy)) {
+                TransferPanelView(store: transfers)
+                    .inspectorColumnWidth(min: 300, ideal: 340, max: 420)
+            }
+            .sheet(isPresented: panelBinding(for: .sheet, policy: policy)) {
+                NavigationStack {
+                    TransferPanelView(store: transfers)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("完成") { transferPresentationState.dismiss() }
+                            }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            }
+        #endif
+    }
+
+    private func browserColumns(policy: WorkspaceLayoutPolicy) -> some View {
+        VStack(spacing: 0) {
+            toolbar(policy: policy)
+            Divider()
+            if policy.sftpPresentation == .dualPane {
+                HStack(spacing: 0) {
+                    pane(local: true)
+                    Divider()
+                    pane(local: false)
+                }
+            } else {
+                Picker("文件位置", selection: Binding(
+                    get: { presentationState.selectedPane },
+                    set: { presentationState.select($0) }
+                )) {
+                    Text("本地").tag(SFTPPresentationState.Pane.local)
+                    Text("远程").tag(SFTPPresentationState.Pane.remote)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("文件位置")
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+                pane(local: presentationState.selectedPane == .local)
+            }
+        }
+    }
+
+    private func layoutPolicy(availableWidth: Double) -> WorkspaceLayoutPolicy {
+        #if os(macOS)
+        return WorkspaceLayoutPolicy.resolve(
+            platform: .macOS,
+            horizontalSizeClass: .unspecified,
+            availableWidth: availableWidth
+        )
+        #else
+        let sizeClass: WorkspaceLayoutPolicy.HorizontalSizeClass
+        switch horizontalSizeClass {
+        case .compact: sizeClass = .compact
+        case .regular: sizeClass = .regular
+        default: sizeClass = .unspecified
+        }
+        return WorkspaceLayoutPolicy.resolve(
+            platform: .iPadOS,
+            horizontalSizeClass: sizeClass,
+            availableWidth: availableWidth
+        )
+        #endif
+    }
+
+    #if os(iOS)
+    private func panelBinding(
+        for presentation: WorkspaceLayoutPolicy.TransferPresentation,
+        policy: WorkspaceLayoutPolicy
+    ) -> Binding<Bool> {
+        Binding(
+            get: {
+                transferPresentationState.isPresented
+                    && transferPresentationState.presentation == presentation
+                    && policy.transferPresentation == presentation
+            },
+            set: { if !$0 { transferPresentationState.dismiss() } }
+        )
+    }
+    #endif
+
+    private func toolbar(policy: WorkspaceLayoutPolicy) -> some View {
         HStack(spacing: 8) {
             Label("SFTP · \(host.username)@\(host.address)", systemImage: "folder")
                 .font(.callout.bold())
             Spacer()
             Button {
-                panelOpen.toggle()
+                transferPresentationState.toggle(using: policy.transferPresentation)
             } label: {
                 HStack(spacing: 4) {
                     Text("传输")
@@ -204,6 +308,7 @@ struct SftpTabView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .frame(minHeight: minimumInteractiveLength)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -370,7 +475,7 @@ struct SftpTabView: View {
         let tasks = await session.upload(localPaths: picked.paths)
         if let first = tasks.first {
             toast.show("已加入批量上传队列：\(first.name) 等 \(tasks.count) 项")
-            panelOpen = true
+            transferPresentationState.present(using: transferPresentationState.presentation)
         }
     }
 
@@ -415,7 +520,7 @@ struct SftpTabView: View {
                     ForEach(nav.entries) { entry in
                         fileRow(entry: entry, local: local, multiSelect: multiSelect, isSelected: selectedSet.contains(entry.name))
                             .padding(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
-                            .frame(minHeight: 22)
+                            .frame(minHeight: minimumInteractiveLength)
                             .background(rowBackground(isSelected: selectedSet.contains(entry.name)))
                             .background(rowFrameCollector(entry: entry, local: local))
                     }
@@ -666,7 +771,7 @@ struct SftpTabView: View {
                         let tasks = local ? await session.uploadSelected() : await session.downloadSelected()
                         if let first = tasks {
                             toast.show("已加入批量\(local ? "上传" : "下载")队列：\(first.name) 等 \(count) 项")
-                            panelOpen = true
+                            transferPresentationState.present(using: transferPresentationState.presentation)
                             local ? session.toggleLocalMultiSelect() : session.toggleRemoteMultiSelect()
                         }
                     }
@@ -685,7 +790,7 @@ struct SftpTabView: View {
                         let task = local ? await session.uploadSelected() : await session.downloadSelected()
                         if let task {
                             toast.show((local ? "已加入上传队列：" : "已加入下载队列：") + task.name)
-                            panelOpen = true
+                            transferPresentationState.present(using: transferPresentationState.presentation)
                         }
                     }
                 }
@@ -699,7 +804,7 @@ struct SftpTabView: View {
         }
         .font(.caption)
         .padding(.horizontal, 10)
-        .frame(minHeight: 36)
+        .frame(minHeight: max(36, minimumInteractiveLength))
     }
 
     // MARK: - 真实连接

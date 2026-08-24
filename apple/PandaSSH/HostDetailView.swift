@@ -42,13 +42,13 @@ struct HostDetailView: View {
             }
             HStack(spacing: 10) {
                 Button {
-                    workspace.openTerminal(hostID: host.id)
+                    model.presentTab(workspace.openTerminal(hostID: host.id))
                 } label: {
                     Label("打开终端", systemImage: "terminal")
                 }
                 .buttonStyle(.borderedProminent)
                 Button {
-                    workspace.openSFTP(hostID: host.id)
+                    model.presentTab(workspace.openSFTP(hostID: host.id))
                 } label: {
                     Label("浏览文件 (SFTP)", systemImage: "folder")
                 }

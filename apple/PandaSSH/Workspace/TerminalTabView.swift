@@ -22,8 +22,6 @@ struct TerminalTabView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().opacity(0.3)
             content
         }
         .background(Color.black)
@@ -56,24 +54,6 @@ struct TerminalTabView: View {
             } else {
                 startRealConnection()
             }
-        }
-    }
-
-    // MARK: - 标题栏
-
-    private var header: some View {
-        Text("\(host.name) — \(host.username)@\(host.address):\(host.port) · \(statusText)")
-            .font(.system(.caption, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 30)
-    }
-
-    private var statusText: String {
-        switch session.phase {
-        case .connecting: "连接中…"
-        case .failed: "连接失败"
-        case .shell: "已连接"
         }
     }
 

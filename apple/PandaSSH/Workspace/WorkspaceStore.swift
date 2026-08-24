@@ -141,12 +141,14 @@ final class WorkspaceStore: ObservableObject {
     }
 
     /// 打开终端标签页。总是新建,不做按主机的去重。
-    func openTerminal(hostID: String) {
+    @discardableResult
+    func openTerminal(hostID: String) -> UUID {
         open(hostID: hostID, kind: .terminal)
     }
 
     /// 打开 SFTP 标签页。总是新建,不做按主机的去重。
-    func openSFTP(hostID: String) {
+    @discardableResult
+    func openSFTP(hostID: String) -> UUID {
         open(hostID: hostID, kind: .sftp)
     }
 
@@ -259,11 +261,12 @@ final class WorkspaceStore: ObservableObject {
         pendingBatchClose = nil
     }
 
-    private func open(hostID: String, kind: WorkspaceTab.Kind) {
+    private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
         let tab = WorkspaceTab(id: UUID(), hostID: hostID, kind: kind, title: "")
         tabs.append(tab)
         activeTabID = tab.id
         retitle()
+        return tab.id
     }
 
     /// 关闭某台主机的全部标签页(删除主机时级联清理)。

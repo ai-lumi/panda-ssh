@@ -10,6 +10,70 @@ import SwiftUI
 @MainActor
 final class TabBarLayoutProbeTests: XCTestCase {
 
+    // MARK: - 纯值滚动策略
+
+    func test滚动指标覆盖溢出翻页与首尾状态() {
+        let metrics = TabBarScrollMetrics.resolve(
+            contentWidth: 1_200,
+            viewportWidth: 400,
+            offset: 350
+        )
+
+        XCTAssertTrue(metrics.needsScroll)
+        XCTAssertTrue(metrics.canScrollBackward)
+        XCTAssertTrue(metrics.canScrollForward)
+        XCTAssertEqual(metrics.maximumOffset, 800)
+        XCTAssertEqual(metrics.pageTarget(direction: .backward), 0)
+        XCTAssertEqual(metrics.pageTarget(direction: .forward), 750)
+
+        let trailing = TabBarScrollMetrics.resolve(
+            contentWidth: 1_200,
+            viewportWidth: 400,
+            offset: 800
+        )
+        XCTAssertTrue(trailing.canScrollBackward)
+        XCTAssertFalse(trailing.canScrollForward)
+        XCTAssertEqual(trailing.pageTarget(direction: .forward), 800)
+    }
+
+    func test滚轮与显露页签目标始终夹取在合法范围() {
+        let metrics = TabBarScrollMetrics.resolve(
+            contentWidth: 1_000,
+            viewportWidth: 300,
+            offset: 200
+        )
+
+        XCTAssertEqual(metrics.wheelTarget(delta: -120), 320)
+        XCTAssertEqual(metrics.wheelTarget(delta: 900), 0)
+        XCTAssertEqual(metrics.revealedOffset(itemMinX: 640, itemMaxX: 740), 448)
+
+        let scrolled = TabBarScrollMetrics.resolve(
+            contentWidth: 1_000,
+            viewportWidth: 300,
+            offset: 500
+        )
+        XCTAssertEqual(scrolled.revealedOffset(itemMinX: 120, itemMaxX: 220), 112)
+    }
+
+    func test无效尺寸与临界宽度安全回退() {
+        for values in [
+            (Double.nan, 300.0, 20.0),
+            (1_000.0, -Double.infinity, 20.0),
+            (-1.0, 300.0, 20.0),
+            (300.0, 300.0, 999.0),
+        ] {
+            let metrics = TabBarScrollMetrics.resolve(
+                contentWidth: values.0,
+                viewportWidth: values.1,
+                offset: values.2
+            )
+            XCTAssertGreaterThanOrEqual(metrics.offset, 0)
+            XCTAssertLessThanOrEqual(metrics.offset, metrics.maximumOffset)
+            XCTAssertFalse(metrics.needsScroll)
+            XCTAssertFalse(metrics.canScrollForward)
+        }
+    }
+
     // MARK: - 工具
 
     /// 跑几个 runloop tick，让 SwiftUI 完成布局与 representable 更新。
@@ -85,6 +149,51 @@ final class TabBarLayoutProbeTests: XCTestCase {
         }
     }
 
+    func test二十个真实页签可按页向右再返回起点() throws {
+        let model = AppModel.previewModel()
+        let store = WorkspaceStore(hostNameProvider: { _ in "box" })
+        store.tabBarOverflowMode = .scroll
+        for _ in 0..<20 {
+            store.openTerminal(hostID: "box")
+        }
+        let controller = TabBarScrollController()
+
+        let hosting = NSHostingView(rootView:
+            WorkspaceTabBar(scrollController: controller)
+                .environmentObject(model)
+                .environmentObject(store)
+                .frame(width: 500)
+        )
+        let window = makeWindow()
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        pump(0.6)
+        hosting.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(controller.needsScroll)
+        XCTAssertFalse(controller.canScrollLeft)
+        XCTAssertTrue(controller.canScrollRight)
+
+        let container = try XCTUnwrap(findView(hosting, matching: "HeightConstrainedContainer"))
+        let scrollView = try XCTUnwrap(findScrollView(in: container))
+        let initialOffset = scrollView.contentView.bounds.minX
+
+        controller.scrollRight()
+        pump(0.4)
+        XCTAssertGreaterThan(scrollView.contentView.bounds.minX, initialOffset)
+        XCTAssertTrue(controller.canScrollLeft)
+
+        controller.scrollLeft()
+        pump(0.4)
+        XCTAssertEqual(scrollView.contentView.bounds.minX, 0, accuracy: 1)
+
+        let lastTabID = try XCTUnwrap(store.tabs.last?.id)
+        model.presentTab(lastTabID)
+        pump(0.4)
+        XCTAssertGreaterThan(scrollView.contentView.bounds.minX, 0)
+        XCTAssertFalse(controller.canScrollRight)
+    }
+
     /// 深度优先查找第一个类名包含 match 的视图。
     private func findView(_ view: NSView, matching match: String) -> NSView? {
         if String(describing: type(of: view)).contains(match) { return view }
@@ -101,6 +210,14 @@ final class TabBarLayoutProbeTests: XCTestCase {
                 return (document, scrollView.contentView.bounds.width)
             }
             if let found = findScrollDocument(in: sub) { return found }
+        }
+        return nil
+    }
+
+    private func findScrollView(in container: NSView) -> NSScrollView? {
+        if let scrollView = container as? NSScrollView { return scrollView }
+        for subview in container.subviews {
+            if let found = findScrollView(in: subview) { return found }
         }
         return nil
     }

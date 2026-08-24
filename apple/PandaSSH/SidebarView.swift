@@ -63,8 +63,8 @@ struct SidebarView: View {
 
     private var callbacks: SidebarCallbacks {
         SidebarCallbacks(
-            openTerminal: { workspace.openTerminal(hostID: $0.id) },
-            openSFTP: { workspace.openSFTP(hostID: $0.id) },
+            openTerminal: { model.presentTab(workspace.openTerminal(hostID: $0.id)) },
+            openSFTP: { model.presentTab(workspace.openSFTP(hostID: $0.id)) },
             editHost: { model.sidebarSheet = .editHost($0) },
             deleteHost: { hostPendingDelete = $0 },
             newSubgroup: { model.sidebarSheet = .newGroup(parent: $0) },
@@ -93,8 +93,7 @@ struct SidebarView: View {
             bottomEntries
         }
         #if os(macOS)
-        // 配合保留的系统工具栏(见 MainWindowChrome),忽略顶部安全区,
-        // 让侧栏面板内容融入标题栏(与红绿灯同一水平线)。
+        // 让侧栏表面延伸进统一系统工具栏，与 macOS 26 浮动侧栏保持连续。
         .ignoresSafeArea(.container, edges: .top)
         #endif
         #if os(iOS)
@@ -149,43 +148,37 @@ struct SidebarView: View {
     #if os(macOS)
     /// 侧栏顶部工具条(与红绿灯同一水平线;系统工具栏由 MainWindowChrome 保留,
     /// 配合侧栏列 ignoresSafeArea 融入标题栏,见 MainWindowChrome 注释)。
-    /// 左侧为窗口拖拽区,右端两个容器靠右布局:
-    /// 容器 1 为添加按钮组(添加主机/新建分组),容器 2 为侧栏切换按钮。
-    /// 分栏最小宽度(220pt)保证容器完整显示;拖到最小宽度以下系统自动隐藏侧栏。
+    /// 左侧保留窗口拖拽空间，右侧使用紧凑原生图标按钮，不绘制额外按钮容器。
     private var sidebarTopBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             WindowDragView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // 容器 1:添加按钮组
-            HStack(spacing: 12) {
-                Button {
-                    model.sidebarSheet = .addHost(defaultGroupID: nil)
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("添加主机")
-                Button {
-                    model.sidebarSheet = .newGroup(parent: nil)
-                } label: {
-                    Image(systemName: "folder.badge.plus")
-                }
-                .help("新建分组")
+            Button {
+                model.sidebarSheet = .addHost(defaultGroupID: nil)
+            } label: {
+                Label("添加主机", systemImage: "plus")
+                    .labelStyle(.iconOnly)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-            // 容器 2:侧栏切换按钮
+            .help("添加主机")
+            Button {
+                model.sidebarSheet = .newGroup(parent: nil)
+            } label: {
+                Label("新建分组", systemImage: "folder.badge.plus")
+                    .labelStyle(.iconOnly)
+            }
+            .help("新建分组")
+            Divider()
+                .frame(height: 16)
             Button {
                 withAnimation { model.columnVisibility = .detailOnly }
             } label: {
-                Image(systemName: "sidebar.left")
+                Label("隐藏侧栏", systemImage: "sidebar.left")
+                    .labelStyle(.iconOnly)
             }
             .help("隐藏侧栏")
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
+        .controlSize(.small)
         .padding(.horizontal, 8)
         .frame(height: 38)
     }
@@ -276,7 +269,6 @@ struct SidebarView: View {
             SideEntryButton(
                 title: "代码片段",
                 systemImage: "chevron.left.forwardslash.chevron.right",
-                badge: "规划中",
                 isActive: model.sidebarPage == .snippets,
                 action: model.showSnippets
             )
@@ -284,7 +276,6 @@ struct SidebarView: View {
             SideEntryButton(
                 title: "设置",
                 systemImage: "gearshape",
-                badge: nil,
                 isActive: model.sidebarPage == .settings,
                 action: model.showSettings
             )
@@ -293,7 +284,6 @@ struct SidebarView: View {
             SideEntryButton(
                 title: "日志",
                 systemImage: "list.bullet.rectangle",
-                badge: nil,
                 isActive: false,
                 action: { openLogWindow() }
             )
@@ -301,7 +291,6 @@ struct SidebarView: View {
             SideEntryButton(
                 title: "日志",
                 systemImage: "list.bullet.rectangle",
-                badge: nil,
                 isActive: model.sidebarPage == .logs,
                 action: model.showLogs
             )
@@ -382,6 +371,8 @@ struct HostRowView: View {
         .simultaneousGesture(TapGesture(count: 1).onEnded { model.selectHost(host.id) })
         .contextMenu { hostMenu }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(host.name)，\(host.subtitle)")
+        .accessibilityValue(dotTip)
     }
 
     /// 主机右键/长按菜单(与原型 hostMenu 一致)
@@ -453,11 +444,10 @@ struct GroupRowView: View {
     }
 }
 
-/// 侧栏底部固定入口按钮(代码片段/设置),带选中高亮与「规划中」徽标。
+/// 侧栏底部固定入口按钮，使用与系统侧栏一致的选中和悬停层级。
 private struct SideEntryButton: View {
     let title: String
     let systemImage: String
-    let badge: String?
     let isActive: Bool
     let action: () -> Void
     @State private var hovering = false
@@ -470,14 +460,6 @@ private struct SideEntryButton: View {
                 Text(title)
                     .font(.callout)
                 Spacer()
-                if let badge {
-                    Text(badge)
-                        .font(.caption2)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.purple, in: Capsule())
-                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)

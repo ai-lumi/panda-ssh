@@ -37,10 +37,58 @@ struct HostListView: View {
 }
 
 #if DEBUG
-#Preview("主界面") {
+#if os(macOS)
+#Preview("Mac 常规窗口") {
     HostListView()
         .environmentObject(AppModel.previewModel())
         .environmentObject(WorkspaceStore.previewStore())
         .environmentObject(TransferStore())
+        .frame(width: 1180, height: 760)
 }
+
+#Preview("Mac 深色异常状态") {
+    let model: AppModel = {
+        let value = AppModel.previewModel()
+        value.selectHost("h-mismatch")
+        return value
+    }()
+    HostListView()
+        .environmentObject(model)
+        .environmentObject(WorkspaceStore.previewStore())
+        .environmentObject(TransferStore())
+        .preferredColorScheme(.dark)
+        .frame(width: 1180, height: 760)
+}
+#else
+#Preview("iPad 横屏常规宽度") {
+    HostListView()
+        .environmentObject(AppModel.previewModel())
+        .environmentObject(WorkspaceStore.previewStore())
+        .environmentObject(TransferStore())
+        .frame(width: 1024, height: 768)
+}
+
+#Preview("iPad 紧凑分屏") {
+    HostListView()
+        .environmentObject(AppModel.previewModel())
+        .environmentObject(WorkspaceStore.previewStore())
+        .environmentObject(TransferStore())
+        .frame(width: 520, height: 768)
+}
+
+
+#Preview("iPad Dynamic Type 与异常状态") {
+    let model: AppModel = {
+        let value = AppModel.previewModel()
+        value.selectHost("h-mismatch")
+        return value
+    }()
+    HostListView()
+        .environmentObject(model)
+        .environmentObject(WorkspaceStore.previewStore())
+        .environmentObject(TransferStore())
+        .environment(\.dynamicTypeSize, .accessibility2)
+        .frame(width: 520, height: 768)
+}
+#endif
 #endif

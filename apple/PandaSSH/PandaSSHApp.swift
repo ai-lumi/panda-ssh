@@ -36,9 +36,9 @@ struct PandaSSHApp: App {
                 .environmentObject(Logger.shared)
         }
         #if os(macOS)
-        // 隐藏标题栏:让内容区延伸到窗口顶部,自定义工具带与红绿灯对齐;
-        // 同时移除标题栏上的 App 名称文字(任务 4.2 / 提案「标题栏不出现 App 名称」)。
-        .windowStyle(.hiddenTitleBar)
+        // 保留原生工具栏、红绿灯、拖拽和全屏行为，只隐藏应用名称标题。
+        // 工作区页签通过 principal toolbar item 占用原标题位置。
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         #endif
 
         #if os(macOS)
@@ -84,6 +84,8 @@ final class AppModel: ObservableObject {
     @Published var lastError: String?
     /// 侧栏当前选中的主机;新建标签页入口据此工作。
     @Published var selectedHostID: String?
+    /// 主内容区实际呈现对象。查看主机详情不会关闭或切换后台会话。
+    @Published var workspacePresentation: WorkspacePresentationSelection = .empty
     /// 侧栏当前选中的分组;与主机选中互斥(单一选中语义)。
     @Published var selectedGroupID: String?
     /// 主区页面分支(侧栏底部入口切换)。
@@ -128,12 +130,20 @@ final class AppModel: ObservableObject {
         selectedHostID = id
         selectedGroupID = nil
         sidebarPage = .hosts
+        workspacePresentation = .hostDetail(hostID: id)
     }
 
     /// 选中分组并切回主机页。展开/折叠由 OutlineGroup 内部管理,不在模型层。
     func selectGroup(_ id: String) {
         selectedGroupID = id
         selectedHostID = nil
+        sidebarPage = .hosts
+        workspacePresentation = .empty
+    }
+
+    /// 显示指定页签。页签有效性由 WorkspaceView 按 WorkspaceStore 归一化。
+    func presentTab(_ id: UUID) {
+        workspacePresentation = .tab(tabID: id)
         sidebarPage = .hosts
     }
 
@@ -164,6 +174,9 @@ final class AppModel: ObservableObject {
     func deleteHost(id: String) {
         backend.deleteHost(id: id)
         if selectedHostID == id { selectedHostID = nil }
+        if workspacePresentation == .hostDetail(hostID: id) {
+            workspacePresentation = .empty
+        }
         reload()
     }
 

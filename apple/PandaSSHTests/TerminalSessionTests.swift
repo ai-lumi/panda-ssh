@@ -200,7 +200,9 @@ final class TerminalSessionTests: XCTestCase {
             let store = TerminalSessionStore(host: makeHost())
             store.connectionOpener = { _, _, _, _ in
                 Thread.sleep(forTimeInterval: 1.0)
-                return UInt64(UUID().hashValue)
+                // hashValue 可为负数，直接转 UInt64 会触发运行时陷阱并让整个
+                // XCTest 进程崩溃；保留位模式即可生成互不相关的测试句柄。
+                return UInt64(bitPattern: Int64(UUID().hashValue))
             }
             return store
         }

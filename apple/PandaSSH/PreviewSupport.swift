@@ -8,7 +8,7 @@ extension AppModel {
     /// 预览专用实例:Mock 后端 + 原型演示数据,预选中 web-prod。
     static func previewModel() -> AppModel {
         let model = AppModel(backend: MockBackend.demo())
-        model.selectedHostID = "h-webprod"
+        model.selectHost("h-webprod")
         return model
     }
 }

@@ -5,26 +5,49 @@ import SwiftUI
 struct WorkspaceTabButton: View {
     let tab: WorkspaceTab
     let dotColor: Color
+    let statusLabel: String
     let isActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
 
     @State private var hovering = false
 
+    private var metrics: WorkspaceTabPresentationMetrics {
+        WorkspaceTabPresentationMetrics.resolve(
+            platform: .macOS,
+            isActive: isActive,
+            isHovered: hovering,
+            availableWidth: WorkspaceTabPresentationMetrics.maximumTitleWidth,
+            titleCharacterCount: tab.title.count
+        )
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            Circle()
-                .fill(dotColor)
-                .frame(width: 6, height: 6)
+            Button(action: onSelect) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
 
-            Text(tab.title)
-                .font(.callout)
-                .lineLimit(1)
+                    Text(tab.title)
+                        .font(.callout)
+                        .lineLimit(1)
+                        .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(tab.title)
+            .accessibilityValue(statusLabel)
+            .accessibilityHint("切换到此标签页")
+            .accessibilityAddTraits(isActive ? .isSelected : [])
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 14, height: 14)
+                    .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -32,19 +55,18 @@ struct WorkspaceTabButton: View {
                 hovering ? Color.primary.opacity(0.12) : Color.clear,
                 in: Circle()
             )
-            .opacity(hovering ? 1 : 0)
-            .accessibilityLabel("关闭标签页")
+            .opacity(metrics.showsCloseButton ? 1 : 0)
+            .allowsHitTesting(metrics.showsCloseButton)
+            .accessibilityLabel("关闭 \(tab.title)")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .frame(minHeight: metrics.minimumTabHeight)
         .background(
             isActive ? Color.primary.opacity(0.14) : (hovering ? Color.primary.opacity(0.06) : Color.clear),
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onHover { hovering = $0 }
-        .onTapGesture(perform: onSelect)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isActive ? .isSelected : [])
+        .accessibilityElement(children: .contain)
     }
 }

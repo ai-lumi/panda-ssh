@@ -25,6 +25,7 @@ final class AppModelSelectionTests: XCTestCase {
         model.selectGroup("g-east")
         XCTAssertEqual(model.selectedGroupID, "g-east")
         XCTAssertNil(model.selectedHostID, "选中分组后主机选中态应清除(单一选中语义)")
+        XCTAssertEqual(model.workspacePresentation, .empty)
     }
 
     func testSelectHostClearsGroupSelection() {
@@ -32,6 +33,7 @@ final class AppModelSelectionTests: XCTestCase {
         model.selectHost("h-webprod")
         XCTAssertNil(model.selectedGroupID)
         XCTAssertEqual(model.selectedHostID, "h-webprod")
+        XCTAssertEqual(model.workspacePresentation, .hostDetail(hostID: "h-webprod"))
     }
 
     func testNewHostDefaultsToSelectedGroup() {
@@ -68,5 +70,23 @@ final class AppModelSelectionTests: XCTestCase {
     func testRootLevelHostSelectionDefaultsToRoot() {
         model.selectHost("h-newtoy") // 根级主机,无分组
         XCTAssertNil(model.groupIDForNewHost)
+    }
+
+    func testPresentTab切回主机页并记录互斥呈现选择() {
+        let tabID = UUID()
+        model.showSnippets()
+
+        model.presentTab(tabID)
+
+        XCTAssertEqual(model.sidebarPage, .hosts)
+        XCTAssertEqual(model.workspacePresentation, .tab(tabID: tabID))
+    }
+
+    func testDeletePresentedHostCle空内容选择() {
+        model.selectHost("h-webprod")
+
+        model.deleteHost(id: "h-webprod")
+
+        XCTAssertEqual(model.workspacePresentation, .empty)
     }
 }

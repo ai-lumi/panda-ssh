@@ -9,11 +9,37 @@ struct WorkspaceView: View {
     @EnvironmentObject private var transfers: TransferStore
 
     var body: some View {
+        Group {
         #if os(macOS)
         macOSBody
         #else
         iOSBody
         #endif
+        }
+        .onChange(of: workspace.activeTabID) { _, activeTabID in
+            // 仅当当前正在呈现页签时跟随 WorkspaceStore 的关闭/切换结果；
+            // 查看主机详情时，后台 activeTabID 不应抢回内容区。
+            guard case .tab = model.workspacePresentation else { return }
+            if let activeTabID {
+                model.presentTab(activeTabID)
+            } else {
+                model.workspacePresentation = .empty
+            }
+        }
+        .onChange(of: model.hosts.map(\.id)) { _, _ in
+            normalizePresentation()
+        }
+    }
+
+    private func normalizePresentation() {
+        let normalized = model.workspacePresentation.normalized(
+            validHostIDs: Set(model.hosts.map(\.id)),
+            validTabIDs: Set(workspace.tabs.map(\.id)),
+            fallbackTabID: workspace.activeTabID
+        )
+        if normalized != model.workspacePresentation {
+            model.workspacePresentation = normalized
+        }
     }
 
     #if os(macOS)
@@ -21,13 +47,10 @@ struct WorkspaceView: View {
         NavigationSplitView(columnVisibility: $model.columnVisibility) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
+                .toolbar(removing: defaultSidebarToolbarItemToRemove)
         } detail: {
-        VStack(spacing: 0) {
-            macOSTabBar
-            Divider()
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
         }
         // 「添加主机 / 新建分组」入口在侧栏顶部工具条(见 SidebarView.sidebarTopBar);
         // 弹层状态在 AppModel.sidebarSheet,sheet 由 HostListView 统一挂载。
@@ -55,8 +78,37 @@ struct WorkspaceView: View {
             Button("关闭", role: .destructive) { workspace.confirmClose() }
             Button("取消", role: .cancel) { workspace.cancelClose() }
         }
-        // 移除 NavigationSplitView 自动注入的 `>>` 侧栏切换按钮(workspace spec「主窗口工具栏精简」)。
-        .toolbar(removing: .sidebarToggle)
+        .toolbar {
+            // 整条可滚动页签栏是唯一 principal item，避免系统把单个页签
+            // 拆入溢出菜单，也不再在内容区重复绘制第二行页签。
+            if !workspace.tabs.isEmpty {
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .principal) {
+                        macOSTabBar
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .principal) {
+                        macOSTabBar
+                    }
+                }
+            }
+        }
+    }
+
+    private var defaultSidebarToolbarItemToRemove: ToolbarDefaultItemKind? {
+        let isSidebarVisible = model.columnVisibility != .detailOnly
+        return WorkspaceChromePolicy.shouldRemoveDefaultSidebarToggle(
+            platform: .macOS,
+            isSidebarVisible: isSidebarVisible
+        ) ? .sidebarToggle : nil
+    }
+
+    private var macOSTabBar: some View {
+        WorkspaceTabBar()
+            .environmentObject(model)
+            .environmentObject(workspace)
+            .frame(minWidth: 120, idealWidth: 560, maxWidth: WorkspaceChromePolicy.maximumPrincipalWidth)
     }
     #endif
 
@@ -94,20 +146,6 @@ struct WorkspaceView: View {
     }
     #endif
 
-    #if os(macOS)
-    private var macOSTabBar: some View {
-        // 系统工具栏保留(见 MainWindowChrome):侧栏显隐由系统工具栏的
-        // 切换按钮负责(隐藏侧栏时系统把它放在标题栏红绿灯右侧),
-        // 这里不再自绘「显示侧栏」按钮;整行背景挂 WindowDragView,空白处可拖拽窗口。
-        HStack(spacing: 4) {
-            WorkspaceTabBar()
-                .environmentObject(model)
-                .environmentObject(workspace)
-        }
-        .background(WindowDragView())
-    }
-    #endif
-
     /// 横向滚动的标签栏;标签过多时可滑动,iPadOS 紧凑宽度下不拥挤。
     private var iosTabBar: some View {
         HStack(spacing: 0) {
@@ -116,11 +154,10 @@ struct WorkspaceView: View {
                     ForEach(workspace.tabs) { tab in
                         WorkspaceTabItemView(
                             tab: tab,
-                            isActive: tab.id == workspace.activeTabID,
+                            isActive: model.workspacePresentation == .tab(tabID: tab.id),
                             onSelect: {
                                 workspace.select(tabID: tab.id)
-                                // 点击标签回到主机页(片段/设置页整页替换工作区内容)
-                                model.sidebarPage = .hosts
+                                model.presentTab(tab.id)
                             },
                             onClose: { workspace.requestClose(tabID: tab.id) }
                         )
@@ -177,7 +214,9 @@ struct WorkspaceView: View {
 
     @ViewBuilder
     private var hostsContent: some View {
-        if let active = workspace.tabs.first(where: { $0.id == workspace.activeTabID }) {
+        switch model.workspacePresentation {
+        case .tab(let tabID):
+            if let active = workspace.tabs.first(where: { $0.id == tabID }) {
             if let host = model.hosts.first(where: { $0.id == active.hostID }) {
                 // 终端/SFTP 标签内部按 preconnectAction 走连接门控(TOFU/告警/密码)
                 // .id(active.id) 强制 SwiftUI 按标签身份管理视图生命周期:
@@ -198,10 +237,16 @@ struct WorkspaceView: View {
                     description: Text("对应的主机可能已被删除,请关闭该标签页")
                 )
             }
-        } else if let id = model.selectedHostID,
-                  let host = model.hosts.first(where: { $0.id == id }) {
-            HostDetailView(host: host)
-        } else {
+            } else {
+                emptyStateView
+            }
+        case .hostDetail(let hostID):
+            if let host = model.hosts.first(where: { $0.id == hostID }) {
+                HostDetailView(host: host)
+            } else {
+                emptyStateView
+            }
+        case .empty:
             emptyStateView
         }
     }
@@ -210,40 +255,58 @@ struct WorkspaceView: View {
     private var emptyStateView: some View {
         VStack(spacing: 16) {
             Spacer()
-            Image(systemName: "terminal")
-                .font(.system(size: 52))
-                .foregroundStyle(Color.accentColor)
-            Text("尚未连接")
+            Image(systemName: model.hosts.isEmpty ? "server.rack" : "rectangle.split.2x1")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(model.hosts.isEmpty ? "还没有主机" : "选择一个主机")
                 .font(.title2).bold()
-            Text("选择一个主机或打开一个已有的连接")
+            Text(model.hosts.isEmpty ? "添加主机后即可打开终端或浏览文件" : "从侧栏查看主机详情，再选择终端或 SFTP")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 12) {
+            if model.hosts.isEmpty {
                 Button {
-                    // 快速连接:选中第一个可用主机并打开终端
-                    if let firstHost = model.hosts.first {
-                        model.selectHost(firstHost.id)
-                        workspace.openTerminal(hostID: firstHost.id)
-                    }
+                    performEmptyStateAction(.addHost)
                 } label: {
-                    Label("快速连接", systemImage: "bolt")
+                    Label("添加主机", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                Button {
-                    // 打开连接:聚焦侧栏搜索或选中第一台主机
-                    if let firstHost = model.hosts.first {
-                        model.selectHost(firstHost.id)
+            } else {
+                HStack(spacing: 12) {
+                    Button {
+                        performEmptyStateAction(.chooseHost)
+                    } label: {
+                        Label("选择主机", systemImage: "sidebar.left")
                     }
-                } label: {
-                    Label("打开连接", systemImage: "server.rack")
+                    .buttonStyle(.borderedProminent)
+                    Button {
+                        performEmptyStateAction(.addHost)
+                    } label: {
+                        Label("添加主机", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
-            .padding(.top, 4)
+            Spacer()
+                .frame(height: 4)
             Spacer()
         }
         .frame(maxWidth: .infinity)
         .padding(24)
+    }
+
+    private func performEmptyStateAction(_ action: WorkspaceEmptyStateAction) {
+        let command = WorkspaceEmptyStateRouter.command(
+            for: action,
+            hostCount: model.hosts.count,
+            isSidebarVisible: model.columnVisibility != .detailOnly
+        )
+        switch command {
+        case .revealHostList, .focusHostList:
+            withAnimation { model.columnVisibility = .all }
+        case .addHost:
+            model.sidebarSheet = .addHost(defaultGroupID: nil)
+        }
     }
 }
 
@@ -255,18 +318,40 @@ struct WorkspaceTabItemView: View {
     let onClose: () -> Void
     @State private var hovering = false
 
+    private var metrics: WorkspaceTabPresentationMetrics {
+        WorkspaceTabPresentationMetrics.resolve(
+            platform: .iPadOS,
+            isActive: isActive,
+            isHovered: hovering,
+            availableWidth: WorkspaceTabPresentationMetrics.maximumTitleWidth,
+            titleCharacterCount: tab.title.count
+        )
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(tab.title)
-                .font(.callout)
-                .lineLimit(1)
+            Button(action: onSelect) {
+                HStack(spacing: 6) {
+                    Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(tab.title)
+                        .font(.callout)
+                        .lineLimit(1)
+                        .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(tab.title)
+            .accessibilityValue(tab.kind == .terminal ? "终端会话" : "SFTP 会话")
+            .accessibilityHint("切换到此标签页")
+            .accessibilityAddTraits(isActive ? .isSelected : [])
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 14, height: 14)
+                    .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -274,20 +359,19 @@ struct WorkspaceTabItemView: View {
                 hovering ? Color.primary.opacity(0.12) : Color.clear,
                 in: Circle()
             )
-            .opacity(hovering ? 1 : 0)
-            .accessibilityLabel("关闭标签页")
+            .opacity(metrics.showsCloseButton ? 1 : 0)
+            .allowsHitTesting(metrics.showsCloseButton)
+            .accessibilityLabel("关闭 \(tab.title)")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .frame(minHeight: metrics.minimumTabHeight)
         .background(
             isActive ? Color.primary.opacity(0.14) : (hovering ? Color.primary.opacity(0.06) : Color.clear),
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onHover { hovering = $0 }
-        .onTapGesture(perform: onSelect)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isActive ? .isSelected : [])
+        .accessibilityElement(children: .contain)
     }
 }
 

@@ -7,6 +7,12 @@ struct WorkspaceTabBar: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @StateObject private var scrollController = TabBarScrollController()
 
+    private static let documentCoordinateSpace = "workspace-tab-document"
+
+    init(scrollController: TabBarScrollController = TabBarScrollController()) {
+        _scrollController = StateObject(wrappedValue: scrollController)
+    }
+
     var body: some View {
         Group {
             if workspace.tabBarOverflowMode == .scroll {
@@ -15,13 +21,28 @@ struct WorkspaceTabBar: View {
                 expandModeContent
             }
         }
+        .onAppear {
+            synchronizeScrollTargets()
+        }
+        .onChange(of: workspace.tabs.map(\.id)) { _, _ in
+            synchronizeScrollTargets()
+        }
+        .onChange(of: workspace.tabBarOverflowMode) { _, _ in
+            synchronizeScrollTargets()
+        }
+        .onChange(of: presentedTabID) { _, tabID in
+            if let tabID {
+                scrollController.reveal(tabID: tabID)
+            }
+        }
     }
 
     // MARK: - 滚动模式
 
     private var scrollModeContent: some View {
         HStack(spacing: 0) {
-            scrollButton(systemName: "chevron.left", action: scrollController.scrollLeft,
+            scrollButton(systemName: "chevron.left", accessibilityLabel: "向左翻页",
+                         action: scrollController.scrollLeft,
                          isEnabled: scrollController.canScrollLeft)
             HorizontalWheelScrollView(controller: scrollController) {
                 HStack(spacing: 4) {
@@ -29,13 +50,21 @@ struct WorkspaceTabBar: View {
                 }
                 .padding(.horizontal, 4)
                 .padding(.vertical, 6)
+                .fixedSize(horizontal: true, vertical: false)
+                .coordinateSpace(name: Self.documentCoordinateSpace)
             }
-            scrollButton(systemName: "chevron.right", action: scrollController.scrollRight,
+            scrollButton(systemName: "chevron.right", accessibilityLabel: "向右翻页",
+                         action: scrollController.scrollRight,
                          isEnabled: scrollController.canScrollRight)
         }
     }
 
-    private func scrollButton(systemName: String, action: @escaping () -> Void, isEnabled: Bool) -> some View {
+    private func scrollButton(
+        systemName: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void,
+        isEnabled: Bool
+    ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 10, weight: .semibold))
@@ -45,7 +74,11 @@ struct WorkspaceTabBar: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .opacity(scrollController.needsScroll ? 1 : 0)
+        .allowsHitTesting(scrollController.needsScroll)
         .frame(width: 20)
+        .help(accessibilityLabel)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHidden(!scrollController.needsScroll)
     }
 
     // MARK: - 多行模式
@@ -66,14 +99,27 @@ struct WorkspaceTabBar: View {
             WorkspaceTabButton(
                 tab: tab,
                 dotColor: dotColor(for: tab.hostID),
-                isActive: tab.id == workspace.activeTabID,
+                statusLabel: statusLabel(for: tab.hostID),
+                isActive: model.workspacePresentation == .tab(tabID: tab.id),
                 onSelect: {
                     workspace.select(tabID: tab.id)
-                    model.sidebarPage = .hosts
+                    model.presentTab(tab.id)
                 },
                 onClose: { workspace.requestClose(tabID: tab.id) }
             )
             .id(tab.id)
+            .background {
+                GeometryReader { proxy in
+                    let frame = proxy.frame(in: .named(Self.documentCoordinateSpace))
+                    Color.clear
+                        .onAppear {
+                            scrollController.updateTabFrame(frame, for: tab.id)
+                        }
+                        .onChange(of: frame) { _, newFrame in
+                            scrollController.updateTabFrame(newFrame, for: tab.id)
+                        }
+                }
+            }
             .contextMenu {
                 if tab.kind == .terminal {
                     Button {
@@ -97,6 +143,18 @@ struct WorkspaceTabBar: View {
         }
     }
 
+    private var presentedTabID: UUID? {
+        guard case .tab(let tabID) = model.workspacePresentation else { return nil }
+        return tabID
+    }
+
+    private func synchronizeScrollTargets() {
+        scrollController.retainTabIDs(Set(workspace.tabs.map(\.id)))
+        if let presentedTabID {
+            scrollController.reveal(tabID: presentedTabID)
+        }
+    }
+
     private func dotColor(for hostID: String) -> Color {
         guard let host = model.hosts.first(where: { $0.id == hostID }) else {
             return Color(.gray).opacity(0.6)
@@ -105,6 +163,15 @@ struct WorkspaceTabBar: View {
         case .mismatch: return .red
         case .unknown: return .yellow
         default: return host.fingerprint != nil ? .green : Color(.gray).opacity(0.6)
+        }
+    }
+
+    private func statusLabel(for hostID: String) -> String {
+        guard let host = model.hosts.first(where: { $0.id == hostID }) else { return "主机不可用" }
+        switch host.demo {
+        case .mismatch: return "主机密钥不匹配"
+        case .unknown: return "主机密钥未验证"
+        default: return host.fingerprint != nil ? "主机密钥已记录" : "主机密钥未记录"
         }
     }
 }
