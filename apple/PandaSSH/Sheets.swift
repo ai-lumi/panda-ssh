@@ -110,27 +110,48 @@ struct PasswordPromptSheet: View {
     @State private var password = ""
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "lock.fill")
-                .font(.system(size: 36))
-                .foregroundStyle(Color.accentColor)
-            Text(host.auth == .password ? "需要密码" : "需要私钥口令")
-                .font(.headline)
-            Text(promptDescription)
-                .font(.callout)
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 44, height: 44)
+                    .background(Color.accentColor.opacity(0.14), in: Circle())
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(host.auth == .password ? "输入登录密码" : "输入私钥口令")
+                        .font(.title3.weight(.semibold))
+                    Text("连接至 \(host.username)@\(host.address):\(host.port)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(host.auth == .password ? "密码" : "私钥口令")
+                    .font(.subheadline.weight(.medium))
+                SecureField(host.auth == .password ? "请输入密码" : "请输入私钥口令", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(submit)
+            }
+
+            Text("仅用于当前标签页，关闭标签后即销毁。")
+                .font(.caption)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            SecureField(host.auth == .password ? "输入登录密码" : "输入私钥口令", text: $password)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(submit)
+
             HStack(spacing: 12) {
+                Spacer()
                 Button("取消", role: .cancel) { onCancel(); dismiss() }
                 Button("登录") { submit() }
                     .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
                     .disabled(password.isEmpty)
             }
-            .padding(.top, 4)
         }
+        .padding(28)
+        .frame(width: 430, alignment: .leading)
     }
 
     private func submit() {
@@ -138,11 +159,6 @@ struct PasswordPromptSheet: View {
         // 秘密只随回调进入该标签页会话，不做任何缓存。
         onLogin(password)
         dismiss()
-    }
-
-    private var promptDescription: String {
-        let credential = host.auth == .password ? "密码" : "私钥口令"
-        return "输入 **\(host.username)@\(host.name)** 的\(credential)。\n该主机缺少可用的已保存\(credential)，它仅用于本次标签页会话，关闭标签即销毁；同一主机的其他标签页需各自输入。"
     }
 }
 
