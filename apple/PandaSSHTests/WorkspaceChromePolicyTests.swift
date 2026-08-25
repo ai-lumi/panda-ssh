@@ -63,7 +63,7 @@ final class WorkspaceChromePolicyTests: XCTestCase {
         XCTAssertFalse(policy.removesDefaultSidebarToggle)
     }
 
-    func test侧栏可见时移除系统默认按钮避免与侧栏内部按钮重复() {
+    func testMac侧栏可见时保留系统侧栏按钮() {
         let policy = WorkspaceChromePolicy.resolve(
             platform: .macOS,
             tabCount: 1,
@@ -71,7 +71,7 @@ final class WorkspaceChromePolicyTests: XCTestCase {
             windowWidth: 900
         )
 
-        XCTAssertTrue(policy.removesDefaultSidebarToggle)
+        XCTAssertFalse(policy.removesDefaultSidebarToggle)
     }
 
     func testIPad不移除系统侧栏恢复入口() {

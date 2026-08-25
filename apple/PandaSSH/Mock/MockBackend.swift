@@ -1,7 +1,7 @@
 import Foundation
 
 /// 全内存 Mock 后端:预置原型(prototype/index.html)的演示数据,
-/// 增删改只在内存生效,不触碰 FFI、钥匙串与外部存储。
+/// 增删改只在内存生效,不触碰 FFI、本地凭据文件与外部存储。
 /// 让阶段一的 UI 可以在 Xcode 里完整验证;阶段二连接流程同样以它为数据源。
 final class MockBackend: AppBackend {
     let startupError: String? = nil
@@ -28,7 +28,7 @@ final class MockBackend: AppBackend {
     @discardableResult
     func saveHost(_ host: HostEntry, password: String?, passphrase: String?) -> Bool {
         // Mock 模式不落密钥材料:password/passphrase 直接丢弃,
-        // 仅以 passwordSaved/passphraseSaved 标记「已存钥匙串」的演示状态。
+        // 仅以 passwordSaved/passphraseSaved 标记「已保存凭据」的演示状态。
         if let index = hosts.firstIndex(where: { $0.id == host.id }) {
             hosts[index] = host
         } else {
@@ -71,7 +71,7 @@ final class MockBackend: AppBackend {
         return host.toConfigRecord()
     }
 
-    func clearKeychainCredentials(for hostID: String, auth: AuthKind) {
+    func clearCredentials(for hostID: String, auth: AuthKind) {
         guard let index = hosts.firstIndex(where: { $0.id == hostID }) else { return }
         if auth == .password {
             hosts[index].passwordSaved = false
@@ -126,7 +126,7 @@ final class MockBackend: AppBackend {
 
 extension HostEntry {
     /// 转为 FFI 侧配置;引用 key 按「host.<id>.password/.passphrase」约定,
-    /// 与真实后端及钥匙串读写保持一致。
+    /// 与真实后端及本地凭据读写保持一致。
     func toConfigRecord() -> HostConfigRecord {
         let auth: AuthMethodEnum = switch auth {
         case .password:
@@ -239,7 +239,7 @@ enum DemoData {
         ),
         HostEntry(
             id: "h-manual", name: "manual-auth", address: "172.16.9.9", port: 22,
-            username: "luowenqiang", note: "密码未存钥匙串，每次手动输入",
+            username: "luowenqiang", note: "密码未保存，每次手动输入",
             groupID: nil, auth: .password,
             passwordSaved: false,
             fingerprint: FP.manual, fingerprintAlgorithm: "ssh-ed25519", demo: .manual

@@ -1,6 +1,6 @@
 import Foundation
 
-/// 认证方式(与 FFI 的 AuthMethodEnum 对应,但不含钥匙串引用 key,
+/// 认证方式（与 FFI 的 AuthMethodEnum 对应，但不含凭据引用 key，
 /// 引用与密钥材料的写入由后端在保存时负责)。
 enum AuthKind: String, Equatable {
     case password
@@ -16,7 +16,7 @@ enum DemoFlag: String, Equatable {
     case mismatch
     /// 已下线 → 连接超时演示(阶段二终端用)
     case offline
-    /// 密码未存钥匙串 → 每个标签页手动输入密码
+    /// 密码未保存 → 每个标签页手动输入密码
     case manual
 }
 
@@ -34,9 +34,9 @@ struct HostEntry: Identifiable, Equatable {
     var auth: AuthKind = .password
     /// 密钥方式下的私钥路径
     var keyPath = ""
-    /// 密码是否已保存到钥匙串
+    /// 密码是否已保存到本地凭据文件
     var passwordSaved = false
-    /// 密钥口令是否已保存到钥匙串
+    /// 私钥口令是否已保存到本地凭据文件
     var passphraseSaved = false
     /// 已记录的主机密钥指纹(SHA256 冒号格式);nil 表示未验证
     var fingerprint: String?
@@ -46,6 +46,30 @@ struct HostEntry: Identifiable, Equatable {
 
     /// `user@host:port` 形式的副标题
     var subtitle: String { "\(username)@\(address):\(port)" }
+}
+
+/// 复制主机时允许预填的非敏感字段。
+/// 凭据保存标记、主机密钥信任状态与演示状态均不随副本传递。
+struct HostCopyDraft: Equatable {
+    let name: String
+    let address: String
+    let port: UInt16
+    let username: String
+    let note: String
+    let groupID: String?
+    let auth: AuthKind
+    let keyPath: String
+
+    init(source: HostEntry) {
+        name = source.name
+        address = source.address
+        port = source.port
+        username = source.username
+        note = source.note
+        groupID = source.groupID
+        auth = source.auth
+        keyPath = source.keyPath
+    }
 }
 
 /// 服务器分组:任意层级树形,parentID 为 nil 表示根级分组。

@@ -18,3 +18,5 @@ russh-sftp = "2.4"
 uniffi = "0.32"
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
+argon2 = "0.5"
+aes-gcm = "0.10"

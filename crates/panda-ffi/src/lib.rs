@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use panda_core::{
-    AuthMethod, ConfigStore, Credentials, Group, GroupStore, HostConfig, KnownHosts, SftpClient,
+    AuthMethod, ConfigStore, CredentialStore, Credentials, Group, GroupStore, HostConfig, KnownHosts, SftpClient,
     ShellSession, SshSession, TomlConfigStore, TomlGroupStore, UnknownHostKeyPolicy,
 };
 use tokio::runtime::Runtime;
@@ -57,10 +57,18 @@ pub enum PandaError {
     UnknownHost(String),
     #[error("host {0} uses password auth but no password was provided")]
     MissingPassword(String),
+    #[error("host {0} uses an encrypted private key but no passphrase was provided")]
+    MissingPassphrase(String),
     #[error("unknown shell session handle {0}")]
     UnknownShellHandle(u64),
     #[error("operation cancelled")]
     Cancelled,
+    #[error("credential protection key is required")]
+    CredentialProtectionKeyRequired,
+    #[error("credential protection key cannot decrypt the credential file")]
+    CredentialUnlockFailed,
+    #[error("credential file is invalid")]
+    InvalidCredentialFile,
     #[error("unknown transfer task {0}")]
     UnknownTransferTask(String),
     /// Fallback for everything without a dedicated category.
@@ -72,6 +80,7 @@ impl From<panda_core::Error> for PandaError {
     fn from(e: panda_core::Error) -> Self {
         match e {
             panda_core::Error::AuthFailed => PandaError::AuthFailed,
+            panda_core::Error::MissingPassphrase => PandaError::MissingPassphrase(String::new()),
             panda_core::Error::Timeout => PandaError::Timeout,
             panda_core::Error::HostKeyMismatch {
                 stored_fingerprint,
@@ -91,6 +100,9 @@ impl From<panda_core::Error> for PandaError {
                 fingerprint,
             },
             panda_core::Error::Cancelled => PandaError::Cancelled,
+            panda_core::Error::CredentialProtectionKeyRequired => PandaError::CredentialProtectionKeyRequired,
+            panda_core::Error::CredentialUnlockFailed => PandaError::CredentialUnlockFailed,
+            panda_core::Error::InvalidCredentialFile => PandaError::InvalidCredentialFile,
             other => PandaError::Core(other.to_string()),
         }
     }
@@ -280,6 +292,7 @@ struct Stores {
     config: TomlConfigStore,
     groups: TomlGroupStore,
     known_hosts: KnownHosts,
+    credentials: CredentialStore,
 }
 
 static STORES: Mutex<Option<Arc<Stores>>> = Mutex::new(None);
@@ -314,6 +327,7 @@ pub fn init_store(config_dir: String) -> Result<(), PandaError> {
         config: TomlConfigStore::new(dir.join("hosts.toml")),
         groups: TomlGroupStore::new(dir.join("groups.toml")),
         known_hosts: KnownHosts::new(dir.join("known_hosts")),
+        credentials: CredentialStore::new(dir.join("credentials.toml")),
     }));
     Ok(())
 }
@@ -336,7 +350,58 @@ pub fn save_host(host: HostConfigRecord) -> Result<(), PandaError> {
 
 #[uniffi::export]
 pub fn delete_host(id: String) -> Result<(), PandaError> {
-    Ok(stores()?.config.delete(&id)?)
+    let stores = stores()?;
+    let password_ref = format!("host.{id}.password");
+    let passphrase_ref = format!("host.{id}.passphrase");
+    let previous_password = stores.credentials.get(&password_ref)?;
+    let previous_passphrase = stores.credentials.get(&passphrase_ref)?;
+
+    // 先验证并删除凭据；若任一步失败，恢复已经删除的条目且不修改 hosts.toml。
+    stores.credentials.delete(&password_ref)?;
+    if let Err(error) = stores.credentials.delete(&passphrase_ref) {
+        restore_credential(&stores.credentials, &password_ref, previous_password)?;
+        return Err(error.into());
+    }
+    if let Err(error) = stores.config.delete(&id) {
+        restore_credential(&stores.credentials, &password_ref, previous_password)?;
+        restore_credential(&stores.credentials, &passphrase_ref, previous_passphrase)?;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn restore_credential(store: &CredentialStore, reference: &str, secret: Option<String>) -> Result<(), panda_core::Error> {
+    match secret {
+        Some(secret) => store.save(reference.to_owned(), secret),
+        None => store.delete(reference),
+    }
+}
+
+/// 保存本地凭据；秘密仅写入配置目录的 credentials.toml。
+#[uniffi::export]
+pub fn save_credential(reference: String, secret: String) -> Result<(), PandaError> {
+    Ok(stores()?.credentials.save(reference, secret)?)
+}
+
+#[uniffi::export]
+pub fn read_credential(reference: String) -> Result<Option<String>, PandaError> {
+    Ok(stores()?.credentials.get(&reference)?)
+}
+
+#[uniffi::export]
+pub fn delete_credential(reference: String) -> Result<(), PandaError> {
+    Ok(stores()?.credentials.delete(&reference)?)
+}
+
+/// 用当前保护密钥解锁凭据文件，并用新密钥重写；新密钥为空时迁回明文格式。
+#[uniffi::export]
+pub fn set_credential_protection_key(current_key: Option<String>, new_key: Option<String>) -> Result<(), PandaError> {
+    Ok(stores()?.credentials.set_protection_key(current_key, new_key)?)
+}
+
+#[uniffi::export]
+pub fn credential_protection_enabled() -> Result<bool, PandaError> {
+    Ok(stores()?.credentials.is_protected()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +486,7 @@ pub(crate) fn load_host(host_id: &str) -> Result<HostConfig, PandaError> {
 }
 
 /// Build credentials from the host's auth method; secrets are supplied by
-/// the caller (read from the keychain on the Swift side).
+/// the caller from the local credential store or the current session.
 pub(crate) fn credentials_for(
     cfg: &HostConfig,
     password: Option<String>,
@@ -433,7 +498,7 @@ pub(crate) fn credentials_for(
             .ok_or_else(|| PandaError::MissingPassword(cfg.name.clone())),
         AuthMethod::PublicKey { key_path, .. } => Ok(Credentials::KeyFile {
             path: key_path.clone(),
-            passphrase,
+            passphrase: passphrase.filter(|value| !value.is_empty()),
         }),
     }
 }
@@ -1282,4 +1347,31 @@ pub fn save_snippet(snippet: SnippetRecord) -> Result<(), PandaError> {
 #[uniffi::export]
 pub fn delete_snippet(name: String) -> Result<(), PandaError> {
     Ok(snippet_store()?.delete(&name)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_missing_private_key_passphrase_to_structured_ffi_error() {
+        let error = PandaError::from(panda_core::Error::MissingPassphrase);
+        assert!(matches!(error, PandaError::MissingPassphrase(_)));
+    }
+
+    #[test]
+    fn missing_password_stays_distinct_from_authentication_failure() {
+        let cfg = HostConfig {
+            id: "id".into(),
+            name: "host".into(),
+            host: "example.com".into(),
+            port: 22,
+            username: "user".into(),
+            auth: AuthMethod::Password { password_ref: None },
+            notes: None,
+            group_id: None,
+        };
+        assert!(matches!(credentials_for(&cfg, None, None), Err(PandaError::MissingPassword(_))));
+        assert!(matches!(PandaError::from(panda_core::Error::AuthFailed), PandaError::AuthFailed));
+    }
 }

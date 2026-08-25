@@ -16,6 +16,8 @@ final class TerminalSessionStore: ObservableObject {
     let host: HostEntry
 
     @Published private(set) var phase: Phase = .connecting
+    /// 最近一次连接失败的结构化类别；仅在 `phase == .failed` 时有意义。
+    @Published private(set) var failure: ConnectionFailure = .timeout
     /// 当前连接句柄；nil 表示尚未建立连接。
     /// 视图层（SwiftTerm TerminalView 包装器）据此启动读循环。
     @Published private(set) var connection: ShellConnection?
@@ -62,7 +64,7 @@ final class TerminalSessionStore: ObservableObject {
     }
 
     /// 使用真实 SSH 连接建立 shell 会话。
-    /// `password`/`passphrase` 由调用方（钥匙串或手动输入）提供。
+    /// `password`/`passphrase` 由调用方（本地凭据文件或手动输入）提供。
     /// 完整握手（`shellOpen`）在后台线程执行，不阻塞主线程；
     /// 多个标签的连接可并行握手（tokio 多线程 runtime 并发 block_on）。
     func connect(record: HostConfigRecord, password: String?, passphrase: String?) {
@@ -81,6 +83,7 @@ final class TerminalSessionStore: ObservableObject {
                 self.phase = .shell
                 Logger.shared.info("已连接 host=\(record.host):\(record.port)", module: LogModule.ssh)
             } catch {
+                self.failure = ConnectionFailure(error: error)
                 self.phase = .failed
                 Logger.shared.error("连接失败 host=\(record.host):\(record.port); 原因=\(error.localizedDescription)", module: LogModule.ssh)
             }
@@ -97,8 +100,23 @@ final class TerminalSessionStore: ObservableObject {
         }
     }
 
+    /// 缺凭据时停止复用旧参数，等待门控取得本标签的新瞬态输入后再连接。
+    func waitForCredentialInput() {
+        attempt += 1
+        phase = .connecting
+        connection = nil
+    }
+
+    /// 主机密钥确认前停止当前尝试。确认后由视图层以新尝试重新建立连接。
+    func waitForHostKeyConfirmation() {
+        attempt += 1
+        phase = .connecting
+        connection = nil
+    }
+
     /// 标记连接失败（供视图层在无法取得主机配置或读循环出错时调用）。
     func markFailed() {
+        failure = .other("SSH 会话已断开。")
         phase = .failed
     }
 

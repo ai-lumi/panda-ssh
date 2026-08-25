@@ -67,16 +67,73 @@ final class PreconnectGateTests: XCTestCase {
         let gate = PreconnectGate()
         gate.evaluate(host: makeHost(demo: .manual))
 
-        gate.unlock(password: "s3cret")
+        gate.unlock(secret: "s3cret")
 
         XCTAssertTrue(gate.unlocked)
-        XCTAssertEqual(gate.password, "s3cret")
+        XCTAssertEqual(gate.manualSecret, "s3cret")
+    }
+
+    func testConnectionFailureKeepsTimeoutAndAuthenticationDistinct() {
+        XCTAssertEqual(ConnectionFailure(error: PandaError.Timeout).title, "连接超时")
+        XCTAssertEqual(ConnectionFailure(error: PandaError.AuthFailed).title, "认证失败")
+        XCTAssertEqual(ConnectionFailure(error: PandaError.MissingPassword("host")).title, "缺少凭据")
+    }
+
+    func testUnknownHostKeyFailureRequiresTofuInsteadOfGenericFailure() {
+        let error = PandaError.UnknownHostKey(
+            host: "203.0.113.10:22",
+            presented: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest",
+            fingerprint: "SHA256:aa:bb"
+        )
+
+        let failure = ConnectionFailure(error: error)
+
+        XCTAssertEqual(failure, .unknownHostKey(PresentedHostKey(
+            key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest",
+            fingerprint: "SHA256:aa:bb"
+        )))
+    }
+
+    func testUnknownHostKeyFailureReopensTofuGate() {
+        let gate = PreconnectGate()
+        gate.unlock(secret: "pw")
+
+        let didPresent = gate.requireTofuConfirmation(PresentedHostKey(
+            key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest",
+            fingerprint: "SHA256:aa:bb"
+        ))
+
+        XCTAssertTrue(didPresent)
+        XCTAssertFalse(gate.unlocked)
+        XCTAssertEqual(gate.sheet, .tofu)
+        XCTAssertEqual(gate.presentedKey?.fingerprint, "SHA256:aa:bb")
+    }
+
+    func testEmptyUnknownHostKeyCannotUnlockOrPresentTrustSheet() {
+        let gate = PreconnectGate()
+        gate.unlock(secret: "pw")
+
+        let didPresent = gate.requireTofuConfirmation(PresentedHostKey(key: "", fingerprint: "SHA256:aa:bb"))
+
+        XCTAssertFalse(didPresent)
+        XCTAssertFalse(gate.unlocked)
+        XCTAssertNil(gate.sheet)
+    }
+
+    func testMissingCredentialFailureReturnsToCredentialPrompt() {
+        let gate = PreconnectGate()
+        gate.unlock(secret: "old")
+
+        gate.requireCredentialInput()
+
+        XCTAssertFalse(gate.unlocked)
+        XCTAssertEqual(gate.sheet, .password)
     }
 
     func testEvaluateTwiceDoesNotReopenSheet() {
         let gate = PreconnectGate()
         gate.evaluate(host: makeHost(demo: .manual))
-        gate.unlock(password: "pw")
+        gate.unlock(secret: "pw")
 
         gate.evaluate(host: makeHost(demo: .manual))
 
@@ -92,9 +149,7 @@ final class PreconnectGateTests: XCTestCase {
         backend.hostKeyStatusValue = .known
         let model = AppModel(backend: backend)
         let gate = PreconnectGate()
-        let keychain = InMemoryKeychain()
-        keychain.save(secret: "s3cret", for: "host.h1.password")
-        gate.credentialResolver = CredentialResolver(keychain: keychain)
+        gate.credentialResolver = CredentialResolver(readSecret: { _ in "s3cret" })
 
         await gate.evaluateAsync(host: makeHost(demo: nil), in: model) {}
 
@@ -233,7 +288,7 @@ private final class FakeBackend: AppBackend {
         return probeResult
     }
     func configRecord(for hostID: String) -> HostConfigRecord? { nil }
-    func clearKeychainCredentials(for hostID: String, auth: AuthKind) {}
+    func clearCredentials(for hostID: String, auth: AuthKind) {}
 
     func allGroups() -> [HostGroup] { [] }
     @discardableResult

@@ -2,6 +2,7 @@
 
 pub mod batch;
 pub mod config;
+pub mod credentials;
 pub mod connection_pool;
 pub mod groups;
 pub mod hostkey;
@@ -15,6 +16,7 @@ pub use batch::{
     BatchTransferOptions, ConflictResolution, ScanOptions,
 };
 pub use config::{AuthMethod, ConfigStore, HostConfig, TomlConfigStore};
+pub use credentials::CredentialStore;
 pub use groups::{
     delete_group_cascade, descendant_ids, move_group, Group, GroupStore, TomlGroupStore,
     MAX_GROUP_DEPTH,
@@ -62,6 +64,9 @@ pub enum Error {
     #[error("authentication failed")]
     AuthFailed,
 
+    #[error("private key passphrase is required")]
+    MissingPassphrase,
+
     #[error("operation timed out")]
     Timeout,
 
@@ -70,6 +75,15 @@ pub enum Error {
 
     #[error("operation cancelled")]
     Cancelled,
+
+    #[error("credential protection key is required")]
+    CredentialProtectionKeyRequired,
+
+    #[error("credential protection key cannot decrypt the credential file")]
+    CredentialUnlockFailed,
+
+    #[error("credential file is invalid")]
+    InvalidCredentialFile,
 
     #[error("{0}")]
     Other(String),

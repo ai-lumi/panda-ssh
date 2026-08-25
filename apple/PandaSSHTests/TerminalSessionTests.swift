@@ -66,6 +66,17 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(store.attempt, 1)
     }
 
+    func testMissingCredentialRetryWaitsForNewInputInsteadOfReusingOldPassword() {
+        let store = TerminalSessionStore(host: makeHost())
+        store.markFailed()
+
+        store.waitForCredentialInput()
+
+        XCTAssertEqual(store.phase, .connecting)
+        XCTAssertEqual(store.attempt, 1)
+        XCTAssertNil(store.connection)
+    }
+
     func testMarkFailedSetsFailedPhase() {
         let store = TerminalSessionStore(host: makeHost())
 

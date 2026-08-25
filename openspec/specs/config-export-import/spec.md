@@ -8,7 +8,7 @@
 
 ### Requirement: 导出范围
 
-导出功能 SHALL 包含 hosts.toml、groups.toml、known_hosts 文件以及 snippets 目录下的全部内容。导出包 MUST 包含 manifest.json 记录格式版本与导出时间。导出 SHALL NOT 包含任何明文密码、私钥口令或私钥文件内容；钥匙串凭据仅以引用 key 形式存在于 hosts.toml 中。
+导出功能 SHALL 包含 hosts.toml、groups.toml、known_hosts 文件以及 snippets 目录下的全部内容。导出包 MUST 包含 manifest.json 记录格式版本与导出时间。导出 SHALL NOT 包含任何明文密码、私钥口令、私钥文件内容或本地凭据文件；凭据引用 key 可随 hosts.toml 存在。
 
 #### Scenario: 正常导出
 
@@ -17,7 +17,7 @@
 
 #### Scenario: 导出内容不含密钥材料
 
-- **GIVEN** 某主机已保存密码到钥匙串
+- **GIVEN** 某主机已保存密码到本地凭据文件
 - **WHEN** 用户导出配置
 - **THEN** 导出包内的 hosts.toml 仅含 `password_ref`，不含密码明文
 
@@ -42,10 +42,10 @@
 
 ### Requirement: 导入后凭据处理
 
-导入完成后，密码与私钥口令引用 key 会随 hosts.toml 恢复，但实际凭据仍存于原设备钥匙串。系统 SHALL 在导入后首次连接需要凭据的主机时，若钥匙串读取失败，提示用户手动输入。
+导入完成后，密码与私钥口令引用 key 会随 hosts.toml 恢复，但凭据文件不被导入或覆盖。系统 SHALL 在导入后首次连接需要凭据的主机时，若本地凭据不可读取，提示用户手动输入。
 
 #### Scenario: 导入后首次连接需重新录入密码
 
 - **GIVEN** 导入的配置中包含 `password_ref`
-- **WHEN** 用户首次连接该主机且钥匙串中无对应密码
+- **WHEN** 用户首次连接该主机且本地凭据文件中无对应密码
 - **THEN** 系统提示输入密码，不阻塞连接流程

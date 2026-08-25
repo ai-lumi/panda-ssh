@@ -101,7 +101,7 @@ struct HostKeyMismatchSheet: View {
     }
 }
 
-/// 手动输入密码:密码仅用于本次标签页会话,不共享、不落盘。
+/// 手动输入密码或私钥口令：秘密仅用于本次标签页会话，不共享、不落盘。
 struct PasswordPromptSheet: View {
     let host: HostEntry
     var onLogin: (String) -> Void = { _ in }
@@ -114,13 +114,13 @@ struct PasswordPromptSheet: View {
             Image(systemName: "lock.fill")
                 .font(.system(size: 36))
                 .foregroundStyle(Color.accentColor)
-            Text("需要密码")
+            Text(host.auth == .password ? "需要密码" : "需要私钥口令")
                 .font(.headline)
-            Text("输入 **\(host.username)@\(host.name)** 的密码。\n该主机未保存密码到钥匙串，密码仅用于本次标签页会话，关闭标签即销毁；同一主机的其他标签页需各自输入。")
+            Text(promptDescription)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            SecureField("输入登录密码", text: $password)
+            SecureField(host.auth == .password ? "输入登录密码" : "输入私钥口令", text: $password)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(submit)
             HStack(spacing: 12) {
@@ -135,9 +135,14 @@ struct PasswordPromptSheet: View {
 
     private func submit() {
         guard !password.isEmpty else { return }
-        // 密码只随回调进入该标签页会话,不做任何缓存
+        // 秘密只随回调进入该标签页会话，不做任何缓存。
         onLogin(password)
         dismiss()
+    }
+
+    private var promptDescription: String {
+        let credential = host.auth == .password ? "密码" : "私钥口令"
+        return "输入 **\(host.username)@\(host.name)** 的\(credential)。\n该主机缺少可用的已保存\(credential)，它仅用于本次标签页会话，关闭标签即销毁；同一主机的其他标签页需各自输入。"
     }
 }
 

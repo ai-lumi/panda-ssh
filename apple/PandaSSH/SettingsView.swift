@@ -9,6 +9,10 @@ struct SettingsView: View {
     @State private var importError: String?
     @State private var importSuccess: String?
     @State private var showImportPicker = false
+    @State private var currentProtectionKey = ""
+    @State private var newProtectionKey = ""
+    @State private var credentialProtectionError: String?
+    @State private var credentialProtectionEnabled = false
 
     var body: some View {
         #if os(macOS)
@@ -53,6 +57,10 @@ struct SettingsView: View {
         } message: {
             Text(importSuccess ?? "")
         }
+        .alert("密码保护操作失败", isPresented: .constant(credentialProtectionError != nil)) {
+            Button("确定") { credentialProtectionError = nil }
+        } message: { Text(credentialProtectionError ?? "") }
+        .onAppear { credentialProtectionEnabled = (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false }
     }
     #endif
 
@@ -73,6 +81,10 @@ struct SettingsView: View {
         } message: {
             Text(importSuccess ?? "")
         }
+        .alert("密码保护操作失败", isPresented: .constant(credentialProtectionError != nil)) {
+            Button("确定") { credentialProtectionError = nil }
+        } message: { Text(credentialProtectionError ?? "") }
+        .onAppear { credentialProtectionEnabled = (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false }
     }
 
     // MARK: - 通用标签
@@ -135,26 +147,85 @@ struct SettingsView: View {
     // MARK: - 配置导入/导出
 
     private var configSection: some View {
-        Section("配置") {
-            Button("导出配置…") {
-                exportConfig()
+        Group {
+            Section("配置") {
+                Button("导出配置…") {
+                    exportConfig()
+                }
+                Button("导入配置…") {
+                    showImportPicker = true
+                }
+                #if os(macOS)
+                .sheet(isPresented: $showImportPicker) {
+                    MacImportPicker { result in
+                        handleImportResult(result)
+                    }
+                }
+                #else
+                .sheet(isPresented: $showImportPicker) {
+                    IOSImportPicker { result in
+                        handleImportResult(result)
+                    }
+                }
+                #endif
             }
-            Button("导入配置…") {
-                showImportPicker = true
-            }
-            #if os(macOS)
-            .sheet(isPresented: $showImportPicker) {
-                MacImportPicker { result in
-                    handleImportResult(result)
+            Section("密码保护") {
+                if credentialProtectionEnabled {
+                    SecureField("当前保护密钥", text: $currentProtectionKey)
+                    SecureField("新的保护密钥（留空则只解锁）", text: $newProtectionKey)
+                    Text("重启后需在此输入当前保护密钥，才能使用已保存的密码与私钥口令。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("解锁或更新保护") { unlockOrUpdateCredentialProtection() }
+                        .disabled(currentProtectionKey.isEmpty)
+                    Button("移除密码保护", role: .destructive) { removeCredentialProtection() }
+                        .disabled(currentProtectionKey.isEmpty)
+                } else {
+                    SecureField("密码保护密钥（可选）", text: $newProtectionKey)
+                    Text("未设置保护密钥时，已保存的密码与私钥口令会以明文保存在本机配置目录。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("应用密码保护") { enableCredentialProtection() }
+                        .disabled(newProtectionKey.isEmpty)
                 }
             }
-            #else
-            .sheet(isPresented: $showImportPicker) {
-                IOSImportPicker { result in
-                    handleImportResult(result)
-                }
-            }
-            #endif
+        }
+    }
+
+    private func enableCredentialProtection() {
+        do {
+            try PandaCoreBridge.shared.updateCredentialProtectionKey(currentKey: nil, newKey: newProtectionKey)
+            credentialProtectionEnabled = true
+            currentProtectionKey = newProtectionKey
+            newProtectionKey = ""
+        } catch {
+            credentialProtectionError = "无法更新密码保护：\(error.localizedDescription)"
+            newProtectionKey = ""
+        }
+    }
+
+    private func unlockOrUpdateCredentialProtection() {
+        do {
+            let replacement = newProtectionKey.isEmpty ? currentProtectionKey : newProtectionKey
+            try PandaCoreBridge.shared.updateCredentialProtectionKey(currentKey: currentProtectionKey, newKey: replacement)
+            currentProtectionKey = replacement
+            newProtectionKey = ""
+        } catch {
+            credentialProtectionError = "无法解锁或更新密码保护：\(error.localizedDescription)"
+            currentProtectionKey = ""
+            newProtectionKey = ""
+        }
+    }
+
+    private func removeCredentialProtection() {
+        do {
+            try PandaCoreBridge.shared.updateCredentialProtectionKey(currentKey: currentProtectionKey, newKey: nil)
+            credentialProtectionEnabled = false
+            currentProtectionKey = ""
+            newProtectionKey = ""
+        } catch {
+            credentialProtectionError = "无法移除密码保护：\(error.localizedDescription)"
+            currentProtectionKey = ""
         }
     }
 
@@ -205,7 +276,7 @@ struct SettingsView: View {
                 let backupInfo = importResult.backedUpFiles.isEmpty
                     ? ""
                     : "\n已备份文件: \(importResult.backedUpFiles.joined(separator: ", "))"
-                importSuccess = "配置导入成功。密码/口令需重新输入或依赖钥匙串漫游。\(backupInfo)"
+                importSuccess = "配置导入成功。密码/口令未包含在归档中，需重新输入。\(backupInfo)"
             } catch ConfigImporter.ImportError.versionMismatch {
                 importError = "配置格式版本过高，请升级 App 后重试。"
             } catch ConfigImporter.ImportError.invalidArchive {

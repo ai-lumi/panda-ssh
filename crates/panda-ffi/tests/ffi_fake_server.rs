@@ -4,15 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use panda_ffi::{
-    accept_unknown_host_key, batch_transfer_cancel, batch_transfer_list, batch_transfer_resolve_conflict,
-    batch_transfer_status, delete_host, host_key_status, init_store, list_hosts, save_host,
-    scan_local_batch, scan_remote_batch, sftp_check_download_conflict, sftp_check_upload_conflict,
-    sftp_create_dir, sftp_download, sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file,
-    sftp_upload, shell_close, shell_open, shell_read, shell_write, start_batch_download,
-    start_batch_upload, start_transfer, test_connection, transfer_cancel, transfer_list,
-    transfer_pause, transfer_retry, transfer_resume, transfer_status, AuthMethodEnum,
-    BatchTransferStatusEnum, HostConfigRecord, KnownHostStatusEnum, PandaError, TransferDirectionEnum,
-    TransferStatusEnum,
+    AuthMethodEnum, BatchTransferStatusEnum, HostConfigRecord, KnownHostStatusEnum, PandaError,
+    TransferDirectionEnum, TransferStatusEnum, accept_unknown_host_key, batch_transfer_cancel,
+    batch_transfer_list, batch_transfer_resolve_conflict, batch_transfer_status, delete_host,
+    host_key_status, init_store, list_hosts, save_host, scan_local_batch, scan_remote_batch,
+    sftp_check_download_conflict, sftp_check_upload_conflict, sftp_create_dir, sftp_download,
+    sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file, sftp_upload, shell_close,
+    shell_open, shell_read, shell_resize, shell_write, start_batch_download, start_batch_upload,
+    start_transfer, test_connection, transfer_cancel, transfer_list, transfer_pause,
+    transfer_resume, transfer_retry, transfer_status,
 };
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
@@ -389,7 +389,11 @@ impl russh_sftp::server::Handler for MemFs {
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
-        let normalized = if path.is_empty() || path == "/" { "/".to_string() } else { path.trim_end_matches('/').to_string() };
+        let normalized = if path.is_empty() || path == "/" {
+            "/".to_string()
+        } else {
+            path.trim_end_matches('/').to_string()
+        };
         let is_root = normalized == "/";
         if !is_root && !self.dirs.lock().await.contains(&normalized) {
             return Err(StatusCode::NoSuchFile);
@@ -595,8 +599,7 @@ fn ffi_host_key_mismatch_is_rejected_with_fingerprints() {
     ));
 
     for trust in [false, true] {
-        let err = test_connection(host.id.clone(), Some(PASSWORD.into()), None, trust)
-            .unwrap_err();
+        let err = test_connection(host.id.clone(), Some(PASSWORD.into()), None, trust).unwrap_err();
         match err {
             PandaError::HostKeyMismatch {
                 stored_fingerprint,
@@ -642,7 +645,7 @@ fn ffi_sftp_and_connection_success_paths() {
             password_ref: Some("kc://fake".into()),
         },
         notes: None,
-            group_id: None,
+        group_id: None,
     })
     .unwrap();
 
@@ -666,7 +669,14 @@ fn ffi_sftp_and_connection_success_paths() {
     )
     .unwrap();
 
-    let listing = sftp_list(host.id.clone(), "/".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let listing = sftp_list(
+        host.id.clone(),
+        "/".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(listing.iter().any(|f| f.name == "upload.txt"));
 
     let back = dir.path().join("back.txt");
@@ -697,7 +707,14 @@ fn ffi_sftp_and_connection_success_paths() {
         true,
     )
     .unwrap();
-    sftp_remove_dir(host.id.clone(), "/sub".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_remove_dir(
+        host.id.clone(),
+        "/sub".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     delete_host(host.id).unwrap();
     cleanup_store();
@@ -772,7 +789,14 @@ fn ffi_sftp_remove_all_recursive() {
     .unwrap();
 
     // 验证文件存在
-    let listing = sftp_list(host.id.clone(), "/".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let listing = sftp_list(
+        host.id.clone(),
+        "/".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(listing.iter().any(|f| f.name == "nested" && f.is_dir));
 
     // 使用 sftp_remove_dir（内部调用 remove_all）递归删除非空目录
@@ -786,7 +810,14 @@ fn ffi_sftp_remove_all_recursive() {
     .unwrap();
 
     // 验证目录已被删除
-    let listing = sftp_list(host.id.clone(), "/".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let listing = sftp_list(
+        host.id.clone(),
+        "/".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(!listing.iter().any(|f| f.name == "nested"));
 
     // 额外验证：remove_all 也能直接删除单个文件（metadata 判定为文件路径）
@@ -834,7 +865,14 @@ fn ffi_sftp_remove_all_recursive() {
         true,
     )
     .unwrap();
-    let listing = sftp_list(host.id.clone(), "/".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let listing = sftp_list(
+        host.id.clone(),
+        "/".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(!listing.iter().any(|f| f.name == "trailing"));
 
     delete_host(host.id).unwrap();
@@ -985,11 +1023,25 @@ fn ffi_store_and_api_error_paths() {
         Err(PandaError::UnknownHost(_))
     ));
     assert!(matches!(
-        sftp_upload("missing-id".into(), "/a".into(), "/b".into(), None, None, true),
+        sftp_upload(
+            "missing-id".into(),
+            "/a".into(),
+            "/b".into(),
+            None,
+            None,
+            true
+        ),
         Err(PandaError::UnknownHost(_))
     ));
     assert!(matches!(
-        sftp_download("missing-id".into(), "/a".into(), "/b".into(), None, None, true),
+        sftp_download(
+            "missing-id".into(),
+            "/a".into(),
+            "/b".into(),
+            None,
+            None,
+            true
+        ),
         Err(PandaError::UnknownHost(_))
     ));
     assert!(matches!(
@@ -1058,7 +1110,7 @@ fn ffi_store_and_api_error_paths() {
             passphrase_ref: Some("kc://passphrase".into()),
         },
         notes: None,
-group_id: None,
+        group_id: None,
     })
     .unwrap();
     let key_saved = list_hosts()
@@ -1097,7 +1149,7 @@ fn ffi_sftp_error_paths() {
             password_ref: Some("kc://fake".into()),
         },
         notes: None,
-            group_id: None,
+        group_id: None,
     })
     .unwrap();
 
@@ -1109,7 +1161,13 @@ fn ffi_sftp_error_paths() {
     let pw = Some(PASSWORD.into());
 
     assert!(matches!(
-        sftp_list(host.id.clone(), "/no-such-dir".into(), pw.clone(), None, true),
+        sftp_list(
+            host.id.clone(),
+            "/no-such-dir".into(),
+            pw.clone(),
+            None,
+            true
+        ),
         Err(PandaError::Core(_))
     ));
     assert!(matches!(
@@ -1136,11 +1194,23 @@ fn ffi_sftp_error_paths() {
         Err(PandaError::Core(_))
     ));
     assert!(matches!(
-        sftp_remove_file(host.id.clone(), "/missing.bin".into(), pw.clone(), None, true),
+        sftp_remove_file(
+            host.id.clone(),
+            "/missing.bin".into(),
+            pw.clone(),
+            None,
+            true
+        ),
         Err(PandaError::Core(_))
     ));
     assert!(matches!(
-        sftp_remove_dir(host.id.clone(), "/no-such-dir".into(), pw.clone(), None, true),
+        sftp_remove_dir(
+            host.id.clone(),
+            "/no-such-dir".into(),
+            pw.clone(),
+            None,
+            true
+        ),
         Err(PandaError::Core(_))
     ));
 
@@ -1202,13 +1272,7 @@ fn ffi_shell_session_lifecycle() {
         .find(|h| h.name == "shell")
         .unwrap();
 
-    let handle = shell_open(
-        host.id.clone(),
-        Some(PASSWORD.into()),
-        None,
-        true,
-    )
-    .unwrap();
+    let handle = shell_open(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
 
     std::thread::sleep(Duration::from_millis(150));
     let banner = shell_read(handle, 1024).unwrap();
@@ -1218,6 +1282,7 @@ fn ffi_shell_session_lifecycle() {
     std::thread::sleep(Duration::from_millis(150));
     let out = shell_read(handle, 1024).unwrap();
     assert!(String::from_utf8_lossy(&out).contains("echo: hello"));
+    shell_resize(handle, 120, 40).unwrap();
 
     shell_close(handle).unwrap();
 
@@ -1246,7 +1311,7 @@ fn ffi_sftp_new_fails_when_subsystem_rejected() {
             password_ref: Some("kc://fake".into()),
         },
         notes: None,
-            group_id: None,
+        group_id: None,
     })
     .unwrap();
 
@@ -1507,10 +1572,7 @@ fn ffi_transfer_retry_failed_task() {
     .unwrap();
 
     let retried_id = transfer_retry(id.clone()).unwrap();
-    assert_eq!(
-        retried_id, id,
-        "重试失败任务应复用原任务 id,不应创建新任务"
-    );
+    assert_eq!(retried_id, id, "重试失败任务应复用原任务 id,不应创建新任务");
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(50));
         let status = transfer_status(id.clone()).unwrap();
@@ -1601,10 +1663,7 @@ fn ffi_transfer_pause_and_resume_running_task() {
         matches!(still.status, TransferStatusEnum::Paused),
         "继续前应保持 paused"
     );
-    assert_eq!(
-        still.transferred, frozen,
-        "暂停期间已传输字节数应不变"
-    );
+    assert_eq!(still.transferred, frozen, "暂停期间已传输字节数应不变");
 
     transfer_resume(id.clone()).unwrap();
     for _ in 0..50 {
@@ -1688,6 +1747,10 @@ fn ffi_shell_unknown_handle_returns_error() {
     ));
     assert!(matches!(
         shell_close(9999),
+        Err(PandaError::UnknownShellHandle(9999))
+    ));
+    assert!(matches!(
+        shell_resize(9999, 80, 24),
         Err(PandaError::UnknownShellHandle(9999))
     ));
 
@@ -1856,8 +1919,6 @@ fn ffi_sftp_check_download_conflict_existing_target_returns_info() {
     cleanup_store();
 }
 
-
-
 #[test]
 fn ffi_batch_upload_directory_completes() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -1874,7 +1935,14 @@ fn ffi_batch_upload_directory_completes() {
     std::fs::create_dir(&sub).unwrap();
     std::fs::write(sub.join("main.swift"), b"code").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     let task_id = start_batch_upload(
         host.id.clone(),
@@ -1890,17 +1958,36 @@ fn ffi_batch_upload_directory_completes() {
     for _ in 0..200 {
         let record = batch_transfer_status(task_id.clone()).unwrap();
         status = record.status;
-        if matches!(status, BatchTransferStatusEnum::Completed | BatchTransferStatusEnum::Failed | BatchTransferStatusEnum::Cancelled) {
+        if matches!(
+            status,
+            BatchTransferStatusEnum::Completed
+                | BatchTransferStatusEnum::Failed
+                | BatchTransferStatusEnum::Cancelled
+        ) {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(status, BatchTransferStatusEnum::Completed);
 
-    let list = sftp_list(host.id.clone(), "/remote/project".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let list = sftp_list(
+        host.id.clone(),
+        "/remote/project".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(list.iter().any(|f| f.name == "README.md"));
 
-    let src_list = sftp_list(host.id.clone(), "/remote/project/src".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let src_list = sftp_list(
+        host.id.clone(),
+        "/remote/project/src".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(src_list.iter().any(|f| f.name == "main.swift"));
 
     cleanup_store();
@@ -1948,7 +2035,14 @@ fn ffi_batch_upload_creates_missing_remote_parent() {
     }
     assert_eq!(status, BatchTransferStatusEnum::Completed);
 
-    let list = sftp_list(host.id.clone(), "/remote/project".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let list = sftp_list(
+        host.id.clone(),
+        "/remote/project".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(list.iter().any(|f| f.name == "README.md"));
 
     cleanup_store();
@@ -1967,8 +2061,22 @@ fn ffi_batch_upload_ignores_existing_remote_directory() {
     std::fs::create_dir_all(&dir).unwrap();
 
     // 远端目录已存在。
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
-    sftp_create_dir(host.id.clone(), "/remote/project".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote/project".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     let src = dir.join("project");
     std::fs::create_dir(&src).unwrap();
@@ -2016,7 +2124,14 @@ fn ffi_batch_upload_multiple_files_completes() {
     std::fs::write(&a, b"aaa").unwrap();
     std::fs::write(&b, b"bbbb").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     let task_id = start_batch_upload(
         host.id.clone(),
@@ -2034,14 +2149,26 @@ fn ffi_batch_upload_multiple_files_completes() {
     for _ in 0..200 {
         let record = batch_transfer_status(task_id.clone()).unwrap();
         status = record.status;
-        if matches!(status, BatchTransferStatusEnum::Completed | BatchTransferStatusEnum::Failed | BatchTransferStatusEnum::Cancelled) {
+        if matches!(
+            status,
+            BatchTransferStatusEnum::Completed
+                | BatchTransferStatusEnum::Failed
+                | BatchTransferStatusEnum::Cancelled
+        ) {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(status, BatchTransferStatusEnum::Completed);
 
-    let list = sftp_list(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    let list = sftp_list(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(list.iter().any(|f| f.name == "a.txt"));
     assert!(list.iter().any(|f| f.name == "b.txt"));
 
@@ -2057,8 +2184,22 @@ fn ffi_batch_download_directory_completes() {
     let dir = std::env::temp_dir().join(format!("panda-ffi-batch-download-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    sftp_create_dir(host.id.clone(), "/project".into(), Some(PASSWORD.into()), None, true).unwrap();
-    sftp_create_dir(host.id.clone(), "/project/src".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/project".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/project/src".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     let readme = dir.join("README.md");
     std::fs::write(&readme, b"readme").unwrap();
     sftp_upload(
@@ -2084,7 +2225,12 @@ fn ffi_batch_download_directory_completes() {
     for _ in 0..200 {
         let record = batch_transfer_status(task_id.clone()).unwrap();
         status = record.status;
-        if matches!(status, BatchTransferStatusEnum::Completed | BatchTransferStatusEnum::Failed | BatchTransferStatusEnum::Cancelled) {
+        if matches!(
+            status,
+            BatchTransferStatusEnum::Completed
+                | BatchTransferStatusEnum::Failed
+                | BatchTransferStatusEnum::Cancelled
+        ) {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -2092,7 +2238,10 @@ fn ffi_batch_download_directory_completes() {
     assert_eq!(status, BatchTransferStatusEnum::Completed);
 
     assert!(dir.join("project/README.md").exists());
-    assert_eq!(std::fs::read(dir.join("project/README.md")).unwrap(), b"readme");
+    assert_eq!(
+        std::fs::read(dir.join("project/README.md")).unwrap(),
+        b"readme"
+    );
 
     cleanup_store();
 }
@@ -2108,7 +2257,14 @@ fn ffi_batch_transfer_cancel_running_task() {
 
     let src = dir.join("big.bin");
     std::fs::write(&src, vec![0u8; 5_000_000]).unwrap();
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     let task_id = start_batch_upload(
         host.id.clone(),
@@ -2127,7 +2283,12 @@ fn ffi_batch_transfer_cancel_running_task() {
     for _ in 0..100 {
         let record = batch_transfer_status(task_id.clone()).unwrap();
         status = record.status;
-        if matches!(status, BatchTransferStatusEnum::Cancelled | BatchTransferStatusEnum::Failed | BatchTransferStatusEnum::Completed) {
+        if matches!(
+            status,
+            BatchTransferStatusEnum::Cancelled
+                | BatchTransferStatusEnum::Failed
+                | BatchTransferStatusEnum::Completed
+        ) {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -2184,7 +2345,10 @@ fn ffi_batch_upload_unknown_host_returns_error() {
         None,
     );
 
-    assert!(matches!(result, Err(PandaError::UnknownHost(_))), "未知主机应返回 UnknownHost");
+    assert!(
+        matches!(result, Err(PandaError::UnknownHost(_))),
+        "未知主机应返回 UnknownHost"
+    );
     cleanup_store();
 }
 
@@ -2273,12 +2437,19 @@ fn ffi_scan_local_batch_file_and_directory() {
     let subfile = subdir.join("b.txt");
     std::fs::write(&subfile, b"world").unwrap();
 
-    let items = scan_local_batch(vec![dir.to_string_lossy().into_owned()], "/remote".into()).unwrap();
+    let items =
+        scan_local_batch(vec![dir.to_string_lossy().into_owned()], "/remote".into()).unwrap();
     let dir_name = dir.file_name().unwrap().to_string_lossy().into_owned();
 
-    assert!(items.iter().any(|i| i.is_dir && i.source == dir.to_string_lossy().into_owned() && i.destination == format!("/remote/{}", dir_name)));
-    assert!(items.iter().any(|i| !i.is_dir && i.source == file.to_string_lossy().into_owned() && i.destination == format!("/remote/{}/a.txt", dir_name)));
-    assert!(items.iter().any(|i| !i.is_dir && i.source == subfile.to_string_lossy().into_owned() && i.destination == format!("/remote/{}/sub/b.txt", dir_name)));
+    assert!(items.iter().any(|i| i.is_dir
+        && i.source == dir.to_string_lossy().into_owned()
+        && i.destination == format!("/remote/{}", dir_name)));
+    assert!(items.iter().any(|i| !i.is_dir
+        && i.source == file.to_string_lossy().into_owned()
+        && i.destination == format!("/remote/{}/a.txt", dir_name)));
+    assert!(items.iter().any(|i| !i.is_dir
+        && i.source == subfile.to_string_lossy().into_owned()
+        && i.destination == format!("/remote/{}/sub/b.txt", dir_name)));
 }
 
 #[test]
@@ -2297,7 +2468,14 @@ fn ffi_scan_remote_batch_directory() {
     let b = sub.join("b.txt");
     std::fs::write(&b, b"world").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/scan".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/scan".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     sftp_upload(
         host.id.clone(),
         a.to_string_lossy().into_owned(),
@@ -2307,7 +2485,14 @@ fn ffi_scan_remote_batch_directory() {
         true,
     )
     .unwrap();
-    sftp_create_dir(host.id.clone(), "/scan/sub".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/scan/sub".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     sftp_upload(
         host.id.clone(),
         b.to_string_lossy().into_owned(),
@@ -2329,7 +2514,11 @@ fn ffi_scan_remote_batch_directory() {
 
     assert!(items.iter().any(|i| i.is_dir && i.source == "/scan"));
     assert!(items.iter().any(|i| !i.is_dir && i.source == "/scan/a.txt"));
-    assert!(items.iter().any(|i| !i.is_dir && i.source == "/scan/sub/b.txt"));
+    assert!(
+        items
+            .iter()
+            .any(|i| !i.is_dir && i.source == "/scan/sub/b.txt")
+    );
     cleanup_store();
 }
 
@@ -2445,7 +2634,9 @@ fn ffi_batch_upload_missing_password_fails() {
         status = record.status;
         if matches!(
             status,
-            BatchTransferStatusEnum::Failed | BatchTransferStatusEnum::Cancelled | BatchTransferStatusEnum::Completed
+            BatchTransferStatusEnum::Failed
+                | BatchTransferStatusEnum::Cancelled
+                | BatchTransferStatusEnum::Completed
         ) {
             break;
         }
@@ -2467,7 +2658,14 @@ fn ffi_batch_upload_overwrites_existing_target() {
     let file = dir.join("a.txt");
     std::fs::write(&file, b"first").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     let first_id = start_batch_upload(
         host.id.clone(),
@@ -2502,12 +2700,20 @@ fn ffi_batch_upload_cancel_before_running_covers_queued_branch() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-cancel-queued");
-    let dir = std::env::temp_dir().join(format!("panda-ffi-batch-cancel-queued-{}", Uuid::new_v4()));
+    let dir =
+        std::env::temp_dir().join(format!("panda-ffi-batch-cancel-queued-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("big.bin");
     std::fs::write(&file, vec![0u8; 50_000_000]).unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
 
     let task_id = start_batch_upload(
         host.id,
@@ -2526,7 +2732,9 @@ fn ffi_batch_upload_cancel_before_running_covers_queued_branch() {
         status = record.status;
         if matches!(
             status,
-            BatchTransferStatusEnum::Cancelled | BatchTransferStatusEnum::Failed | BatchTransferStatusEnum::Completed
+            BatchTransferStatusEnum::Cancelled
+                | BatchTransferStatusEnum::Failed
+                | BatchTransferStatusEnum::Completed
         ) {
             break;
         }
@@ -2543,13 +2751,34 @@ fn ffi_invalid_task_id_returns_core_error() {
     ensure_store_and_clear_hosts();
 
     let invalid = "not-a-uuid".to_string();
-    assert!(matches!(transfer_status(invalid.clone()), Err(PandaError::Core(_))));
-    assert!(matches!(transfer_cancel(invalid.clone()), Err(PandaError::Core(_))));
-    assert!(matches!(transfer_pause(invalid.clone()), Err(PandaError::Core(_))));
-    assert!(matches!(transfer_resume(invalid.clone()), Err(PandaError::Core(_))));
-    assert!(matches!(transfer_retry(invalid.clone()), Err(PandaError::Core(_))));
-    assert!(matches!(batch_transfer_status(invalid.clone()), Err(PandaError::Core(_))));
-    assert!(matches!(batch_transfer_cancel(invalid.clone()), Err(PandaError::Core(_))));
+    assert!(matches!(
+        transfer_status(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
+    assert!(matches!(
+        transfer_cancel(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
+    assert!(matches!(
+        transfer_pause(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
+    assert!(matches!(
+        transfer_resume(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
+    assert!(matches!(
+        transfer_retry(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
+    assert!(matches!(
+        batch_transfer_status(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
+    assert!(matches!(
+        batch_transfer_cancel(invalid.clone()),
+        Err(PandaError::Core(_))
+    ));
 
     cleanup_store();
 }
@@ -2671,7 +2900,14 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
     let file = dir.join("a.txt");
     std::fs::write(&file, b"new content").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     // 远端目标已存在。
     sftp_upload(
         host.id.clone(),
@@ -2728,15 +2964,20 @@ fn ffi_batch_upload_conflict_skip_keeps_target() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-conflict-skip");
-    let dir = std::env::temp_dir().join(format!(
-        "panda-ffi-batch-conflict-skip-{}",
-        Uuid::new_v4()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("panda-ffi-batch-conflict-skip-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("a.txt");
     std::fs::write(&file, b"new content").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     // 远端目标已存在（旧内容）。
     let existing = dir.join("existing.txt");
     std::fs::write(&existing, b"old content").unwrap();
@@ -2797,7 +3038,14 @@ fn ffi_batch_transfer_cancel_while_waiting_conflict() {
     let file = dir.join("a.txt");
     std::fs::write(&file, b"new content").unwrap();
 
-    sftp_create_dir(host.id.clone(), "/remote".into(), Some(PASSWORD.into()), None, true).unwrap();
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
     sftp_upload(
         host.id.clone(),
         file.to_string_lossy().into_owned(),
@@ -2855,10 +3103,8 @@ fn ffi_batch_upload_connection_refused_fails() {
     let _guard = TEST_LOCK.lock().unwrap();
     ensure_store_and_clear_hosts();
     let host = save_test_host(unused_port(), "batch-upload-refused");
-    let dir = std::env::temp_dir().join(format!(
-        "panda-ffi-batch-upload-refused-{}",
-        Uuid::new_v4()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("panda-ffi-batch-upload-refused-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("a.txt");
     std::fs::write(&file, b"x").unwrap();
@@ -2891,10 +3137,8 @@ fn ffi_batch_upload_subsystem_rejected_fails() {
     ensure_store_and_clear_hosts();
     let port = start_server_rejecting_sftp();
     let host = save_test_host(port, "batch-upload-no-sftp");
-    let dir = std::env::temp_dir().join(format!(
-        "panda-ffi-batch-upload-no-sftp-{}",
-        Uuid::new_v4()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("panda-ffi-batch-upload-no-sftp-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("a.txt");
     std::fs::write(&file, b"x").unwrap();

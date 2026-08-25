@@ -43,6 +43,16 @@ struct TerminalTabView: View {
                 workspace.markTerminalConnected(tabID: tab.id)
             }
         }
+        .onChange(of: session.failure) { _, failure in
+            if failure == .missingCredential {
+                session.waitForCredentialInput()
+                gate.requireCredentialInput()
+            } else if let key = failure.presentedHostKey,
+                      gate.requireTofuConfirmation(key) {
+                model.backend.cachePresentedKey(key, for: host.id)
+                session.waitForHostKeyConfirmation()
+            }
+        }
         .preconnectSheets(gate: gate, host: host, tabID: tab.id)
         // 连接动画/mock 落结果；真实连接在门控通过后立即启动。
         .task(id: "\(session.attempt)-\(gate.unlocked)") {
@@ -71,6 +81,7 @@ struct TerminalTabView: View {
             case .failed:
                 ConnectFailureView(
                     host: host,
+                    failure: session.failure,
                     onRetry: { session.retry() },
                     onClose: { workspace.close(tabID: tab.id) }
                 )
@@ -120,12 +131,17 @@ struct TerminalTabView: View {
             session.markFailed()
             return
         }
-        let secrets = CredentialResolver(keychain: SystemKeychain.shared)
-            .connectionSecrets(for: host, manualPassword: gate.password)
+        if gate.requestCredentialsIfNeeded(for: host) { return }
+        let secrets = CredentialResolver.localStore()
+            .connectionSecrets(for: host, manualSecret: gate.manualSecret)
+        guard let secrets else {
+            _ = gate.requestCredentialsIfNeeded(for: host)
+            return
+        }
         session.connect(
             record: record,
-            password: secrets?.password,
-            passphrase: secrets?.passphrase
+            password: secrets.password,
+            passphrase: secrets.passphrase
         )
     }
 }

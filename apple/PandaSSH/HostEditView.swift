@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 添加/编辑主机表单。字段与原型 showHostForm 对齐:主机(名称/地址/端口/
 /// 用户名/备注/所属分组)+ 认证(密码或密钥)。
-/// 密钥材料(密码/密钥口令)不落表单数据:真实后端写同步钥匙串,配置文件
+/// 密钥材料（密码/私钥口令）不落表单数据：真实后端写本地凭据仓库，配置文件
 /// 只存引用 key;Mock 后端直接丢弃,仅保留「已保存」标记。
 struct HostEditView: View {
     @EnvironmentObject private var model: AppModel
@@ -10,16 +10,17 @@ struct HostEditView: View {
 
     /// 待编辑的主机;nil 表示新建
     let host: HostEntry?
+    /// 复制来源；仅用于新建表单的非敏感字段预填。
+    let copySource: HostEntry?
     /// 新建时的默认归属分组(侧栏选中分组/选中主机所在分组);编辑时忽略
     var defaultGroupID: String? = nil
 
-    init(host: HostEntry? = nil, defaultGroupID: String? = nil,
-         keyPicker: KeyPicker = SystemKeyPicker.shared,
-         keychain: KeychainService = SystemKeychain.shared) {
+    init(host: HostEntry? = nil, copySource: HostEntry? = nil, defaultGroupID: String? = nil,
+         keyPicker: KeyPicker = SystemKeyPicker.shared) {
         self.host = host
+        self.copySource = copySource
         self.defaultGroupID = defaultGroupID
         self.keyPicker = keyPicker
-        self.keychain = keychain
     }
 
     @State private var name = ""
@@ -34,13 +35,11 @@ struct HostEditView: View {
     @State private var keyPath = ""
     @State private var passphrase = ""
     @State private var savePassphrase = false
-    @State private var showKeychainError = false
+    @State private var showCredentialError = false
     @State private var showClearCredentialAlert = false
 
     /// 私钥选择器；生产环境用系统选择器，测试可注入 fake。
     let keyPicker: KeyPicker
-    /// 钥匙串服务；用于编辑时回显已保存的密码/口令。
-    let keychain: KeychainService
 
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty
@@ -92,9 +91,9 @@ struct HostEditView: View {
                         SecureField(
                             "密码",
                             text: $password,
-                            prompt: Text(host?.passwordSaved == true ? "已保存在钥匙串" : "输入密码")
+                            prompt: Text(host?.passwordSaved == true ? "已保存" : "输入密码")
                         )
-                        Toggle("保存密码到钥匙串", isOn: $savePassword)
+                        Toggle("保存密码", isOn: $savePassword)
                         if !savePassword {
                             Text("连接时将要求手动输入")
                                 .font(.caption)
@@ -122,10 +121,10 @@ struct HostEditView: View {
             }
         }
         .onAppear { loadExisting() }
-        .alert("无法保存主机", isPresented: $showKeychainError) {
+        .alert("无法保存主机", isPresented: $showCredentialError) {
             Button("好", role: .cancel) {}
         } message: {
-            Text("凭据写入钥匙串失败，主机未保存。请重试。")
+            Text("凭据写入本地文件失败，主机未保存。请重试。")
         }
         .alert("清除已保存凭据？", isPresented: $showClearCredentialAlert) {
             Button("取消", role: .cancel) {}
@@ -148,7 +147,7 @@ struct HostEditView: View {
 
     private func clearSavedCredential() {
         guard let host else { return }
-        model.deleteKeychainCredentials(for: host.id, auth: host.auth)
+        model.deleteCredentials(for: host.id, auth: host.auth)
         if host.auth == .password {
             savePassword = false
         } else {
@@ -158,6 +157,10 @@ struct HostEditView: View {
 
     private func loadExisting() {
         guard let host else {
+            if let copySource {
+                loadCopy(HostCopyDraft(source: copySource))
+                return
+            }
             // 新建:默认归属侧栏当前选中分组(或选中主机所在分组)
             groupID = defaultGroupID
             return
@@ -172,12 +175,27 @@ struct HostEditView: View {
         savePassword = host.passwordSaved
         savePassphrase = host.passphraseSaved
         keyPath = host.keyPath
-        // Mock 模式不落密钥材料,没有可回显的密码;真实模式从钥匙串取回。
+        // Mock 模式不落密钥材料，没有可回显的密码；真实模式从本地凭据文件取回。
         if !model.usesMockBackend {
-            if let ref = existingSecretRef(), let secret = keychain.read(for: ref) {
+            if let ref = existingSecretRef(), let secret = try? PandaCoreBridge.shared.storedCredential(reference: ref) {
                 if host.auth == .publicKey { passphrase = secret } else { password = secret }
             }
         }
+    }
+
+    private func loadCopy(_ draft: HostCopyDraft) {
+        name = draft.name
+        hostname = draft.address
+        port = String(draft.port)
+        username = draft.username
+        note = draft.note
+        groupID = draft.groupID
+        useKey = draft.auth == .publicKey
+        keyPath = draft.keyPath
+        password = ""
+        passphrase = ""
+        savePassword = false
+        savePassphrase = false
     }
 
     private func existingSecretRef() -> String? {
@@ -214,7 +232,7 @@ struct HostEditView: View {
         let passwordSecret = password.isEmpty ? nil : password
         let passphraseSecret = passphrase.isEmpty ? nil : passphrase
         guard model.saveHost(entry, password: passwordSecret, passphrase: passphraseSecret) else {
-            showKeychainError = true
+            showCredentialError = true
             return
         }
         dismiss()

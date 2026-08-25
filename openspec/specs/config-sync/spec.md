@@ -8,24 +8,22 @@
 
 ### Requirement: 凭据存储
 
-密码与私钥口令 MUST 存入系统钥匙串，配置文件 SHALL 只存引用 key。单 App 场景 SHALL NOT 设置显式 `kSecAttrAccessGroup`（避免 Team ID 前缀耦合）。钥匙串写入失败 MUST 以错误呈现给用户并阻止保存，SHALL NOT 静默丢失凭据。删除主机时 MUST 级联删除其关联的钥匙串条目（密码与口令引用）。
-
-**变更说明：** 原规格要求 `kSecAttrSynchronizable = true` 以支持 iCloud Keychain 漫游；本期仍保留 `synchronizable` 属性，但不以「跨设备漫游」作为强制要求描述，避免与个人账号构建冲突。钥匙串是否漫游由用户 iCloud 设置决定，App 侧保持原属性不变。
+密码与私钥口令 MUST 存入配置目录中的专用本地凭据文件，主机配置文件 SHALL 只存引用 key。系统 SHALL NOT 访问系统钥匙串。凭据写入、删除或保护状态迁移失败 MUST 以错误呈现给用户，并不得让主机配置留下指向不存在凭据的引用。删除主机时 MUST 级联删除其关联的本地凭据条目。
 
 #### Scenario: 新增主机保存密码
 
 - **WHEN** 用户在编辑表单中填写密码并保存
-- **THEN** 密码进入系统钥匙串，hosts.toml 中仅出现引用 key
+- **THEN** 密码进入本地凭据文件，hosts.toml 中仅出现引用 key
 
-#### Scenario: 钥匙串写入失败
+#### Scenario: 本地凭据写入失败
 
-- **WHEN** 保存时钥匙串写入失败
+- **WHEN** 保存时本地凭据文件写入失败
 - **THEN** 用户看到错误提示，主机配置不被保存
 
 #### Scenario: 删除主机清理凭据
 
 - **WHEN** 用户删除一台主机
-- **THEN** 其 `host.<id>.password` / `host.<id>.passphrase` 钥匙串条目被一并删除
+- **THEN** 其 `host.<id>.password` / `host.<id>.passphrase` 本地凭据条目被一并删除
 
 ### Requirement: 本地存储位置
 
@@ -49,7 +47,7 @@
 
 ### Requirement: 跨设备同步预留
 
-系统 SHALL 保留未来恢复跨设备配置同步的扩展点：本地配置文件格式保持稳定，钥匙串引用 key 命名不变，不得在代码中引入与 iCloud KV 冲突的替代同步机制。在 iCloud 同步不可用期间，用户 SHALL 可通过导出/导入功能手动迁移配置。
+系统 SHALL 保留未来恢复跨设备配置同步的扩展点：本地配置文件与凭据引用 key 命名保持稳定，不得在代码中引入与 iCloud KV 冲突的替代同步机制。在 iCloud 同步不可用期间，用户 SHALL 可通过导出/导入功能手动迁移非敏感配置。
 
 #### Scenario: 未来启用 iCloud 同步
 

@@ -279,8 +279,8 @@ final class FilePaneNavigatorTests: XCTestCase {
         XCTAssertEqual(session.remotePane.root, "/share/homes/deploy", "远程面板根目录应使用解析结果")
     }
 
-    /// home 解析失败回退 `/`（既有语义保持，走后台路径）。
-    func testConnectHomeResolveFailureFallsBackToRoot() async {
+    /// home 解析失败必须把真实错误交给标签页分类，不能伪装成根目录连接成功。
+    func testConnectHomeResolveFailureReturnsError() async {
         let host = HostEntry(
             id: "h-home-fail", name: "home-fail", address: "198.51.100.31", port: 22,
             username: "deploy", groupID: nil, fingerprint: "SHA256:x", demo: nil
@@ -291,9 +291,9 @@ final class FilePaneNavigatorTests: XCTestCase {
             throw NSError(domain: "test", code: 1)
         }
 
-        await session.connect(password: nil, passphrase: nil)
+        let error = await session.connect(password: nil, passphrase: nil)
 
-        XCTAssertEqual(session.remotePane.root, "/", "解析失败应回退到 /")
+        XCTAssertNotNil(error)
     }
 
     // MARK: - 传输网络操作后台化

@@ -21,14 +21,14 @@ final class PreconnectGate: ObservableObject {
     @Published var sheet: Sheet?
     /// 真实模式下探测到的呈现密钥,用于 TOFU 对话框展示指纹。
     private(set) var presentedKey: PresentedHostKey?
-    /// 手动输入的密码,仅本标签会话持有。
-    private(set) var password: String?
+    /// 手动输入的密码或私钥口令，仅本标签会话持有。
+    private(set) var manualSecret: String?
 
     /// 是否已经评估过(onAppear 可能多次触发,评估只进行一次)。
     private var evaluated = false
 
-    /// 凭据解析器；生产环境默认系统钥匙串，测试可注入内存 fake。
-    var credentialResolver = CredentialResolver(keychain: SystemKeychain.shared)
+    /// 凭据解析器；生产环境读取本地凭据文件，测试可注入内存 fake。
+    var credentialResolver = CredentialResolver.localStore()
 
     /// 打开标签时评估一次;重复调用为 no-op。返回决策结果(便于测试与日志)。
     /// 供 Mock 模式使用;真实模式调用 `evaluateAsync`。
@@ -69,6 +69,39 @@ final class PreconnectGate: ObservableObject {
         } else {
             unlocked = true
         }
+    }
+
+    /// 发起连接前再次确认凭据可用，避免竞态将空密码送入 FFI。
+    func requestCredentialsIfNeeded(for host: HostEntry) -> Bool {
+        guard credentialResolver.connectionSecrets(for: host, manualSecret: manualSecret) == nil else {
+            return false
+        }
+        unlocked = false
+        sheet = .password
+        return true
+    }
+
+    /// FFI 在连接时仍报告缺凭据时强制回到输入框，避免落入通用失败页。
+    func requireCredentialInput() {
+        unlocked = false
+        sheet = .password
+    }
+
+    /// 会话建立阶段仍收到未知主机密钥时的安全回退。
+    /// 正常路径会在连接前探测到该错误；这里处理 known_hosts 状态与握手之间
+    /// 的竞态，绝不把未验证的密钥当作普通连接失败或自动信任。
+    @discardableResult
+    func requireTofuConfirmation(_ key: PresentedHostKey) -> Bool {
+        guard !key.key.isEmpty else {
+            unlocked = false
+            manualSecret = nil
+            return false
+        }
+        unlocked = false
+        manualSecret = nil
+        presentedKey = key
+        sheet = .tofu
+        return true
     }
 
     private func probeUnknown(host: HostEntry, in model: AppModel, onClose: @escaping () -> Void) async {
@@ -114,8 +147,8 @@ final class PreconnectGate: ObservableObject {
     }
 
     /// 对话框确认通过:TOFU 信任 / 密码输入完成后进入连接流程。
-    func unlock(password: String? = nil) {
-        self.password = password
+    func unlock(secret: String? = nil) {
+        self.manualSecret = secret
         unlocked = true
         sheet = nil
     }
@@ -147,20 +180,73 @@ struct ConnectingRow: View {
     }
 }
 
-/// 连接失败态:错误图标 + 「连接超时」+ 详情 + [重试][关闭标签],
-/// 与原型 errbox 一致;终端与 SFTP 标签共用。
+/// 连接失败类型：只把真正的网络超时呈现为超时，避免遮蔽认证或凭据问题。
+enum ConnectionFailure: Equatable {
+    case timeout
+    case authenticationFailed
+    case missingCredential
+    case unknownHostKey(PresentedHostKey)
+    case other(String)
+
+    init(error: Error) {
+        guard let panda = error as? PandaError else {
+            self = .other(error.localizedDescription)
+            return
+        }
+        switch panda {
+        case .Timeout:
+            self = .timeout
+        case .AuthFailed:
+            self = .authenticationFailed
+        case .MissingPassword, .MissingPassphrase:
+            self = .missingCredential
+        case .UnknownHostKey(_, let presented, let fingerprint):
+            self = .unknownHostKey(PresentedHostKey(key: presented, fingerprint: fingerprint))
+        default:
+            self = .other(error.localizedDescription)
+        }
+    }
+
+    var presentedHostKey: PresentedHostKey? {
+        guard case .unknownHostKey(let key) = self else { return nil }
+        return key
+    }
+
+    var title: String {
+        switch self {
+        case .timeout: return "连接超时"
+        case .authenticationFailed: return "认证失败"
+        case .missingCredential: return "缺少凭据"
+        case .unknownHostKey: return "需要确认主机密钥"
+        case .other: return "连接失败"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .timeout: return "无法在规定时间内连接到远程主机，请检查网络或主机是否在线。"
+        case .authenticationFailed: return "服务器拒绝了提供的认证信息，请检查用户名、密码或私钥。"
+        case .missingCredential: return "连接需要密码或私钥口令。"
+        case .unknownHostKey: return "服务器主机密钥尚未确认。"
+        case .other(let message): return message
+        }
+    }
+}
+
+/// 连接失败态:对应错误图标、详情 + [重试][关闭标签]；终端与 SFTP 标签共用。
 struct ConnectFailureView: View {
     let host: HostEntry
+    var failure: ConnectionFailure = .timeout
     let onRetry: () -> Void
     let onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
             ContentUnavailableView {
-                Label("连接超时", systemImage: "exclamationmark.circle")
+                Label(failure.title, systemImage: "exclamationmark.circle")
                     .foregroundStyle(.red)
             } description: {
-                Text("dial tcp \(host.address):\(host.port): i/o timeout\n无法连接到远程主机，请检查网络或主机是否在线。")
+                Text("\(host.address):\(host.port)\n\(failure.detail)")
                     .font(.system(.caption, design: .monospaced))
             }
             HStack(spacing: 10) {
@@ -210,7 +296,7 @@ private struct PreconnectSheets: ViewModifier {
                 )
             case .password:
                 PasswordPromptSheet(host: host, onLogin: { password in
-                    gate.unlock(password: password)
+                    gate.unlock(secret: password)
                 })
             case .keyPicker:
                 KeyPickerSheet(host: host, onPick: { path in

@@ -435,12 +435,19 @@ final class SftpSessionStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
-    /// 用真实后端初始化远程面板;调用前需先通过连接门控取得密码/口令。
+    /// 用真实后端初始化远程面板；调用前需先通过连接门控取得密码/口令。
     /// 通过 `sftp_home_dir` 解析服务器实际 home 目录,避免硬编码 `/home/<username>`
     /// 在非标准 home 路径的服务器上失效。
-    func connect(password: String?, passphrase: String?) async {
+    /// 返回连接初始化错误；调用方必须据此区分超时、认证失败和缺凭据。
+    func connect(password: String?, passphrase: String?) async -> Error? {
         connectionSecrets = (password, passphrase)
-        let root = await resolveHomeDir(password: password, passphrase: passphrase)
+        let root: String
+        do {
+            root = try await resolveHomeDir(password: password, passphrase: passphrase)
+        } catch {
+            Logger.shared.error("SFTP 连接失败 host=\(host.address):\(host.port); 原因=\(error.localizedDescription)", module: LogModule.sftp)
+            return error
+        }
         remotePane = FilePaneNavigator(
             source: RemoteFilePaneSource(
                 root: root,
@@ -451,29 +458,24 @@ final class SftpSessionStore: ObservableObject {
             )
         )
         Logger.shared.info("SFTP 已连接 host=\(host.address):\(host.port)", module: LogModule.sftp)
+        return nil
     }
 
-    private func resolveHomeDir(password: String?, passphrase: String?) async -> String {
+    private func resolveHomeDir(password: String?, passphrase: String?) async throws -> String {
         let hostID = host.id
         let resolver = homeDirResolver
-        do {
-            // 完整握手（SSH + SFTP + home 解析）在后台线程执行，不阻塞主线程；
-            // 多标签连接并行握手（tokio 多线程 runtime 并发 block_on）。
-            return try await FFIBackground.run { () -> String in
-                if let resolver {
-                    return try resolver(hostID, password, passphrase)
-                }
-                return try PandaCoreBridge.shared.resolveSftpHomeDir(
-                    of: hostID,
-                    password: password,
-                    passphrase: passphrase,
-                    trustOnFirstUse: false
-                )
+        // 完整握手（SSH + SFTP + home 解析）在后台线程执行，不阻塞主线程；
+        // 多标签连接并行握手（tokio 多线程 runtime 并发 block_on）。
+        return try await FFIBackground.run { () -> String in
+            if let resolver {
+                return try resolver(hostID, password, passphrase)
             }
-        } catch {
-            // 兜底：解析失败时使用 `/`，让用户仍能手动导航。
-            Logger.shared.error("home 目录解析失败 host=\(host.address):\(host.port); 原因=\(error.localizedDescription)", module: LogModule.sftp)
-            return "/"
+            return try PandaCoreBridge.shared.resolveSftpHomeDir(
+                of: hostID,
+                password: password,
+                passphrase: passphrase,
+                trustOnFirstUse: false
+            )
         }
     }
 

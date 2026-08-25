@@ -4,21 +4,20 @@
 //! 该文件运行在独立进程里（与其它集成测试分开），确保全局 `STORES` 未被
 //! 其它测试初始化。
 
-use panda_ffi::{
-    delete_host, init_store, list_hosts, save_host, sftp_check_download_conflict,
-    sftp_check_upload_conflict, sftp_list, shell_open, test_connection,
-};
 use panda_ffi::{accept_unknown_host_key, host_key_status};
+use panda_ffi::{
+    credential_protection_enabled, delete_credential, delete_host, init_store, list_hosts,
+    read_credential, save_credential, save_host, set_credential_protection_key,
+    sftp_check_download_conflict, sftp_check_upload_conflict, sftp_list, shell_open,
+    test_connection,
+};
 use panda_ffi::{delete_group, list_groups, move_group, save_group};
 use panda_ffi::{AuthMethodEnum, GroupRecord, HostConfigRecord, PandaError};
 use uuid::Uuid;
 
 #[test]
 fn store_not_initialized_returns_not_initialized() {
-    assert!(matches!(
-        list_hosts(),
-        Err(PandaError::NotInitialized)
-    ));
+    assert!(matches!(list_hosts(), Err(PandaError::NotInitialized)));
     assert!(matches!(
         test_connection("x".into(), None, None, true),
         Err(PandaError::NotInitialized)
@@ -42,6 +41,26 @@ fn store_not_initialized_returns_not_initialized() {
     ));
     assert!(matches!(
         delete_host("x".into()),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        save_credential("ref".into(), "secret".into()),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        read_credential("ref".into()),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        delete_credential("ref".into()),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        set_credential_protection_key(None, Some("key".into())),
+        Err(PandaError::NotInitialized)
+    ));
+    assert!(matches!(
+        credential_protection_enabled(),
         Err(PandaError::NotInitialized)
     ));
     assert!(matches!(list_groups(), Err(PandaError::NotInitialized)));
@@ -70,11 +89,25 @@ fn store_not_initialized_returns_not_initialized() {
         Err(PandaError::NotInitialized)
     ));
     assert!(matches!(
-        sftp_check_upload_conflict("x".into(), "/tmp/a".into(), "/remote/a".into(), None, None, true),
+        sftp_check_upload_conflict(
+            "x".into(),
+            "/tmp/a".into(),
+            "/remote/a".into(),
+            None,
+            None,
+            true
+        ),
         Err(PandaError::NotInitialized)
     ));
     assert!(matches!(
-        sftp_check_download_conflict("x".into(), "/remote/a".into(), "/tmp/a".into(), None, None, true),
+        sftp_check_download_conflict(
+            "x".into(),
+            "/remote/a".into(),
+            "/tmp/a".into(),
+            None,
+            None,
+            true
+        ),
         Err(PandaError::NotInitialized)
     ));
     assert!(matches!(
@@ -95,4 +128,3 @@ fn init_store_with_bad_path_returns_error() {
 
     let _ = std::fs::remove_dir_all(&parent);
 }
-

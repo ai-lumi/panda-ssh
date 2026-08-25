@@ -2,11 +2,11 @@
 
 ## Purpose
 
-主机配置的建模与持久化：主机列表以 TOML 文件存储，密钥材料（密码、私钥口令）只存系统钥匙串，配置文件仅存引用 key。macOS 与 iPadOS 共用同一份布局，存储路径由宿主 App 注入（macOS 为 `~/.panda-ssh/`，iPadOS 为 App Group 容器）。
+主机配置的建模与持久化：主机列表以 TOML 文件存储，密钥材料（密码、私钥口令）只存配置目录内的专用凭据文件，配置文件仅存引用 key。macOS 与 iPadOS 共用同一份布局，存储路径由宿主 App 注入（macOS 为 `~/.panda-ssh/`，iPadOS 为 App Group 容器）。
 ## Requirements
 ### Requirement: 主机配置数据模型
 
-系统 SHALL 以 `HostConfig` 表示一台主机：`id`（UUID 字符串）、`name`、`host`、`port`（缺省 22）、`username`、`auth`、`notes`（可选）、`group_id`（可选，所属分组 id，缺省/缺失为根级）。`auth` MUST 为 `Password { password_ref }` 或 `PublicKey { key_path, passphrase_ref }` 之一，`*_ref` 字段 MUST 只保存钥匙串引用，SHALL NOT 保存明文密码或口令。旧版配置文件缺少 `group_id` 字段时 MUST 按根级（`None`）处理，无需迁移。
+系统 SHALL 以 `HostConfig` 表示一台主机：`id`（UUID 字符串）、`name`、`host`、`port`（缺省 22）、`username`、`auth`、`notes`（可选）、`group_id`（可选，所属分组 id，缺省/缺失为根级）。`auth` MUST 为 `Password { password_ref }` 或 `PublicKey { key_path, passphrase_ref }` 之一，`*_ref` 字段 MUST 只保存本地凭据引用，SHALL NOT 保存明文密码或口令。旧版配置文件缺少 `group_id` 字段时 MUST 按根级（`None`）处理，无需迁移。
 
 #### Scenario: 密码认证配置序列化
 
@@ -51,4 +51,3 @@
 
 - **WHEN** 删除某主机并用同一路径重新打开
 - **THEN** 新实例 list 结果不包含该主机
-

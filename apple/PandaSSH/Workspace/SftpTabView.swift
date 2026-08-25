@@ -24,6 +24,7 @@ struct SftpTabView: View {
     }
 
     @State private var phase: Phase = .connecting
+    @State private var failure: ConnectionFailure = .timeout
     /// 连接尝试序号:重试时 +1,驱动 .task 重跑连接动画。
     @State private var attempt = 0
     @State private var presentationState = SFTPPresentationState(layout: .dualPane)
@@ -80,6 +81,7 @@ struct SftpTabView: View {
                 case .failed:
                     ConnectFailureView(
                         host: host,
+                        failure: failure,
                         onRetry: {
                             attempt += 1
                             phase = .connecting
@@ -814,18 +816,42 @@ struct SftpTabView: View {
             phase = .failed
             return
         }
-        let secrets = CredentialResolver(keychain: SystemKeychain.shared)
-            .connectionSecrets(for: host, manualPassword: gate.password)
+        if gate.requestCredentialsIfNeeded(for: host) { return }
+        let secrets = CredentialResolver.localStore()
+            .connectionSecrets(for: host, manualSecret: gate.manualSecret)
         guard let secrets else {
-            phase = .failed
+            _ = gate.requestCredentialsIfNeeded(for: host)
             return
         }
-        await session.connect(password: secrets.password, passphrase: secrets.passphrase)
+        if let error = await session.connect(password: secrets.password, passphrase: secrets.passphrase) {
+            let classified = ConnectionFailure(error: error)
+            if classified == .missingCredential {
+                gate.requireCredentialInput()
+            } else if let key = classified.presentedHostKey,
+                      gate.requireTofuConfirmation(key) {
+                model.backend.cachePresentedKey(key, for: host.id)
+                attempt += 1
+                phase = .connecting
+            } else {
+                failure = classified
+                phase = .failed
+            }
+            return
+        }
         let localOK = await session.localPane.reload()
         let remoteOK = await session.remotePane.reload()
         try? await Task.sleep(for: .milliseconds(300))
         guard !Task.isCancelled else { return }
-        phase = (localOK && remoteOK) ? .connected : .failed
+        if localOK && remoteOK {
+            phase = .connected
+        } else {
+            failure = session.remotePane.lastError.map(ConnectionFailure.init(error:)) ?? .other("无法读取远程目录。")
+            if failure == .missingCredential {
+                gate.requireCredentialInput()
+            } else {
+                phase = .failed
+            }
+        }
     }
 
     // MARK: - 框选多选(每栏独立状态)

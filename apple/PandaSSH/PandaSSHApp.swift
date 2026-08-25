@@ -195,8 +195,8 @@ final class AppModel: ObservableObject {
         backend.presentedFingerprint(for: hostID)
     }
 
-    func deleteKeychainCredentials(for hostID: String, auth: AuthKind) {
-        backend.clearKeychainCredentials(for: hostID, auth: auth)
+    func deleteCredentials(for hostID: String, auth: AuthKind) {
+        backend.clearCredentials(for: hostID, auth: auth)
         reload()
     }
 

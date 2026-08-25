@@ -77,6 +77,14 @@ final class PandaCoreBridge {
         try deleteHost(id: id)
     }
 
+    func storeCredential(reference: String, secret: String) throws { try saveCredential(reference: reference, secret: secret) }
+    func storedCredential(reference: String) throws -> String? { try readCredential(reference: reference) }
+    func removeCredential(reference: String) throws { try deleteCredential(reference: reference) }
+    func updateCredentialProtectionKey(currentKey: String?, newKey: String?) throws {
+        try setCredentialProtectionKey(currentKey: currentKey, newKey: newKey)
+    }
+    func isCredentialProtectionEnabled() throws -> Bool { try credentialProtectionEnabled() }
+
     func allGroups() throws -> [GroupRecord] {
         try listGroups()
     }
@@ -95,8 +103,8 @@ final class PandaCoreBridge {
         try moveGroup(id: id, newParentId: parentID)
     }
 
-    /// `password` / `passphrase` are fetched from the keychain by the caller;
-    /// the Rust layer never touches the keychain itself. `trustOnFirstUse`
+    /// `password` / `passphrase` are fetched from the local credential store by the caller;
+    /// the Rust layer receives them only as transient parameters. `trustOnFirstUse`
     /// maps to the unknown-host-key policy (false = Reject, true = TOFU).
     func checkConnection(of host: HostConfigRecord, password: String?, passphrase: String?, trustOnFirstUse: Bool = false) throws -> String {
         try testConnection(hostId: host.id, password: password, passphrase: passphrase, trustOnFirstUse: trustOnFirstUse)

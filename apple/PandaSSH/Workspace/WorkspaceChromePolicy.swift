@@ -76,12 +76,11 @@ struct WorkspaceChromePolicy: Equatable {
         }
     }
 
-    /// `NavigationSplitView` 的默认按钮只在 macOS 侧栏隐藏时承担恢复职责。
-    /// 侧栏可见时由侧栏内部按钮负责收起，避免标题区出现重复入口。
+    /// 系统侧栏按钮持续承担显示与隐藏职责，避免状态切换时跨位置重建控件。
     static func shouldRemoveDefaultSidebarToggle(
         platform: Platform,
         isSidebarVisible: Bool
     ) -> Bool {
-        platform == .macOS && isSidebarVisible
+        false
     }
 }

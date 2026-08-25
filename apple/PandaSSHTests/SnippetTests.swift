@@ -95,7 +95,7 @@ final class SnippetTests: XCTestCase {
 
     private func makeBackend() -> PandaCoreBackend {
         // 复用 config 目录，避免测试间污染。
-        let backend = PandaCoreBackend(keychain: InMemoryKeychain())
+        let backend = PandaCoreBackend()
         _ = backend.allHosts()
         return backend
     }

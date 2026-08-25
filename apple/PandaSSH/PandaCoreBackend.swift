@@ -1,7 +1,7 @@
 import Foundation
 
 /// 真实后端:主机与分组配置走 Rust FFI(hosts.toml / groups.toml),
-/// 密钥材料走系统钥匙串。代码片段暂无真实存储,以内存空实现占位,
+/// 密钥材料走 Rust 本地凭据仓库。代码片段暂无真实存储,以内存空实现占位,
 /// 接口与 Mock 一致,换实现时 View 不需要改动。
 final class PandaCoreBackend: AppBackend {
     private(set) var startupError: String?
@@ -9,11 +9,7 @@ final class PandaCoreBackend: AppBackend {
     /// Reject 探测缓存:hostID → 呈现密钥与指纹(信任后移除)。
     /// 只从主 actor 访问(AppModel 的调用路径)。
     private var presentedKeys: [String: PresentedHostKey] = [:]
-    /// 钥匙串服务；生产环境默认系统钥匙串，测试可注入内存 fake。
-    private let keychain: KeychainService
-
-    init(keychain: KeychainService = SystemKeychain.shared) {
-        self.keychain = keychain
+    init() {
         do {
             try PandaCoreBridge.shared.start()
             try PandaCoreBridge.shared.initializeSnippets(at: AppPaths.snippetsDirectoryURL)
@@ -24,7 +20,7 @@ final class PandaCoreBackend: AppBackend {
         }
     }
 
-    // MARK: 主机(FFI + 钥匙串 + 同步)
+    // MARK: 主机（FFI + 本地凭据仓库 + 同步）
 
     func allHosts() -> [HostEntry] {
         (try? PandaCoreBridge.shared.allHosts().map(HostEntry.init(record:)))?
@@ -44,41 +40,41 @@ final class PandaCoreBackend: AppBackend {
 
     @discardableResult
     func saveHost(_ host: HostEntry, password: String?, passphrase: String?) -> Bool {
-        // 密钥材料先写钥匙串,失败则中止保存——否则 ref 会落进 hosts.toml
-        // 而密钥丢失(与重构前 HostEditView 的行为一致)。
+        // 密钥材料先写本地凭据仓库，失败则中止保存——否则 ref 会落进 hosts.toml。
+        // 保存配置后才清理废弃引用，避免配置保存失败时形成悬空引用。
+        let oldPasswordRef = existingPasswordRef(for: host.id)
+        let oldPassphraseRef = existingPassphraseRef(for: host.id)
         var passwordSaved = false
         var passphraseSaved = false
         switch host.auth {
         case .password where host.passwordSaved:
             if let password, !password.isEmpty {
-                guard keychain.save(secret: password, for: "host.\(host.id).password") else { return false }
+                guard (try? PandaCoreBridge.shared.storeCredential(reference: "host.\(host.id).password", secret: password)) != nil else { return false }
                 passwordSaved = true
-            } else if existingPasswordRef(for: host.id) != nil || keychainHasSecret(for: host.id, suffix: "password") {
+            } else if oldPasswordRef != nil {
                 // 编辑场景:未输入新密码且开关保持打开 → 保留已有 ref
                 passwordSaved = true
             }
-        case .password:
-            // 开关关闭：若此前保存过，清除钥匙串与 config 中的 ref。
-            if existingPasswordRef(for: host.id) != nil || keychainHasSecret(for: host.id, suffix: "password") {
-                keychain.delete(for: "host.\(host.id).password")
-            }
+        case .password: break
         case .publicKey where host.passphraseSaved:
             if let passphrase, !passphrase.isEmpty {
-                guard keychain.save(secret: passphrase, for: "host.\(host.id).passphrase") else { return false }
+                guard (try? PandaCoreBridge.shared.storeCredential(reference: "host.\(host.id).passphrase", secret: passphrase)) != nil else { return false }
                 passphraseSaved = true
-            } else if existingPassphraseRef(for: host.id) != nil || keychainHasSecret(for: host.id, suffix: "passphrase") {
+            } else if oldPassphraseRef != nil {
                 passphraseSaved = true
             }
-        case .publicKey:
-            if existingPassphraseRef(for: host.id) != nil || keychainHasSecret(for: host.id, suffix: "passphrase") {
-                keychain.delete(for: "host.\(host.id).passphrase")
-            }
+        case .publicKey: break
         }
         var entry = host
         entry.passwordSaved = passwordSaved
         entry.passphraseSaved = passphraseSaved
         do {
             try PandaCoreBridge.shared.save(host: entry.toConfigRecord())
+            let retainedRefs = Set([entry.passwordSaved ? "host.\(entry.id).password" : nil,
+                                    entry.passphraseSaved ? "host.\(entry.id).passphrase" : nil].compactMap { $0 })
+            for reference in [oldPasswordRef, oldPassphraseRef].compactMap({ $0 }) where !retainedRefs.contains(reference) {
+                try PandaCoreBridge.shared.removeCredential(reference: reference)
+            }
             return true
         } catch {
             startupError = error.localizedDescription
@@ -90,8 +86,6 @@ final class PandaCoreBackend: AppBackend {
         do {
             try PandaCoreBridge.shared.delete(id: id)
             // 级联删除主机凭据;ref 命名与 HostEditView 一致,删不存在项是 no-op。
-            keychain.delete(for: "host.\(id).password")
-            keychain.delete(for: "host.\(id).passphrase")
         } catch {
             startupError = error.localizedDescription
         }
@@ -146,6 +140,10 @@ final class PandaCoreBackend: AppBackend {
         }
     }
 
+    func cachePresentedKey(_ key: PresentedHostKey, for hostID: String) {
+        presentedKeys[hostID] = key
+    }
+
     func trustHost(id: String) {
         guard let record = configRecord(for: id),
               let key = presentedKeys[id]?.key, !key.isEmpty else { return }
@@ -165,13 +163,8 @@ final class PandaCoreBackend: AppBackend {
         try? PandaCoreBridge.shared.allHosts().first { $0.id == hostID }
     }
 
-    func clearKeychainCredentials(for hostID: String, auth: AuthKind) {
-        if auth == .password {
-            keychain.delete(for: "host.\(hostID).password")
-        } else {
-            keychain.delete(for: "host.\(hostID).passphrase")
-        }
-        // 同步：把 config 里的 ref 也清掉，避免悬空引用。
+    func clearCredentials(for hostID: String, auth: AuthKind) {
+        // 先清除配置引用，再删除秘密；删除失败也不会遗留悬空引用。
         guard var record = configRecord(for: hostID) else { return }
         switch record.auth {
         case .password:
@@ -181,6 +174,8 @@ final class PandaCoreBackend: AppBackend {
         }
         do {
             try PandaCoreBridge.shared.save(host: record)
+            let suffix = auth == .password ? "password" : "passphrase"
+            try PandaCoreBridge.shared.removeCredential(reference: "host.\(hostID).\(suffix)")
         } catch {
             startupError = error.localizedDescription
         }
@@ -256,9 +251,6 @@ final class PandaCoreBackend: AppBackend {
         return ref
     }
 
-    private func keychainHasSecret(for id: String, suffix: String) -> Bool {
-        keychain.read(for: "host.\(id).\(suffix)") != nil
-    }
 }
 
 // MARK: - Snippet <-> SnippetRecord 互转

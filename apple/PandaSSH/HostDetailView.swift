@@ -82,7 +82,7 @@ struct HostDetailView: View {
         case .publicKey:
             return "密钥 \(host.keyPath)"
         case .password:
-            return host.passwordSaved ? "密码（已存钥匙串）" : "密码（未保存）"
+            return host.passwordSaved ? "密码（已保存）" : "密码（未保存）"
         }
     }
 }

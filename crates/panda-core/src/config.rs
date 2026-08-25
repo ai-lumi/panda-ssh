@@ -10,7 +10,7 @@ use crate::Error;
 /// How to authenticate against a host.
 ///
 /// Secret material is never stored here: `*_ref` fields only hold the key
-/// used to look the secret up in the platform keychain.
+/// used to look the secret up in the local credential store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthMethod {
@@ -189,7 +189,7 @@ mod tests {
             port: 22,
             username: "panda".into(),
             auth: AuthMethod::Password {
-                password_ref: Some("keychain/box".into()),
+                password_ref: Some("local/box".into()),
             },
             notes: None,
             group_id: None,
@@ -337,5 +337,22 @@ mod tests {
         assert!(store.get("x").is_err());
         assert!(store.upsert(password_host()).is_err());
         assert!(store.delete("x").is_err());
+    }
+
+    #[tokio::test]
+    async fn atomic_async_write_replaces_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_atomic_async(&path, b"before").await.unwrap();
+        write_atomic_async(&path, b"after").await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"after");
+
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, b"x").unwrap();
+        assert!(
+            write_atomic_async(&blocked.join("config.toml"), b"x")
+                .await
+                .is_err()
+        );
     }
 }

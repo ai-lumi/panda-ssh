@@ -28,8 +28,8 @@ struct HostKeyMismatchError: Error, Equatable {
 /// Mock 与真实实现可以互换而不改 View。
 ///
 /// 实现方:
-/// - `MockBackend`(DEBUG 默认):全内存,预置原型演示数据,不碰 FFI/钥匙串。
-/// - `PandaCoreBackend`(Release 默认):主机、分组与代码片段走 Rust FFI + 钥匙串。
+/// - `MockBackend`(DEBUG 默认):全内存,预置原型演示数据,不碰 FFI/本地凭据文件。
+/// - `PandaCoreBackend`(Release 默认):主机、分组、代码片段与凭据走 Rust FFI。
 protocol AppBackend: AnyObject {
     /// 启动阶段的错误(如 Rust store 初始化失败),无错为 nil。
     var startupError: String? { get }
@@ -38,7 +38,7 @@ protocol AppBackend: AnyObject {
 
     func allHosts() -> [HostEntry]
     /// 新增或更新主机(按 id 判断)。password/passphrase 为明文密钥材料:
-    /// 真实后端负责写入钥匙串,Mock 后端直接忽略。返回是否成功。
+    /// 真实后端负责写入本地凭据仓库，Mock 后端直接忽略。返回是否成功。
     @discardableResult
     func saveHost(_ host: HostEntry, password: String?, passphrase: String?) -> Bool
     func deleteHost(id: String)
@@ -55,10 +55,12 @@ protocol AppBackend: AnyObject {
     /// 仅应在 hostKeyStatus == .unknown 时调用。返回 nil 表示探测期间
     /// 密钥已被信任(并发确认),无需再弹框。探测失败(超时/网络)抛错。
     func probePresentedKey(for hostID: String) async throws -> PresentedHostKey?
+    /// 缓存连接阶段收到的呈现密钥，供同一密钥的 TOFU 确认写入 known_hosts。
+    func cachePresentedKey(_ key: PresentedHostKey, for hostID: String)
     /// 提供 FFI 侧的主机配置(阶段二的终端/SFTP 视图仍基于 HostConfigRecord)。
     func configRecord(for hostID: String) -> HostConfigRecord?
     /// 清除主机已保存的凭据（密码或密钥口令），不影响主机配置本身。
-    func clearKeychainCredentials(for hostID: String, auth: AuthKind)
+    func clearCredentials(for hostID: String, auth: AuthKind)
 
     // MARK: 分组
 
@@ -74,4 +76,9 @@ protocol AppBackend: AnyObject {
     func allSnippets() -> [Snippet]
     func saveSnippet(_ snippet: Snippet)
     func deleteSnippet(id: String)
+}
+
+extension AppBackend {
+    /// 只有真实后端需要缓存原始密钥；Mock 和测试后端可保持 no-op。
+    func cachePresentedKey(_ key: PresentedHostKey, for hostID: String) {}
 }

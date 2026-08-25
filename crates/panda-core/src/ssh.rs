@@ -214,7 +214,8 @@ impl SshSession {
                     .await?
             }
             Credentials::KeyFile { path, passphrase } => {
-                let key = load_secret_key(&path, passphrase.as_deref())?;
+                let key = load_secret_key(&path, passphrase.as_deref())
+                    .map_err(|error| Self::map_private_key_error(error, passphrase.is_some()))?;
                 let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
                 handle
                     .authenticate_publickey(cfg.username.clone(), key)
@@ -224,6 +225,14 @@ impl SshSession {
         match result {
             AuthResult::Success => Ok(()),
             AuthResult::Failure { .. } => Err(Error::AuthFailed),
+        }
+    }
+
+    fn map_private_key_error(error: russh::keys::Error, has_passphrase: bool) -> Error {
+        if matches!(error, russh::keys::Error::KeyIsEncrypted) && !has_passphrase {
+            Error::MissingPassphrase
+        } else {
+            Error::Key(error)
         }
     }
 
@@ -513,6 +522,18 @@ mod tests {
         let failure = Arc::new(Mutex::new(KeyCheckFailure::default()));
         let err = SshSession::map_connect_error(russh::Error::Disconnect, &test_cfg(), &failure);
         assert!(err.to_string().contains("ssh error"), "got: {err}");
+    }
+
+    #[test]
+    fn encrypted_private_key_without_passphrase_is_recoverable() {
+        let error = SshSession::map_private_key_error(russh::keys::Error::KeyIsEncrypted, false);
+        assert!(matches!(error, Error::MissingPassphrase));
+    }
+
+    #[test]
+    fn encrypted_private_key_with_passphrase_keeps_key_error() {
+        let error = SshSession::map_private_key_error(russh::keys::Error::KeyIsEncrypted, true);
+        assert!(matches!(error, Error::Key(russh::keys::Error::KeyIsEncrypted)));
     }
 
     #[test]

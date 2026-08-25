@@ -248,6 +248,17 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
 void uniffi_panda_ffi_fn_func_accept_unknown_host_key(RustBuffer host, uint16_t port, RustBuffer key, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CREDENTIAL_PROTECTION_ENABLED
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CREDENTIAL_PROTECTION_ENABLED
+int8_t uniffi_panda_ffi_fn_func_credential_protection_enabled(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_CREDENTIAL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_CREDENTIAL
+void uniffi_panda_ffi_fn_func_delete_credential(RustBuffer reference, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_GROUP
 void uniffi_panda_ffi_fn_func_delete_group(RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -306,6 +317,16 @@ RustBuffer uniffi_panda_ffi_fn_func_list_snippets(RustCallStatus *_Nonnull out_s
 void uniffi_panda_ffi_fn_func_move_group(RustBuffer id, RustBuffer new_parent_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_READ_CREDENTIAL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_READ_CREDENTIAL
+RustBuffer uniffi_panda_ffi_fn_func_read_credential(RustBuffer reference, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_CREDENTIAL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_CREDENTIAL
+void uniffi_panda_ffi_fn_func_save_credential(RustBuffer reference, RustBuffer secret, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_GROUP
 void uniffi_panda_ffi_fn_func_save_group(RustBuffer group, RustCallStatus *_Nonnull out_status
@@ -319,6 +340,11 @@ void uniffi_panda_ffi_fn_func_save_host(RustBuffer host, RustCallStatus *_Nonnul
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_SNIPPET
 void uniffi_panda_ffi_fn_func_save_snippet(RustBuffer snippet, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SET_CREDENTIAL_PROTECTION_KEY
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SET_CREDENTIAL_PROTECTION_KEY
+void uniffi_panda_ffi_fn_func_set_credential_protection_key(RustBuffer current_key, RustBuffer new_key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHECK_DOWNLOAD_CONFLICT
@@ -739,6 +765,18 @@ uint16_t uniffi_panda_ffi_checksum_func_accept_unknown_host_key(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CREDENTIAL_PROTECTION_ENABLED
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CREDENTIAL_PROTECTION_ENABLED
+uint16_t uniffi_panda_ffi_checksum_func_credential_protection_enabled(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_CREDENTIAL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_CREDENTIAL
+uint16_t uniffi_panda_ffi_checksum_func_delete_credential(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_GROUP
 uint16_t uniffi_panda_ffi_checksum_func_delete_group(void
@@ -805,6 +843,18 @@ uint16_t uniffi_panda_ffi_checksum_func_move_group(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_READ_CREDENTIAL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_READ_CREDENTIAL
+uint16_t uniffi_panda_ffi_checksum_func_read_credential(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_CREDENTIAL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_CREDENTIAL
+uint16_t uniffi_panda_ffi_checksum_func_save_credential(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_GROUP
 uint16_t uniffi_panda_ffi_checksum_func_save_group(void
@@ -820,6 +870,12 @@ uint16_t uniffi_panda_ffi_checksum_func_save_host(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_SNIPPET
 uint16_t uniffi_panda_ffi_checksum_func_save_snippet(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SET_CREDENTIAL_PROTECTION_KEY
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SET_CREDENTIAL_PROTECTION_KEY
+uint16_t uniffi_panda_ffi_checksum_func_set_credential_protection_key(void
     
 );
 #endif

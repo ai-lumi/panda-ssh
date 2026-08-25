@@ -47,7 +47,6 @@ struct WorkspaceView: View {
         NavigationSplitView(columnVisibility: $model.columnVisibility) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
-                .toolbar(removing: defaultSidebarToolbarItemToRemove)
         } detail: {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -94,14 +93,6 @@ struct WorkspaceView: View {
                 }
             }
         }
-    }
-
-    private var defaultSidebarToolbarItemToRemove: ToolbarDefaultItemKind? {
-        let isSidebarVisible = model.columnVisibility != .detailOnly
-        return WorkspaceChromePolicy.shouldRemoveDefaultSidebarToggle(
-            platform: .macOS,
-            isSidebarVisible: isSidebarVisible
-        ) ? .sidebarToggle : nil
     }
 
     private var macOSTabBar: some View {

@@ -7,7 +7,7 @@
 ## Requirements
 ### Requirement: 建立会话
 
-系统 SHALL 支持以 `HostConfig` + `Credentials` 建立 SSH 会话。`Credentials` MUST 为 `Password(明文)` 或 `KeyFile { path, passphrase }` 之一，由调用方从钥匙串取回后传入，核心库 SHALL NOT 直接访问钥匙串。连接与认证 MUST 各有超时（默认 30 秒），空闲超时默认 30 秒。
+系统 SHALL 支持以 `HostConfig` + `Credentials` 建立 SSH 会话。`Credentials` MUST 为 `Password(明文)` 或 `KeyFile { path, passphrase }` 之一，由调用方从本地凭据文件或当前会话输入取回后传入，核心库 SHALL NOT 直接访问平台凭据服务。连接与认证 MUST 各有超时（默认 30 秒），空闲超时默认 30 秒。
 
 系统 SHALL 优先从连接池中获取已有可用会话；池中无可用会话时，按原有流程新建连接。新建成功的会话 MUST 自动加入连接池以供后续复用。
 
@@ -25,6 +25,11 @@
 
 - **WHEN** 凭据错误
 - **THEN** 返回 `AuthFailed` 错误而非 panic 或挂起
+
+#### Scenario: 私钥缺少口令
+
+- **WHEN** 选择的私钥受口令保护且未提供口令
+- **THEN** 返回可区分的 `MissingPassphrase` 错误而非 `Timeout`
 
 #### Scenario: 复用已有会话
 
@@ -63,4 +68,3 @@
 
 - **WHEN** 客户端关闭 shell 会话
 - **THEN** shell 通道被关闭，底层 SSH 连接保持（以便连接池复用）
-

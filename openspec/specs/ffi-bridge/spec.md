@@ -6,7 +6,7 @@
 ## Requirements
 ### Requirement: 导出接口
 
-FFI 层 SHALL 导出：`init_store(config_dir)`、`list_hosts`、`save_host`、`delete_host`、`list_groups`、`save_group`、`delete_group`、`move_group`、`test_connection`、`sftp_list`、`sftp_upload`、`sftp_download`、`sftp_remove_file`、`sftp_remove_dir`、`sftp_create_dir`、`host_key_status(host, port)`、`accept_unknown_host_key(host, port, key)`。连接入口（`test_connection`、`sftp_*`）MUST 接受 `trust_on_first_use: bool` 参数：`false` 时对未知主机密钥使用 `Reject` 策略，`true` 时使用 `AcceptAndStore`。类型以 FFI 友好的 Record/Enum 暴露（`HostConfigRecord`、`AuthMethodEnum`、`RemoteFileRecord`、`GroupRecord`），错误以结构化 `PandaError` 暴露（见「错误分类」）。`save_host` / `save_group` 传入空 id 时 MUST 生成新 UUID。`HostConfigRecord` MUST 携带 `group_id: Option<String>` 表示主机归属分组（`None` 为根级）。`delete_group` MUST 级联清空被删分组（含子分组）下所有主机的 `group_id`，并一并删除子分组；`move_group` MUST 拒绝会造成环的移动（移入自身或后代分组）。
+FFI 层 SHALL 导出：`init_store(config_dir)`、`list_hosts`、`save_host`、`delete_host`、`list_groups`、`save_group`、`delete_group`、`move_group`、`save_credential`、`read_credential`、`delete_credential`、`set_credential_protection_key`、`credential_protection_enabled`、`test_connection`、`sftp_list`、`sftp_upload`、`sftp_download`、`sftp_remove_file`、`sftp_remove_dir`、`sftp_create_dir`、`host_key_status(host, port)`、`accept_unknown_host_key(host, port, key)`。连接入口（`test_connection`、`sftp_*`）MUST 接受 `trust_on_first_use: bool` 参数：`false` 时对未知主机密钥使用 `Reject` 策略，`true` 时使用 `AcceptAndStore`。类型以 FFI 友好的 Record/Enum 暴露（`HostConfigRecord`、`AuthMethodEnum`、`RemoteFileRecord`、`GroupRecord`），错误以结构化 `PandaError` 暴露（见「错误分类」）。`save_host` / `save_group` 传入空 id 时 MUST 生成新 UUID。`HostConfigRecord` MUST 携带 `group_id: Option<String>` 表示主机归属分组（`None` 为根级）。`delete_group` MUST 级联清空被删分组（含子分组）下所有主机的 `group_id`，并一并删除子分组；`move_group` MUST 拒绝会造成环的移动（移入自身或后代分组）。
 
 #### Scenario: Swift 绑定可生成
 
@@ -54,7 +54,7 @@ FFI 层 SHALL 导出：`init_store(config_dir)`、`list_hosts`、`save_host`、`
 
 ### Requirement: 凭据边界
 
-FFI 层 SHALL NOT 访问系统钥匙串；密码与私钥口令 MUST 由 Swift 侧从钥匙串取出后作为参数传入。骨架阶段每次 SSH/SFTP 调用新建连接，SHALL NOT 做连接池。
+FFI 层 SHALL 将凭据的保存、读取、删除和保护密钥状态管理委托给跨平台核心，且 SHALL NOT 访问系统钥匙串。密码、私钥口令与保护密钥 MUST 仅作为调用参数在内存中传递，MUST NOT 由 Swift 侧落盘。SSH/SFTP 调用使用瞬态密码或口令参数建立或复用连接。
 
 #### Scenario: 缺密码时报错
 
@@ -78,7 +78,7 @@ FFI 层 SHALL NOT 访问系统钥匙串；密码与私钥口令 MUST 由 Swift �
 
 ### Requirement: 错误分类
 
-FFI 错误 MUST 保留可编程区分的类别：`AuthFailed`、`Timeout`、`HostKeyMismatch { stored, presented }`、`UnknownHostKey { host, fingerprint }`、`NotInitialized`、`UnknownHost`、`MissingPassword`、`Core(String)`（兜底）。SHALL NOT 把可区分的 core 错误一律压平为字符串。
+FFI 错误 MUST 保留可编程区分的类别：`AuthFailed`、`Timeout`、`HostKeyMismatch { stored, presented }`、`UnknownHostKey { host, fingerprint }`、`NotInitialized`、`UnknownHost`、`MissingPassword`、`MissingPassphrase`、凭据保护错误及 `Core(String)`（兜底）。SHALL NOT 把可区分的 core 错误一律压平为字符串。
 
 #### Scenario: 认证失败可区分
 
@@ -145,4 +145,3 @@ FFI 层 SHALL 将 `panda-core` 的覆盖确认请求以结构化类型暴露给 
 - **GIVEN** 一个状态为 `Queued` 的任务
 - **WHEN** 调用取消
 - **THEN** 任务立即变为 `Cancelled`，不占用许可证
-
