@@ -271,6 +271,71 @@ final class TabBarLayoutProbeTests: XCTestCase {
         probe("stable all")
     }
 
+    func test切换终端标签后两个终端视图都保持在层级中() {
+        let model = AppModel.previewModel()
+        let store = WorkspaceStore.previewStore()
+        let terminals = store.tabs.filter { $0.kind == .terminal }
+        XCTAssertEqual(terminals.count, 2)
+        store.select(tabID: terminals[0].id)
+        model.presentTab(terminals[0].id)
+
+        let root = WorkspaceView()
+            .environmentObject(model)
+            .environmentObject(store)
+            .environmentObject(TransferStore())
+            .environmentObject(ToastCenter())
+        let hosting = NSHostingView(rootView: root)
+        let window = makeWindow()
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        pump(1.2)
+
+        store.select(tabID: terminals[1].id)
+        model.presentTab(terminals[1].id)
+        pump(0.2)
+
+        let terminalViews = dumpHierarchy(window.contentView!, depth: 0, match: "PandaTerminalView", verbose: false)
+        XCTAssertEqual(terminalViews.count, 2, "切换标签不得销毁非活动终端视图")
+
+        store.close(tabID: terminals[0].id)
+        pump(0.2)
+        let remainingTerminalViews = dumpHierarchy(window.contentView!, depth: 0, match: "PandaTerminalView", verbose: false)
+        XCTAssertEqual(remainingTerminalViews.count, 1, "关闭标签后才应释放对应终端视图")
+    }
+
+    func test工作区内容行承载溢出页签滚动容器() throws {
+        let model = AppModel.previewModel()
+        let store = WorkspaceStore(hostNameProvider: { _ in "box" })
+        store.tabBarOverflowMode = .scroll
+        for _ in 0..<20 {
+            store.openTerminal(hostID: "box")
+        }
+        model.presentTab(try XCTUnwrap(store.tabs.last?.id))
+
+        let root = WorkspaceView()
+            .environmentObject(model)
+            .environmentObject(store)
+            .environmentObject(TransferStore())
+            .environmentObject(ToastCenter())
+        let hosting = NSHostingView(rootView: root)
+        let window = makeWindow(width: 700)
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        pump(0.8)
+        hosting.layoutSubtreeIfNeeded()
+
+        let container = try XCTUnwrap(
+            findView(hosting, matching: "HeightConstrainedContainer"),
+            "页签栏必须在工作区内容区保留自定义滚动容器"
+        )
+        let scrollView = try XCTUnwrap(findScrollView(in: container))
+        XCTAssertGreaterThan(
+            scrollView.documentView?.frame.width ?? 0,
+            scrollView.contentView.bounds.width,
+            "窄窗口下内容页签栏必须保留可翻页的溢出宽度"
+        )
+    }
+
     // MARK: - 探针 2：WorkspaceView 整体 + 侧栏显隐切换后的页签栏高度
 
     func testProbeWorkspaceTabBarAcrossSidebarToggle() {

@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use panda_core::connection_pool;
 use panda_core::{
     execute_batch_download, execute_batch_upload, scan_local_sources, scan_remote_sources,
     BatchTransferOptions, ConflictResolution, Credentials, KnownHosts, SftpClient,
     UnknownHostKeyPolicy,
 };
-use panda_core::connection_pool;
 use uuid::Uuid;
 
 use crate::{load_host, runtime, stores, PandaError};
@@ -170,7 +170,10 @@ pub fn start_batch_download(
 /// Scan local sources and return the flattened list of items (files and directories)
 /// with their destination paths under `dest_dir`.
 #[uniffi::export]
-pub fn scan_local_batch(sources: Vec<String>, dest_dir: String) -> Result<Vec<BatchItemRecord>, PandaError> {
+pub fn scan_local_batch(
+    sources: Vec<String>,
+    dest_dir: String,
+) -> Result<Vec<BatchItemRecord>, PandaError> {
     runtime().block_on(async {
         let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
         let plan = scan_local_sources(&paths, &dest_dir, &Default::default()).await?;
@@ -324,30 +327,32 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
     let pending_conflict = task.pending_conflict.clone();
     let conflict_tx = task.conflict_tx.clone();
     let task_status = task.status.clone();
-    let conflict_cb = Arc::new(move |item: &panda_core::BatchItem, info: &panda_core::FileConflictInfo| {
-        // 记录冲突信息并进入等待状态，供 Swift 轮询呈现。
-        *pending_conflict.lock().unwrap() = Some(BatchConflictRecord {
-            item_source: item.source.clone(),
-            item_destination: item.destination.clone(),
-            source_size: info.source_size,
-            source_mtime: info.source_mtime,
-            target_size: info.target_size,
-            target_mtime: info.target_mtime,
-        });
-        *task_status.lock().unwrap() = BatchTransferStatusEnum::WaitingForConflict;
+    let conflict_cb = Arc::new(
+        move |item: &panda_core::BatchItem, info: &panda_core::FileConflictInfo| {
+            // 记录冲突信息并进入等待状态，供 Swift 轮询呈现。
+            *pending_conflict.lock().unwrap() = Some(BatchConflictRecord {
+                item_source: item.source.clone(),
+                item_destination: item.destination.clone(),
+                source_size: info.source_size,
+                source_mtime: info.source_mtime,
+                target_size: info.target_size,
+                target_mtime: info.target_mtime,
+            });
+            *task_status.lock().unwrap() = BatchTransferStatusEnum::WaitingForConflict;
 
-        // 创建一次性决策通道；batch_transfer_resolve_conflict / cancel 经此回传。
-        let rx = {
-            let (tx, rx) = std::sync::mpsc::channel();
-            *conflict_tx.lock().unwrap() = Some(tx);
-            rx
-        };
-        // 同步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
-        match rx.recv_timeout(Duration::from_secs(300)) {
-            Ok(ConflictResolution::Overwrite) => ConflictResolution::Overwrite,
-            Ok(ConflictResolution::Skip) | Err(_) => ConflictResolution::Skip,
-        }
-    });
+            // 创建一次性决策通道；batch_transfer_resolve_conflict / cancel 经此回传。
+            let rx = {
+                let (tx, rx) = std::sync::mpsc::channel();
+                *conflict_tx.lock().unwrap() = Some(tx);
+                rx
+            };
+            // 同步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
+            match rx.recv_timeout(Duration::from_secs(300)) {
+                Ok(ConflictResolution::Overwrite) => ConflictResolution::Overwrite,
+                Ok(ConflictResolution::Skip) | Err(_) => ConflictResolution::Skip,
+            }
+        },
+    );
 
     let scan_result = match task.direction {
         BatchTransferDirectionEnum::Upload => {
@@ -414,7 +419,8 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
                 *task.error.lock().unwrap() = Some(outcome.errors.join("; "));
             } else {
                 *task.status.lock().unwrap() = BatchTransferStatusEnum::Completed;
-                task.transferred.store(task.total_size.load(Ordering::Relaxed), Ordering::Relaxed);
+                task.transferred
+                    .store(task.total_size.load(Ordering::Relaxed), Ordering::Relaxed);
             }
         }
         Err(e) => {

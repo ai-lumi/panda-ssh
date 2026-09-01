@@ -23,16 +23,28 @@ async fn wait_if_paused(
     resume: Option<&Arc<Notify>>,
 ) -> Result<()> {
     loop {
-        if cancel.as_ref().map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        if cancel
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
             return Err(Error::Cancelled);
         }
-        if !pause.as_ref().map(|p| p.load(Ordering::Relaxed)).unwrap_or(false) {
+        if !pause
+            .as_ref()
+            .map(|p| p.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         if let Some(notify) = resume {
             // 先注册等待再检查,避免通知在 await 前丢失。
             let notified = notify.notified();
-            if !pause.as_ref().map(|p| p.load(Ordering::Relaxed)).unwrap_or(false) {
+            if !pause
+                .as_ref()
+                .map(|p| p.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
                 return Ok(());
             }
             notified.await;
@@ -163,7 +175,11 @@ impl SftpClient {
         remote: &str,
         progress: Option<&dyn Fn(u64, u64)>,
     ) -> Result<()> {
-        if let Some(parent) = Path::new(remote).parent().and_then(|p| p.to_str()).filter(|p| !p.is_empty()) {
+        if let Some(parent) = Path::new(remote)
+            .parent()
+            .and_then(|p| p.to_str())
+            .filter(|p| !p.is_empty())
+        {
             self.create_dir_all(parent).await?;
         }
         let total = tokio::fs::metadata(local).await?.len();
@@ -212,7 +228,11 @@ impl SftpClient {
         pause: Option<Arc<AtomicBool>>,
         resume: Option<Arc<Notify>>,
     ) -> Result<()> {
-        if let Some(parent) = Path::new(remote).parent().and_then(|p| p.to_str()).filter(|p| !p.is_empty()) {
+        if let Some(parent) = Path::new(remote)
+            .parent()
+            .and_then(|p| p.to_str())
+            .filter(|p| !p.is_empty())
+        {
             self.create_dir_all(parent).await?;
         }
         let total = tokio::fs::metadata(local).await?.len();
@@ -222,7 +242,11 @@ impl SftpClient {
         let mut buf = vec![0u8; COPY_BUF_SIZE];
         let mut sent = 0u64;
         loop {
-            if cancel.as_ref().map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            if cancel
+                .as_ref()
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
                 return Err(Error::Cancelled);
             }
             wait_if_paused(cancel.as_ref(), pause.as_ref(), resume.as_ref()).await?;
@@ -286,7 +310,11 @@ impl SftpClient {
         let mut buf = vec![0u8; COPY_BUF_SIZE];
         let mut received = 0u64;
         loop {
-            if cancel.as_ref().map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            if cancel
+                .as_ref()
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
                 return Err(Error::Cancelled);
             }
             wait_if_paused(cancel.as_ref(), pause.as_ref(), resume.as_ref()).await?;
@@ -315,7 +343,11 @@ impl SftpClient {
     /// 递归删除远端文件或目录。文件直接删除；目录先递归清空内容再删除自身。
     pub async fn remove_all(&self, path: &str) -> Result<()> {
         let normalized = path.trim_end_matches('/');
-        let path = if normalized.is_empty() { "/" } else { normalized };
+        let path = if normalized.is_empty() {
+            "/"
+        } else {
+            normalized
+        };
         self.remove_all_inner(path).await
     }
 

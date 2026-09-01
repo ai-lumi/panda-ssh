@@ -98,8 +98,8 @@ struct WorkspaceTabBar: View {
         ForEach(workspace.tabs) { tab in
             WorkspaceTabButton(
                 tab: tab,
-                dotColor: dotColor(for: tab.hostID),
-                statusLabel: statusLabel(for: tab.hostID),
+                dotColor: dotColor(for: tab.id),
+                statusLabel: statusLabel(for: tab.id),
                 isActive: model.workspacePresentation == .tab(tabID: tab.id),
                 onSelect: {
                     workspace.select(tabID: tab.id)
@@ -155,23 +155,21 @@ struct WorkspaceTabBar: View {
         }
     }
 
-    private func dotColor(for hostID: String) -> Color {
-        guard let host = model.hosts.first(where: { $0.id == hostID }) else {
-            return Color(.gray).opacity(0.6)
-        }
-        switch host.demo {
-        case .mismatch: return .red
-        case .unknown: return .yellow
-        default: return host.fingerprint != nil ? .green : Color(.gray).opacity(0.6)
+    private func dotColor(for tabID: UUID) -> Color {
+        switch workspace.connectionStatus(forTabID: tabID) {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .failed: return .red
+        case .inactive: return Color(.gray).opacity(0.6)
         }
     }
 
-    private func statusLabel(for hostID: String) -> String {
-        guard let host = model.hosts.first(where: { $0.id == hostID }) else { return "主机不可用" }
-        switch host.demo {
-        case .mismatch: return "主机密钥不匹配"
-        case .unknown: return "主机密钥未验证"
-        default: return host.fingerprint != nil ? "主机密钥已记录" : "主机密钥未记录"
+    private func statusLabel(for tabID: UUID) -> String {
+        switch workspace.connectionStatus(forTabID: tabID) {
+        case .connected: return "SSH 会话已连接"
+        case .connecting: return "正在建立 SSH 会话"
+        case .failed: return "SSH 会话已断开或连接失败"
+        case .inactive: return "SSH 会话未建立"
         }
     }
 }

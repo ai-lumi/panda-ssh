@@ -1,8 +1,39 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 设置页:macOS 走原生 Settings Scene(cmd+,),iPadOS 走侧栏入口 + sheet。
-/// macOS 端使用 TabView 分标签，与参考图一致：通用、外观、连接、终端、标签页、高级。
+/// 设置页标签目录。两个平台必须共享标签、顺序和视觉标识。
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case general
+    case appearance
+    case connection
+    case terminal
+    case advanced
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "通用"
+        case .appearance: "外观"
+        case .connection: "连接"
+        case .terminal: "终端"
+        case .advanced: "高级"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: "gear"
+        case .appearance: "paintbrush"
+        case .connection: "link"
+        case .terminal: "terminal"
+        case .advanced: "gearshape.2"
+        }
+    }
+}
+
+/// 设置页：macOS 走原生 Settings Scene（cmd+,），iPadOS 走侧栏入口。
+/// 两端共享同一组标签和设置内容；仅导航容器与平台服务有所不同。
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var workspace: WorkspaceStore
@@ -13,6 +44,7 @@ struct SettingsView: View {
     @State private var newProtectionKey = ""
     @State private var credentialProtectionError: String?
     @State private var credentialProtectionEnabled = false
+    @State private var selectedTab: SettingsTab = .general
 
     var body: some View {
         #if os(macOS)
@@ -24,67 +56,60 @@ struct SettingsView: View {
 
     #if os(macOS)
     private var macOSBody: some View {
-        TabView {
-            generalTab
-                .tabItem {
-                    Label("通用", systemImage: "gear")
-                }
-            appearanceTab
-                .tabItem {
-                    Label("外观", systemImage: "paintbrush")
-                }
-            placeholderTab(title: "连接", systemImage: "link", message: "连接设置即将上线")
-                .tabItem {
-                    Label("连接", systemImage: "link")
-                }
-            placeholderTab(title: "终端", systemImage: "terminal", message: "终端设置即将上线")
-                .tabItem {
-                    Label("终端", systemImage: "terminal")
-                }
-            placeholderTab(title: "高级", systemImage: "gearshape.2", message: "高级设置即将上线")
-                .tabItem {
-                    Label("高级", systemImage: "gearshape.2")
-                }
-        }
+        settingsTabsWithAlerts
         .frame(width: 560, height: 420)
-        .alert("导入失败", isPresented: .constant(importError != nil)) {
-            Button("确定") { importError = nil }
-        } message: {
-            Text(importError ?? "")
-        }
-        .alert("导入成功", isPresented: .constant(importSuccess != nil)) {
-            Button("确定") { importSuccess = nil }
-        } message: {
-            Text(importSuccess ?? "")
-        }
-        .alert("密码保护操作失败", isPresented: .constant(credentialProtectionError != nil)) {
-            Button("确定") { credentialProtectionError = nil }
-        } message: { Text(credentialProtectionError ?? "") }
-        .onAppear { credentialProtectionEnabled = (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false }
     }
     #endif
 
     private var iOSBody: some View {
-        Form {
-            configSection
-            aboutSection
-        }
-        .formStyle(.grouped)
+        settingsTabsWithAlerts
         .navigationTitle("设置")
-        .alert("导入失败", isPresented: .constant(importError != nil)) {
-            Button("确定") { importError = nil }
-        } message: {
-            Text(importError ?? "")
+    }
+
+    private var settingsTabs: some View {
+        TabView(selection: $selectedTab) {
+            ForEach(SettingsTab.allCases) { tab in
+                tabContent(for: tab)
+                    .tabItem {
+                        Label(tab.title, systemImage: tab.systemImage)
+                    }
+                    .tag(tab)
+            }
         }
-        .alert("导入成功", isPresented: .constant(importSuccess != nil)) {
-            Button("确定") { importSuccess = nil }
-        } message: {
-            Text(importSuccess ?? "")
+    }
+
+    private var settingsTabsWithAlerts: some View {
+        settingsTabs
+            .alert("导入失败", isPresented: .constant(importError != nil)) {
+                Button("确定") { importError = nil }
+            } message: {
+                Text(importError ?? "")
+            }
+            .alert("导入成功", isPresented: .constant(importSuccess != nil)) {
+                Button("确定") { importSuccess = nil }
+            } message: {
+                Text(importSuccess ?? "")
+            }
+            .alert("密码保护操作失败", isPresented: .constant(credentialProtectionError != nil)) {
+                Button("确定") { credentialProtectionError = nil }
+            } message: {
+                Text(credentialProtectionError ?? "")
+            }
+            .onAppear {
+                credentialProtectionEnabled = (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false
+            }
+    }
+
+    @ViewBuilder
+    private func tabContent(for tab: SettingsTab) -> some View {
+        switch tab {
+        case .general:
+            generalTab
+        case .appearance:
+            appearanceTab
+        case .connection, .terminal, .advanced:
+            placeholderTab(title: tab.title, systemImage: tab.systemImage, message: "\(tab.title)设置即将上线")
         }
-        .alert("密码保护操作失败", isPresented: .constant(credentialProtectionError != nil)) {
-            Button("确定") { credentialProtectionError = nil }
-        } message: { Text(credentialProtectionError ?? "") }
-        .onAppear { credentialProtectionEnabled = (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false }
     }
 
     // MARK: - 通用标签

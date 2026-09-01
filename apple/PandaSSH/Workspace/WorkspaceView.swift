@@ -48,50 +48,42 @@ struct WorkspaceView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
         } detail: {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                if !workspace.tabs.isEmpty {
+                    macOSTabBar
+                    Divider()
+                }
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         // 「添加主机 / 新建分组」入口在侧栏顶部工具条(见 SidebarView.sidebarTopBar);
         // 弹层状态在 AppModel.sidebarSheet,sheet 由 HostListView 统一挂载。
-        // 批量关闭含已连接终端的聚合确认(item 2.5)。
-        .confirmationDialog(
-            workspace.pendingBatchClose.map { "关闭 \($0.connectedTerminalCount) 个已连接终端会话，是否继续？" } ?? "",
+        // 批量关闭含已连接终端时，使用系统警告框明确呈现断开后果。
+        .alert(
+            "关闭已连接终端？",
             isPresented: Binding(
                 get: { workspace.pendingBatchClose != nil },
                 set: { if !$0 { workspace.cancelBatchClose() } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
-            Button("关闭", role: .destructive) { workspace.confirmBatchClose() }
+            Button("关闭并断开", role: .destructive) { workspace.confirmBatchClose() }
             Button("取消", role: .cancel) { workspace.cancelBatchClose() }
+        } message: {
+            Text("将关闭并断开 \(workspace.pendingBatchClose?.connectedTerminalCount ?? 0) 个已连接终端会话。")
         }
-        // 单个已连接终端标签关闭二次确认(item 3)。
-        .confirmationDialog(
-            "关闭终端将断开会话，是否继续？",
+        // 单个已连接终端标签关闭时，使用系统警告框明确呈现断开后果。
+        .alert(
+            "关闭终端？",
             isPresented: Binding(
                 get: { workspace.pendingCloseTabID != nil },
                 set: { if !$0 { workspace.cancelClose() } }
-                ),
-            titleVisibility: .visible
+            )
         ) {
-            Button("关闭", role: .destructive) { workspace.confirmClose() }
+            Button("关闭并断开", role: .destructive) { workspace.confirmClose() }
             Button("取消", role: .cancel) { workspace.cancelClose() }
-        }
-        .toolbar {
-            // 整条可滚动页签栏是唯一 principal item，避免系统把单个页签
-            // 拆入溢出菜单，也不再在内容区重复绘制第二行页签。
-            if !workspace.tabs.isEmpty {
-                if #available(macOS 26.0, *) {
-                    ToolbarItem(placement: .principal) {
-                        macOSTabBar
-                    }
-                    .sharedBackgroundVisibility(.hidden)
-                } else {
-                    ToolbarItem(placement: .principal) {
-                        macOSTabBar
-                    }
-                }
-            }
+        } message: {
+            Text("关闭后将断开与「\(pendingCloseTabTitle)」的 SSH 连接。")
         }
     }
 
@@ -99,43 +91,54 @@ struct WorkspaceView: View {
         WorkspaceTabBar()
             .environmentObject(model)
             .environmentObject(workspace)
-            .frame(minWidth: 120, idealWidth: 560, maxWidth: WorkspaceChromePolicy.maximumPrincipalWidth)
+            .frame(maxWidth: .infinity)
     }
     #endif
 
     #if os(iOS)
     private var iOSBody: some View {
         VStack(spacing: 0) {
-            // 批量关闭含已连接终端的聚合确认(item 2.5)挂在标签栏上。
+            // 批量关闭含已连接终端的聚合确认挂在标签栏上。
             iosTabBar
-                .confirmationDialog(
-                    workspace.pendingBatchClose.map { "关闭 \($0.connectedTerminalCount) 个已连接终端会话，是否继续？" } ?? "",
+                .alert(
+                    "关闭已连接终端？",
                     isPresented: Binding(
                         get: { workspace.pendingBatchClose != nil },
                         set: { if !$0 { workspace.cancelBatchClose() } }
-                    ),
-                    titleVisibility: .visible
+                    )
                 ) {
-                    Button("关闭", role: .destructive) { workspace.confirmBatchClose() }
+                    Button("关闭并断开", role: .destructive) { workspace.confirmBatchClose() }
                     Button("取消", role: .cancel) { workspace.cancelBatchClose() }
+                } message: {
+                    Text("将关闭并断开 \(workspace.pendingBatchClose?.connectedTerminalCount ?? 0) 个已连接终端会话。")
                 }
             Divider()
-            // 单个已连接终端标签关闭二次确认(item 3)挂在内容区上。
+            // 单个已连接终端标签关闭二次确认挂在内容区上。
             content
-                .confirmationDialog(
-                    "关闭终端将断开会话，是否继续？",
+                .alert(
+                    "关闭终端？",
                     isPresented: Binding(
                         get: { workspace.pendingCloseTabID != nil },
                         set: { if !$0 { workspace.cancelClose() } }
-                    ),
-                    titleVisibility: .visible
+                    )
                 ) {
-                    Button("关闭", role: .destructive) { workspace.confirmClose() }
+                    Button("关闭并断开", role: .destructive) { workspace.confirmClose() }
                     Button("取消", role: .cancel) { workspace.cancelClose() }
+                } message: {
+                    Text("关闭后将断开与「\(pendingCloseTabTitle)」的 SSH 连接。")
                 }
         }
     }
     #endif
+
+    /// 待关闭标签在弹窗中使用当前标题；状态在显示期间失效时安全回退。
+    private var pendingCloseTabTitle: String {
+        guard let id = workspace.pendingCloseTabID,
+              let tab = workspace.tabs.first(where: { $0.id == id }) else {
+            return "此主机"
+        }
+        return tab.title
+    }
 
     /// 横向滚动的标签栏;标签过多时可滑动,iPadOS 紧凑宽度下不拥挤。
     private var iosTabBar: some View {
@@ -205,18 +208,32 @@ struct WorkspaceView: View {
 
     @ViewBuilder
     private var hostsContent: some View {
+        let terminalPolicy = WorkspaceTerminalTabPolicy(
+            tabs: workspace.tabs,
+            activeTabID: presentedTabID
+        )
+        ZStack {
+            nonTerminalHostsContent
+            terminalTabs(policy: terminalPolicy)
+        }
+    }
+
+    private var presentedTabID: UUID? {
+        guard case .tab(let tabID) = model.workspacePresentation else { return nil }
+        return tabID
+    }
+
+    /// 除终端外的工作区内容。终端由 `terminalTabs` 常驻承载，确保其
+    /// `@StateObject` 不会随着活动标签变化而析构。
+    @ViewBuilder
+    private var nonTerminalHostsContent: some View {
         switch model.workspacePresentation {
         case .tab(let tabID):
             if let active = workspace.tabs.first(where: { $0.id == tabID }) {
             if let host = model.hosts.first(where: { $0.id == active.hostID }) {
-                // 终端/SFTP 标签内部按 preconnectAction 走连接门控(TOFU/告警/密码)
-                // .id(active.id) 强制 SwiftUI 按标签身份管理视图生命周期:
-                // 切换同类型标签时销毁旧视图(释放 Metal 渲染器/SwiftTerm 缓冲区/SSH 连接),
-                // 创建新视图(重新连接),避免资源堆积导致内存持续增长。
                 switch active.kind {
                 case .terminal:
-                    TerminalTabView(tab: active, host: host)
-                        .id(active.id)
+                    Color.clear
                 case .sftp:
                     SftpTabView(tab: active, host: host, transfers: transfers)
                         .id(active.id)
@@ -239,6 +256,20 @@ struct WorkspaceView: View {
             }
         case .empty:
             emptyStateView
+        }
+    }
+
+    @ViewBuilder
+    private func terminalTabs(policy: WorkspaceTerminalTabPolicy) -> some View {
+        ForEach(policy.retainedTabs) { tab in
+            if let host = model.hosts.first(where: { $0.id == tab.hostID }) {
+                let isVisible = policy.isVisible(tab.id)
+                TerminalTabView(tab: tab, host: host, isActive: isVisible)
+                    .opacity(isVisible ? 1 : 0)
+                    .allowsHitTesting(isVisible)
+                    .accessibilityHidden(!isVisible)
+                    .zIndex(isVisible ? 1 : 0)
+            }
         }
     }
 
@@ -303,6 +334,7 @@ struct WorkspaceView: View {
 
 /// 单个标签:浏览器风格胶囊标签,hover 显关闭按钮,选中态有背景。
 struct WorkspaceTabItemView: View {
+    @EnvironmentObject private var workspace: WorkspaceStore
     let tab: WorkspaceTab
     let isActive: Bool
     let onSelect: () -> Void
@@ -323,6 +355,10 @@ struct WorkspaceTabItemView: View {
         HStack(spacing: 6) {
             Button(action: onSelect) {
                 HStack(spacing: 6) {
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
                     Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -336,7 +372,7 @@ struct WorkspaceTabItemView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(tab.title)
-            .accessibilityValue(tab.kind == .terminal ? "终端会话" : "SFTP 会话")
+            .accessibilityValue(statusLabel)
             .accessibilityHint("切换到此标签页")
             .accessibilityAddTraits(isActive ? .isSelected : [])
             Button(action: onClose) {
@@ -363,6 +399,24 @@ struct WorkspaceTabItemView: View {
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onHover { hovering = $0 }
         .accessibilityElement(children: .contain)
+    }
+
+    private var dotColor: Color {
+        switch workspace.connectionStatus(forTabID: tab.id) {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .failed: return .red
+        case .inactive: return Color(.gray).opacity(0.6)
+        }
+    }
+
+    private var statusLabel: String {
+        switch workspace.connectionStatus(forTabID: tab.id) {
+        case .connected: return "SSH 会话已连接"
+        case .connecting: return "正在建立 SSH 会话"
+        case .failed: return "SSH 会话已断开或连接失败"
+        case .inactive: return "SSH 会话未建立"
+        }
     }
 }
 

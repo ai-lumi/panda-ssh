@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use panda_core::{
-    AuthMethod, ConfigStore, CredentialStore, Credentials, Group, GroupStore, HostConfig, KnownHosts, SftpClient,
-    ShellSession, SshSession, TomlConfigStore, TomlGroupStore, UnknownHostKeyPolicy,
+    AuthMethod, ConfigStore, CredentialStore, Credentials, Group, GroupStore, HostConfig,
+    KnownHosts, SftpClient, ShellSession, SshSession, TomlConfigStore, TomlGroupStore,
+    UnknownHostKeyPolicy,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -100,7 +101,9 @@ impl From<panda_core::Error> for PandaError {
                 fingerprint,
             },
             panda_core::Error::Cancelled => PandaError::Cancelled,
-            panda_core::Error::CredentialProtectionKeyRequired => PandaError::CredentialProtectionKeyRequired,
+            panda_core::Error::CredentialProtectionKeyRequired => {
+                PandaError::CredentialProtectionKeyRequired
+            }
             panda_core::Error::CredentialUnlockFailed => PandaError::CredentialUnlockFailed,
             panda_core::Error::InvalidCredentialFile => PandaError::InvalidCredentialFile,
             other => PandaError::Core(other.to_string()),
@@ -121,7 +124,9 @@ impl From<std::io::Error> for PandaError {
 /// Mirror of `panda_core::AuthMethod` with FFI-friendly field types.
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum AuthMethodEnum {
-    Password { password_ref: Option<String> },
+    Password {
+        password_ref: Option<String>,
+    },
     PublicKey {
         key_path: String,
         passphrase_ref: Option<String>,
@@ -194,7 +199,10 @@ pub enum KnownHostStatusEnum {
     Unknown,
     /// A record exists; carries its SHA256 colon-separated fingerprint and
     /// key type (e.g. `ssh-ed25519`).
-    Known { fingerprint: String, key_type: String },
+    Known {
+        fingerprint: String,
+        key_type: String,
+    },
 }
 
 impl From<AuthMethodEnum> for AuthMethod {
@@ -298,7 +306,11 @@ struct Stores {
 static STORES: Mutex<Option<Arc<Stores>>> = Mutex::new(None);
 
 pub(crate) fn stores() -> Result<Arc<Stores>, PandaError> {
-    STORES.lock().unwrap().clone().ok_or(PandaError::NotInitialized)
+    STORES
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or(PandaError::NotInitialized)
 }
 
 static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, ShellSession>>> = OnceLock::new();
@@ -370,7 +382,11 @@ pub fn delete_host(id: String) -> Result<(), PandaError> {
     Ok(())
 }
 
-fn restore_credential(store: &CredentialStore, reference: &str, secret: Option<String>) -> Result<(), panda_core::Error> {
+fn restore_credential(
+    store: &CredentialStore,
+    reference: &str,
+    secret: Option<String>,
+) -> Result<(), panda_core::Error> {
     match secret {
         Some(secret) => store.save(reference.to_owned(), secret),
         None => store.delete(reference),
@@ -395,8 +411,13 @@ pub fn delete_credential(reference: String) -> Result<(), PandaError> {
 
 /// 用当前保护密钥解锁凭据文件，并用新密钥重写；新密钥为空时迁回明文格式。
 #[uniffi::export]
-pub fn set_credential_protection_key(current_key: Option<String>, new_key: Option<String>) -> Result<(), PandaError> {
-    Ok(stores()?.credentials.set_protection_key(current_key, new_key)?)
+pub fn set_credential_protection_key(
+    current_key: Option<String>,
+    new_key: Option<String>,
+) -> Result<(), PandaError> {
+    Ok(stores()?
+        .credentials
+        .set_protection_key(current_key, new_key)?)
 }
 
 #[uniffi::export]
@@ -460,7 +481,11 @@ pub fn save_group(group: GroupRecord) -> Result<(), PandaError> {
 #[uniffi::export]
 pub fn delete_group(id: String) -> Result<(), PandaError> {
     let stores = stores()?;
-    Ok(panda_core::delete_group_cascade(&stores.groups, &stores.config, &id)?)
+    Ok(panda_core::delete_group_cascade(
+        &stores.groups,
+        &stores.config,
+        &id,
+    )?)
 }
 
 /// Change a group's parent (`None` moves it to root level). Refuses moves
@@ -520,13 +545,7 @@ async fn get_or_create_session(
         UnknownHostKeyPolicy::Reject
     };
     Ok(panda_core::connection_pool::global_pool()
-        .get_or_create(
-            host_id.to_string(),
-            cfg,
-            creds,
-            &mut known_hosts,
-            policy,
-        )
+        .get_or_create(host_id.to_string(), cfg, creds, &mut known_hosts, policy)
         .await?)
 }
 
@@ -538,7 +557,8 @@ async fn open_sftp_session(
     passphrase: Option<String>,
     trust_on_first_use: bool,
 ) -> Result<(Arc<SshSession>, SftpClient), PandaError> {
-    let session = get_or_create_session(host_id, cfg, password, passphrase, trust_on_first_use).await?;
+    let session =
+        get_or_create_session(host_id, cfg, password, passphrase, trust_on_first_use).await?;
     let sftp = SftpClient::new(&session).await?;
     Ok((session, sftp))
 }
@@ -567,7 +587,8 @@ pub fn test_connection(
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let session = get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let session =
+            get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         let output = session.exec("true").await?;
         Ok(format!(
             "connected to {}@{}:{} (exit status: {:?})",
@@ -784,7 +805,8 @@ pub fn shell_open(
 ) -> Result<u64, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let session = get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let session =
+            get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
         let shell = ShellSession::open(session).await?;
         let id = next_shell_id();
         shell_sessions().lock().unwrap().insert(id, shell);
@@ -961,7 +983,9 @@ pub fn start_transfer(
     // 上传时若 Swift 未提供大小(传 0),则从本地文件系统计算;
     // 下载时使用 Swift 从 SFTP 列表中已获取的远端大小。
     let size = match direction {
-        TransferDirectionEnum::Upload if size == 0 => total_size(PathBuf::from(&local_path).as_path()),
+        TransferDirectionEnum::Upload if size == 0 => {
+            total_size(PathBuf::from(&local_path).as_path())
+        }
         _ => size,
     };
     let id = Uuid::new_v4();
@@ -1063,7 +1087,8 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
         }
         Err(e) => {
             if task.cancel.load(Ordering::Relaxed) {
-                *task.status.lock().unwrap_or_else(|e| e.into_inner()) = TransferStatusEnum::Cancelled;
+                *task.status.lock().unwrap_or_else(|e| e.into_inner()) =
+                    TransferStatusEnum::Cancelled;
             } else {
                 *task.status.lock().unwrap_or_else(|e| e.into_inner()) = TransferStatusEnum::Failed;
                 *task.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
@@ -1164,7 +1189,9 @@ async fn run_download(
 pub fn transfer_status(task_id: String) -> Result<TransferStatusRecord, PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
     let tasks = transfer_tasks().lock().unwrap();
-    let task = tasks.get(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
+    let task = tasks
+        .get(&id)
+        .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     Ok(task.snapshot())
 }
 
@@ -1183,11 +1210,16 @@ pub fn transfer_list() -> Result<Vec<TransferStatusRecord>, PandaError> {
 pub fn transfer_cancel(task_id: String) -> Result<(), PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
     let mut tasks = transfer_tasks().lock().unwrap();
-    let task = tasks.get_mut(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
+    let task = tasks
+        .get_mut(&id)
+        .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     task.cancel.store(true, Ordering::Relaxed);
     task.resume_notify.notify_waiters();
     let status = *task.status.lock().unwrap();
-    if matches!(status, TransferStatusEnum::Queued | TransferStatusEnum::Paused) {
+    if matches!(
+        status,
+        TransferStatusEnum::Queued | TransferStatusEnum::Paused
+    ) {
         *task.status.lock().unwrap() = TransferStatusEnum::Cancelled;
         task.bump_version();
     }
@@ -1242,7 +1274,9 @@ pub fn transfer_retry(task_id: String) -> Result<String, PandaError> {
 pub fn transfer_pause(task_id: String) -> Result<(), PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
     let mut tasks = transfer_tasks().lock().unwrap();
-    let task = tasks.get_mut(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
+    let task = tasks
+        .get_mut(&id)
+        .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     let status = *task.status.lock().unwrap();
     if matches!(
         status,
@@ -1251,7 +1285,10 @@ pub fn transfer_pause(task_id: String) -> Result<(), PandaError> {
         return Err(PandaError::Core("task is already terminal".to_string()));
     }
     task.paused.store(true, Ordering::Relaxed);
-    if matches!(status, TransferStatusEnum::Queued | TransferStatusEnum::Running) {
+    if matches!(
+        status,
+        TransferStatusEnum::Queued | TransferStatusEnum::Running
+    ) {
         *task.status.lock().unwrap() = TransferStatusEnum::Paused;
         task.bump_version();
     }
@@ -1264,7 +1301,9 @@ pub fn transfer_pause(task_id: String) -> Result<(), PandaError> {
 pub fn transfer_resume(task_id: String) -> Result<(), PandaError> {
     let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
     let mut tasks = transfer_tasks().lock().unwrap();
-    let task = tasks.get_mut(&id).ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
+    let task = tasks
+        .get_mut(&id)
+        .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     task.paused.store(false, Ordering::Relaxed);
     let status = *task.status.lock().unwrap();
     if status == TransferStatusEnum::Paused {
@@ -1326,7 +1365,8 @@ fn snippet_store() -> Result<panda_core::SnippetStore, PandaError> {
 pub fn init_snippets(dir: String) -> Result<(), PandaError> {
     let path = PathBuf::from(dir);
     std::fs::create_dir_all(&path)?;
-    *SNIPPET_STORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(panda_core::SnippetStore::new(path));
+    *SNIPPET_STORE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(panda_core::SnippetStore::new(path));
     Ok(())
 }
 
@@ -1371,7 +1411,13 @@ mod tests {
             notes: None,
             group_id: None,
         };
-        assert!(matches!(credentials_for(&cfg, None, None), Err(PandaError::MissingPassword(_))));
-        assert!(matches!(PandaError::from(panda_core::Error::AuthFailed), PandaError::AuthFailed));
+        assert!(matches!(
+            credentials_for(&cfg, None, None),
+            Err(PandaError::MissingPassword(_))
+        ));
+        assert!(matches!(
+            PandaError::from(panda_core::Error::AuthFailed),
+            PandaError::AuthFailed
+        ));
     }
 }

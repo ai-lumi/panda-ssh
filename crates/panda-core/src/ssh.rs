@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client::{self, AuthResult, Handle};
-use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect, Pty};
 use tokio::sync::mpsc;
 
 use crate::config::HostConfig;
-use crate::hostkey::{HostKeyStatus, KnownHosts, fingerprint_sha256};
+use crate::hostkey::{fingerprint_sha256, HostKeyStatus, KnownHosts};
 use crate::{Error, Result};
 
 /// Default timeout for connect + auth, and for connection inactivity.
@@ -38,15 +38,15 @@ const DEFAULT_ROWS: u32 = 24;
 /// when encoding the SSH packet, and including it here would cause the
 /// declared length to mismatch the actual encoded bytes.
 static STANDARD_TERMINAL_MODES: &[(Pty, u32)] = &[
-    (Pty::ISIG, 1),      // enable signal generation (Ctrl-C → SIGINT)
-    (Pty::ICANON, 1),    // canonical / line-buffered mode
-    (Pty::ECHO, 1),      // echo input characters
-    (Pty::ECHOE, 1),     // echo erase character
-    (Pty::ECHOK, 1),     // echo kill character
-    (Pty::IEXTEN, 1),    // extended functions
-    (Pty::OPOST, 1),     // output processing
-    (Pty::ONLCR, 1),     // NL → CR+NL
-    (Pty::CS8, 1),       // 8-bit data
+    (Pty::ISIG, 1),   // enable signal generation (Ctrl-C → SIGINT)
+    (Pty::ICANON, 1), // canonical / line-buffered mode
+    (Pty::ECHO, 1),   // echo input characters
+    (Pty::ECHOE, 1),  // echo erase character
+    (Pty::ECHOK, 1),  // echo kill character
+    (Pty::IEXTEN, 1), // extended functions
+    (Pty::OPOST, 1),  // output processing
+    (Pty::ONLCR, 1),  // NL → CR+NL
+    (Pty::CS8, 1),    // 8-bit data
 ];
 
 /// Secret material for one connection attempt.
@@ -140,8 +140,8 @@ impl client::Handler for ClientHandler {
                     }
                 }
                 UnknownHostKeyPolicy::Reject => {
-                    let fingerprint = fingerprint_sha256(&key_str)
-                        .unwrap_or_else(|_| key_str.clone());
+                    let fingerprint =
+                        fingerprint_sha256(&key_str).unwrap_or_else(|_| key_str.clone());
                     self.record(|f| f.unknown = Some((key_str.clone(), fingerprint)));
                     Ok(false)
                 }
@@ -184,16 +184,14 @@ impl SshSession {
         };
 
         let addr = (cfg.host.as_str(), cfg.port);
-        let mut handle = match tokio::time::timeout(
-            DEFAULT_TIMEOUT,
-            client::connect(config, addr, handler),
-        )
-        .await
-        {
-            Ok(Ok(handle)) => handle,
-            Ok(Err(e)) => return Err(Self::map_connect_error(e, cfg, &failure)),
-            Err(_) => return Err(Error::Timeout),
-        };
+        let mut handle =
+            match tokio::time::timeout(DEFAULT_TIMEOUT, client::connect(config, addr, handler))
+                .await
+            {
+                Ok(Ok(handle)) => handle,
+                Ok(Err(e)) => return Err(Self::map_connect_error(e, cfg, &failure)),
+                Err(_) => return Err(Error::Timeout),
+            };
 
         tokio::time::timeout(DEFAULT_TIMEOUT, Self::authenticate(&mut handle, cfg, creds))
             .await
@@ -335,7 +333,9 @@ pub struct ShellSession {
     resize_tx: mpsc::Sender<(u32, u32)>,
     reader: Option<tokio::task::JoinHandle<()>>,
     output: Arc<Mutex<Vec<u8>>>,
-    closed: AtomicBool,
+    /// 本地关闭或远端 shell 关闭后设为 true。读取接口会先排空已有输出，
+    /// 随后才报告会话关闭，避免吞掉远端退出前的最后一批字节。
+    closed: Arc<AtomicBool>,
 }
 
 impl ShellSession {
@@ -373,6 +373,8 @@ impl ShellSession {
         let (writer, mut rx) = mpsc::channel::<Vec<u8>>(64);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(8);
         let output_reader = output.clone();
+        let closed = Arc::new(AtomicBool::new(false));
+        let reader_closed = Arc::clone(&closed);
         let reader = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -402,6 +404,7 @@ impl ShellSession {
                     }
                 }
             }
+            reader_closed.store(true, Ordering::SeqCst);
             let _ = channel.close().await;
         });
 
@@ -411,7 +414,7 @@ impl ShellSession {
             resize_tx,
             reader: Some(reader),
             output,
-            closed: AtomicBool::new(false),
+            closed,
         })
     }
 
@@ -442,12 +445,15 @@ impl ShellSession {
 
     /// Read up to `max` bytes that the remote shell has produced.
     pub fn read(&self, max: usize) -> Result<Vec<u8>> {
+        let mut buf = self.output.lock().unwrap();
+        let take = max.min(buf.len());
+        if take > 0 {
+            return Ok(buf.drain(..take).collect());
+        }
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::ShellSessionClosed);
         }
-        let mut buf = self.output.lock().unwrap();
-        let take = max.min(buf.len());
-        Ok(buf.drain(..take).collect())
+        Ok(Vec::new())
     }
 
     /// Close the shell channel and wait for the reader to finish.
@@ -533,7 +539,10 @@ mod tests {
     #[test]
     fn encrypted_private_key_with_passphrase_keeps_key_error() {
         let error = SshSession::map_private_key_error(russh::keys::Error::KeyIsEncrypted, true);
-        assert!(matches!(error, Error::Key(russh::keys::Error::KeyIsEncrypted)));
+        assert!(matches!(
+            error,
+            Error::Key(russh::keys::Error::KeyIsEncrypted)
+        ));
     }
 
     #[test]

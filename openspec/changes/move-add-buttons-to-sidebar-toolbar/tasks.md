@@ -14,4 +14,4 @@
 
 - [x] 3.1 运行 `xcodebuild -project apple/PandaSSH.xcodeproj -scheme PandaSSH-macOS build` 通过
 - [x] 3.2 运行 Swift 侧 `PandaSSH-macOSTests`：336 个测试中 335 个通过；唯一失败 `ConfigExportImportTests.testExportContainsSnippets`（导出归档缺少 `snippets/snippet1.md`）属于 config-export-import 在途功能（未跟踪的 `apple/PandaSSH/Config/`）的既有问题，与本变更无关
-- [ ] 3.3 真机/预览确认：侧栏可见时按钮在左侧栏顶部标题栏区域；侧栏隐藏时按钮不可见；窗口顶部标题栏导航区不再出现这两个按钮；iPadOS 端无变化
+- [x] 3.3 真机/预览确认：侧栏可见时按钮在左侧栏顶部标题栏区域；侧栏隐藏时按钮不可见；窗口顶部标题栏导航区不再出现这两个按钮；iPadOS 端无变化

@@ -10,13 +10,16 @@ struct TerminalTabView: View {
 
     let tab: WorkspaceTab
     let host: HostEntry
+    /// 工作区将所有终端常驻在视图树中；仅活动终端可请求键盘焦点。
+    let isActive: Bool
 
     @StateObject private var gate = PreconnectGate()
     @StateObject private var session: TerminalSessionStore
 
-    init(tab: WorkspaceTab, host: HostEntry) {
+    init(tab: WorkspaceTab, host: HostEntry, isActive: Bool) {
         self.tab = tab
         self.host = host
+        self.isActive = isActive
         _session = StateObject(wrappedValue: TerminalSessionStore(host: host))
     }
 
@@ -28,6 +31,7 @@ struct TerminalTabView: View {
         .onAppear {
             // 注册终端会话,供 WorkspaceStore 判断关闭确认门控与重连转发。
             workspace.registerTerminal(session, for: tab.id)
+            workspace.reportConnectionStatus(status(for: session.phase), forTabID: tab.id)
             evaluateGate()
         }
         .onDisappear {
@@ -35,13 +39,10 @@ struct TerminalTabView: View {
             // 切换标签时视图销毁不应清除「已连接」标记(关闭确认仍需生效)。
             // 注销在 WorkspaceStore.close(tabID:) 中统一执行。
             session.close()
+            workspace.reportConnectionStatus(.failed, forTabID: tab.id)
         }
         .onChange(of: session.phase) { _, newPhase in
-            // 仅在进入 shell 时标记已连接;不在 .failed 时取消标记,
-            // 因为 session.close()(切标签时)也会设 .failed,无法与真正断开区分。
-            if newPhase == .shell {
-                workspace.markTerminalConnected(tabID: tab.id)
-            }
+            workspace.reportConnectionStatus(status(for: newPhase), forTabID: tab.id)
         }
         .onChange(of: session.failure) { _, failure in
             if failure == .missingCredential {
@@ -89,7 +90,11 @@ struct TerminalTabView: View {
             case .shell:
                 SwiftTermWrapper(
                     connection: session.connection,
-                    onReadError: { session.markFailed() }
+                    isActive: isActive,
+                    onReadError: {
+                        session.handleRemoteShellExit()
+                        workspace.handleTerminalSessionEnded(tabID: tab.id)
+                    }
                 )
             }
         }
@@ -144,6 +149,14 @@ struct TerminalTabView: View {
             passphrase: secrets.passphrase
         )
     }
+
+    private func status(for phase: TerminalSessionStore.Phase) -> WorkspaceConnectionStatus {
+        switch phase {
+        case .connecting: return .connecting
+        case .shell: return .connected
+        case .failed: return .failed
+        }
+    }
 }
 
 // MARK: - SwiftTerm TerminalView SwiftUI 包装
@@ -154,14 +167,23 @@ struct TerminalTabView: View {
 /// 并通过读循环将远端输出馈送到 TerminalView。
 struct SwiftTermWrapper: View {
     let connection: ShellConnection?
+    let isActive: Bool
     let onReadError: () -> Void
 
     var body: some View {
         #if os(macOS)
-        MacTerminalRepresentable(connection: connection, onReadError: onReadError)
+        MacTerminalRepresentable(connection: connection, isActive: isActive, onReadError: onReadError)
         #elseif os(iOS)
-        IOSTerminalRepresentable(connection: connection, onReadError: onReadError)
+        IOSTerminalRepresentable(connection: connection, isActive: isActive, onReadError: onReadError)
         #endif
+    }
+}
+
+/// 终端是否应向原生系统请求键盘焦点的纯值规则。
+/// 非活动终端为保活而留在视图树中，但绝不能抢占用户当前输入目标。
+struct TerminalFocusRequestPolicy {
+    static func shouldRequestFocus(isVisible: Bool, wasVisible: Bool) -> Bool {
+        isVisible && !wasVisible
     }
 }
 
@@ -173,6 +195,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private var connection: ShellConnection?
     private var readTask: Task<Void, Never>?
     private let onReadError: () -> Void
+    private var shouldRequestInputFocus = false
 
     /// 最近一次上报（或待上报）给服务端的终端尺寸；nil 表示从未上报。
     /// 用于 `sizeChanged` 的「首次立即、连续去抖」策略。
@@ -238,6 +261,32 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         self.connection = connection
         startReading()
     }
+
+    /// 视图更新时同步活动资格，再异步请求焦点，确保终端已加入原生视图层级。
+    func updateInputFocusEligibility(isVisible: Bool) -> Bool {
+        let shouldRequest = TerminalFocusRequestPolicy.shouldRequestFocus(
+            isVisible: isVisible,
+            wasVisible: shouldRequestInputFocus
+        )
+        shouldRequestInputFocus = isVisible
+        return shouldRequest
+    }
+
+    #if os(macOS)
+    func requestInputFocus(for terminalView: TerminalView) {
+        DispatchQueue.main.async { [weak self, weak terminalView] in
+            guard let self, self.shouldRequestInputFocus, let terminalView else { return }
+            terminalView.window?.makeFirstResponder(terminalView)
+        }
+    }
+    #elseif os(iOS)
+    func requestInputFocus(for terminalView: TerminalView) {
+        DispatchQueue.main.async { [weak self, weak terminalView] in
+            guard let self, self.shouldRequestInputFocus, let terminalView else { return }
+            terminalView.becomeFirstResponder()
+        }
+    }
+    #endif
 
     func detach() {
         readTask?.cancel()
@@ -493,6 +542,7 @@ extension TerminalCoordinator {
 #if os(macOS)
 private struct MacTerminalRepresentable: NSViewRepresentable {
     let connection: ShellConnection?
+    let isActive: Bool
     let onReadError: () -> Void
 
     func makeCoordinator() -> TerminalCoordinator {
@@ -507,11 +557,17 @@ private struct MacTerminalRepresentable: NSViewRepresentable {
         tv.terminalDelegate = context.coordinator
         tv.configureNativeColors()
         context.coordinator.setup(terminalView: tv, connection: connection)
+        if context.coordinator.updateInputFocusEligibility(isVisible: isActive) {
+            context.coordinator.requestInputFocus(for: tv)
+        }
         return tv
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {
         context.coordinator.update(connection: connection)
+        if context.coordinator.updateInputFocusEligibility(isVisible: isActive) {
+            context.coordinator.requestInputFocus(for: nsView)
+        }
     }
 
     static func dismantleNSView(_ nsView: TerminalView, coordinator: TerminalCoordinator) {
@@ -525,6 +581,7 @@ private struct MacTerminalRepresentable: NSViewRepresentable {
 #if os(iOS)
 private struct IOSTerminalRepresentable: UIViewRepresentable {
     let connection: ShellConnection?
+    let isActive: Bool
     let onReadError: () -> Void
 
     func makeCoordinator() -> TerminalCoordinator {
@@ -538,11 +595,17 @@ private struct IOSTerminalRepresentable: UIViewRepresentable {
         let tv = PandaIOSTerminalView(frame: .zero, font: nil)
         tv.terminalDelegate = context.coordinator
         context.coordinator.setup(terminalView: tv, connection: connection)
+        if context.coordinator.updateInputFocusEligibility(isVisible: isActive) {
+            context.coordinator.requestInputFocus(for: tv)
+        }
         return tv
     }
 
     func updateUIView(_ uiView: TerminalView, context: Context) {
         context.coordinator.update(connection: connection)
+        if context.coordinator.updateInputFocusEligibility(isVisible: isActive) {
+            context.coordinator.requestInputFocus(for: uiView)
+        }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: TerminalCoordinator) {
@@ -555,7 +618,8 @@ private struct IOSTerminalRepresentable: UIViewRepresentable {
 #Preview("终端(shell)") {
     TerminalTabView(
         tab: WorkspaceTab(id: UUID(), hostID: "h-webprod", kind: .terminal, title: "web-prod"),
-        host: MockBackend.demo().allHosts().first { $0.id == "h-webprod" }!
+        host: MockBackend.demo().allHosts().first { $0.id == "h-webprod" }!,
+        isActive: true
     )
     .environmentObject(AppModel.previewModel())
     .environmentObject(WorkspaceStore.previewStore())
@@ -565,7 +629,8 @@ private struct IOSTerminalRepresentable: UIViewRepresentable {
 #Preview("终端(连接超时)") {
     TerminalTabView(
         tab: WorkspaceTab(id: UUID(), hostID: "h-offline", kind: .terminal, title: "offline-srv"),
-        host: MockBackend.demo().allHosts().first { $0.demo == .offline }!
+        host: MockBackend.demo().allHosts().first { $0.demo == .offline }!,
+        isActive: true
     )
     .environmentObject(AppModel.previewModel())
     .environmentObject(WorkspaceStore.previewStore())

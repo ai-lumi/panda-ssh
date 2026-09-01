@@ -92,7 +92,11 @@ fn host_group_id_round_trip() {
 
     // 更新归属(移动主机)
     save_host(host("h1", None)).unwrap();
-    let h1 = list_hosts().unwrap().into_iter().find(|h| h.id == "h1").unwrap();
+    let h1 = list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.id == "h1")
+        .unwrap();
     assert_eq!(h1.group_id, None);
 }
 
@@ -136,12 +140,20 @@ fn move_group_reparents_and_defends_cycles() {
 
     // 换父级
     move_group("b".into(), Some("e".into())).unwrap();
-    let b = list_groups().unwrap().into_iter().find(|g| g.id == "b").unwrap();
+    let b = list_groups()
+        .unwrap()
+        .into_iter()
+        .find(|g| g.id == "b")
+        .unwrap();
     assert_eq!(b.parent_id.as_deref(), Some("e"));
 
     // 移回根级
     move_group("b".into(), None).unwrap();
-    let b = list_groups().unwrap().into_iter().find(|g| g.id == "b").unwrap();
+    let b = list_groups()
+        .unwrap()
+        .into_iter()
+        .find(|g| g.id == "b")
+        .unwrap();
     assert_eq!(b.parent_id, None);
 
     // 防环:移入自身 / 后代

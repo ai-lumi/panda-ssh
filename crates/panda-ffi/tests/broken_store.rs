@@ -28,10 +28,7 @@ fn broken_store_returns_core_errors() {
         }),
         Err(PandaError::Core(_))
     ));
-    assert!(matches!(
-        delete_host("x".into()),
-        Err(PandaError::Core(_))
-    ));
+    assert!(matches!(delete_host("x".into()), Err(PandaError::Core(_))));
     assert!(matches!(
         test_connection("x".into(), None, None, true),
         Err(PandaError::Core(_))

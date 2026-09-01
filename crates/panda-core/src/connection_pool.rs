@@ -73,7 +73,12 @@ impl ConnectionPool {
 
         // 放入缓存中。
         let mut entries = self.entries.lock().await;
-        entries.insert(key, PoolEntry { session: Arc::clone(&session) });
+        entries.insert(
+            key,
+            PoolEntry {
+                session: Arc::clone(&session),
+            },
+        );
 
         Ok(session)
     }

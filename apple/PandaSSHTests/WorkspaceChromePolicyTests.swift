@@ -7,7 +7,7 @@ import XCTest
 #endif
 
 final class WorkspaceChromePolicyTests: XCTestCase {
-    func testMac隐藏应用标题并把整条页签栏放到Principal() {
+    func testMac隐藏应用标题并把整条页签栏放到内容行() {
         let policy = WorkspaceChromePolicy.resolve(
             platform: .macOS,
             tabCount: 3,
@@ -17,8 +17,8 @@ final class WorkspaceChromePolicyTests: XCTestCase {
 
         XCTAssertFalse(policy.showsApplicationTitle)
         XCTAssertTrue(policy.usesSystemToolbar)
-        XCTAssertEqual(policy.tabPlacement, .principalToolbar)
-        XCTAssertFalse(policy.drawsContentTabRow)
+        XCTAssertEqual(policy.tabPlacement, .adaptiveContentRow)
+        XCTAssertTrue(policy.drawsContentTabRow)
         XCTAssertTrue(policy.preservesSystemWindowControls)
     }
 
@@ -35,7 +35,7 @@ final class WorkspaceChromePolicyTests: XCTestCase {
         XCTAssertTrue(policy.drawsContentTabRow)
     }
 
-    func test零标签时Mac标题位置保持安静且不增加内容页签行() {
+    func test零标签时Mac仍使用内容行策略但不绘制页签行() {
         let policy = WorkspaceChromePolicy.resolve(
             platform: .macOS,
             tabCount: 0,
@@ -44,7 +44,7 @@ final class WorkspaceChromePolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(policy.visibleTabCount, 0)
-        XCTAssertEqual(policy.tabPlacement, .principalToolbar)
+        XCTAssertEqual(policy.tabPlacement, .adaptiveContentRow)
         XCTAssertFalse(policy.drawsContentTabRow)
         XCTAssertFalse(policy.showsApplicationTitle)
     }
@@ -98,7 +98,7 @@ final class WorkspaceChromePolicyTests: XCTestCase {
         }
     }
 
-    func test大量标签依然只有一条可滚动Principal页签栏() {
+    func test大量标签依然只有一条可滚动内容页签栏() {
         let policy = WorkspaceChromePolicy.resolve(
             platform: .macOS,
             tabCount: 10_000,
@@ -109,7 +109,7 @@ final class WorkspaceChromePolicyTests: XCTestCase {
         XCTAssertEqual(policy.visibleTabCount, 10_000)
         XCTAssertEqual(policy.tabRowCount, 1)
         XCTAssertEqual(policy.principalWidth, WorkspaceChromePolicy.maximumPrincipalWidth)
-        XCTAssertFalse(policy.drawsContentTabRow)
+        XCTAssertTrue(policy.drawsContentTabRow)
     }
 
     func test负标签数量按零处理() {

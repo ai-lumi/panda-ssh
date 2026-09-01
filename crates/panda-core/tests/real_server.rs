@@ -13,8 +13,7 @@
 use std::path::PathBuf;
 
 use panda_core::{
-    AuthMethod, Credentials, HostConfig, KnownHosts, SftpClient, SshSession,
-    UnknownHostKeyPolicy,
+    AuthMethod, Credentials, HostConfig, KnownHosts, SftpClient, SshSession, UnknownHostKeyPolicy,
 };
 
 const HOST: &str = "100.78.247.105";
@@ -66,8 +65,7 @@ async fn ssh_connect_and_exec_pwd() {
 
     let output = session.exec("pwd").await.expect("exec pwd 失败");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("/homes/lwq"),
-        "unexpected pwd: {stdout}");
+    assert!(stdout.contains("/homes/lwq"), "unexpected pwd: {stdout}");
 
     session.disconnect().await.unwrap();
 }
@@ -86,7 +84,9 @@ async fn sftp_home_dir_matches_pwd() {
     let session = SshSession::connect(&cfg, creds, &mut kh, UnknownHostKeyPolicy::AcceptAndStore)
         .await
         .expect("SSH 连接失败");
-    let sftp = SftpClient::new(&session).await.expect("SFTP 子系统初始化失败");
+    let sftp = SftpClient::new(&session)
+        .await
+        .expect("SFTP 子系统初始化失败");
 
     let home = sftp.home_dir().await.expect("获取 SFTP home 目录失败");
     assert!(home.contains("/homes/lwq"), "unexpected home: {home}");
@@ -109,11 +109,16 @@ async fn sftp_list_remote_dir() {
     let session = SshSession::connect(&cfg, creds, &mut kh, UnknownHostKeyPolicy::AcceptAndStore)
         .await
         .expect("SSH 连接失败");
-    let sftp = SftpClient::new(&session).await.expect("SFTP 子系统初始化失败");
+    let sftp = SftpClient::new(&session)
+        .await
+        .expect("SFTP 子系统初始化失败");
 
     let entries = sftp.list_dir(REMOTE_DIR).await.expect("列出远程目录失败");
     // 目录存在即可，不强制内容。
-    assert!(!entries.iter().any(|e| e.name == "." || e.name == ".."), "应过滤掉 . 和 ..");
+    assert!(
+        !entries.iter().any(|e| e.name == "." || e.name == ".."),
+        "应过滤掉 . 和 .."
+    );
 
     sftp.close().await.unwrap();
     session.disconnect().await.unwrap();
@@ -136,7 +141,9 @@ async fn sftp_upload_and_download_round_trip() {
     let session = SshSession::connect(&cfg, creds, &mut kh, UnknownHostKeyPolicy::AcceptAndStore)
         .await
         .expect("SSH 连接失败");
-    let sftp = SftpClient::new(&session).await.expect("SFTP 子系统初始化失败");
+    let sftp = SftpClient::new(&session)
+        .await
+        .expect("SFTP 子系统初始化失败");
 
     let remote = format!("{REMOTE_DIR}/panda-test-payload.txt");
     sftp.upload(&local, &remote, None).await.expect("上传失败");

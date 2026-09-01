@@ -349,10 +349,8 @@ mod tests {
 
         let blocked = dir.path().join("not-a-directory");
         std::fs::write(&blocked, b"x").unwrap();
-        assert!(
-            write_atomic_async(&blocked.join("config.toml"), b"x")
-                .await
-                .is_err()
-        );
+        assert!(write_atomic_async(&blocked.join("config.toml"), b"x")
+            .await
+            .is_err());
     }
 }

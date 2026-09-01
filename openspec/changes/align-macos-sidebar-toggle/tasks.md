@@ -12,4 +12,4 @@
 
 - [x] 3.1 运行 `xcodebuild -project apple/PandaSSH.xcodeproj -scheme PandaSSH-macOS test`，确认相关 XCTest 通过。
 - [ ] 3.2 运行 Swift 覆盖率检查，确认 lines 与 regions 均不低于 95%。
-- [ ] 3.3 在 macOS 预览/应用中验证：侧栏可见时隐藏按钮位于标题栏；隐藏时系统按钮位于标题栏；最小侧栏宽度无重复或 `>>` 溢出按钮；iPadOS 无视觉回归。
+- [x] 3.3 在 macOS 预览/应用中验证：侧栏可见时隐藏按钮位于标题栏；隐藏时系统按钮位于标题栏；最小侧栏宽度无重复或 `>>` 溢出按钮；iPadOS 无视觉回归。

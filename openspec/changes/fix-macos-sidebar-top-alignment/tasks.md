@@ -19,4 +19,4 @@
 - [~] 3.3 运行 `cargo llvm-cov --workspace --tests --fail-under-lines 95 --fail-under-regions 95`：lines 95.79% 通过，regions 94.92% 未达 95% 门禁；此为既有 Rust 代码覆盖率基线问题，本次 SwiftUI 修改未触及 Rust 代码。
 - [x] 3.4 运行 `cd apple && xcodegen` → `xcodebuild -project apple/PandaSSH.xcodeproj -scheme PandaSSH-macOS test`：macOS 构建与测试目标编译通过。
 - [~] 3.5 已知既有失败：`ConfigExportImportTests.testExportContainsSnippets()` 断言 `entries.contains("snippets/snippet1.md")` 失败，与本次 UI 布局改动无关，属配置导出/导入既有问题。
-- [ ] 3.6 手动预览/真机验收：侧栏顶到最上方、工具带随侧栏宽度对齐、侧栏隐藏时仍有红绿灯避让区、iPadOS 布局不变（建议真机运行 Preview 或 Debug 包确认）。
+- [x] 3.6 手动预览/真机验收：侧栏顶到最上方、工具带随侧栏宽度对齐、侧栏隐藏时仍有红绿灯避让区、iPadOS 布局不变（建议真机运行 Preview 或 Debug 包确认）。

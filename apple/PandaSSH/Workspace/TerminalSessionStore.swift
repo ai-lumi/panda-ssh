@@ -118,11 +118,24 @@ final class TerminalSessionStore: ObservableObject {
     func markFailed() {
         failure = .other("SSH 会话已断开。")
         phase = .failed
+        releaseConnection()
+    }
+
+    /// 远端 shell 已正常退出或关闭。释放 FFI 句柄，使连接池可在最后一个
+    /// 活动消费者结束后关闭底层 SSH Socket。
+    func handleRemoteShellExit() {
+        failure = .other("SSH 会话已结束。")
+        phase = .failed
+        releaseConnection()
     }
 
     /// 关闭会话，释放真实连接。
     func close() {
         phase = .failed
+        releaseConnection()
+    }
+
+    private func releaseConnection() {
         if let conn = connection {
             connection = nil
             _ = try? conn.close()

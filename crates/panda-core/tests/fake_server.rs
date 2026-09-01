@@ -5,18 +5,18 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use panda_core::config::AuthMethod;
 use panda_core::connection_pool::ConnectionPool;
 use panda_core::{
-    BatchTransferOptions, ConflictResolution, Credentials, Error, HostConfig, KnownHostStatus,
-    KnownHosts, ScanOptions, SftpClient, ShellSession, SshSession, UnknownHostKeyPolicy,
-    execute_batch_download, execute_batch_upload, scan_remote_sources,
+    execute_batch_download, execute_batch_upload, scan_remote_sources, BatchTransferOptions,
+    ConflictResolution, Credentials, Error, HostConfig, KnownHostStatus, KnownHosts, ScanOptions,
+    SftpClient, ShellSession, SshSession, UnknownHostKeyPolicy,
 };
-use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
+use russh::keys::{ssh_key::LineEnding, Algorithm, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, Pty};
 use russh_sftp::protocol::{
@@ -150,6 +150,12 @@ impl russh::server::Handler for TestHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if self.shell_channels.contains(&channel) {
+            if data.trim_ascii() == b"exit" {
+                session.data(channel, b"logout\n".to_vec())?;
+                session.exit_status_request(channel, 0)?;
+                session.close(channel)?;
+                return Ok(());
+            }
             let echo = format!("echo: {}", String::from_utf8_lossy(data));
             session.data(channel, echo.into_bytes())?;
         }
@@ -1191,11 +1197,10 @@ async fn sftp_upload_with_cancel_close_failure_returns_error() {
     .await;
     let local = dir.path().join("local.bin");
     std::fs::write(&local, b"x").unwrap();
-    assert!(
-        sftp.upload_with_cancel(&local, "/cancel-closed.bin", None, None)
-            .await
-            .is_err()
-    );
+    assert!(sftp
+        .upload_with_cancel(&local, "/cancel-closed.bin", None, None)
+        .await
+        .is_err());
 
     sftp.close().await.unwrap();
     session.disconnect().await.unwrap();
@@ -1424,6 +1429,24 @@ async fn shell_session_read_write_after_close_returns_error() {
         shell.resize(80, 24),
         Err(Error::ShellSessionClosed)
     ));
+}
+
+#[tokio::test]
+async fn shell_session_reports_remote_exit_after_draining_final_output() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let shell = ShellSession::open(Arc::new(session)).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = shell.read(1024).unwrap();
+
+    shell.write(b"exit\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(shell.read(1024).unwrap(), b"logout\n");
+    assert!(matches!(shell.read(1024), Err(Error::ShellSessionClosed)));
+    assert!(matches!(shell.write(b"x"), Err(Error::ShellSessionClosed)));
 }
 
 #[tokio::test]

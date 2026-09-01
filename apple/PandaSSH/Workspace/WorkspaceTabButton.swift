@@ -47,13 +47,16 @@ struct WorkspaceTabButton: View {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
-                    .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
             }
             .buttonStyle(.plain)
+            .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
             .foregroundStyle(.secondary)
+            .contentShape(
+                RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
+            )
             .background(
                 hovering ? Color.primary.opacity(0.12) : Color.clear,
-                in: Circle()
+                in: RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
             )
             .opacity(metrics.showsCloseButton ? 1 : 0)
             .allowsHitTesting(metrics.showsCloseButton)

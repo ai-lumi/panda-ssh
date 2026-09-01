@@ -45,8 +45,8 @@ struct WorkspaceChromePolicy: Equatable {
             return WorkspaceChromePolicy(
                 showsApplicationTitle: false,
                 usesSystemToolbar: true,
-                tabPlacement: .principalToolbar,
-                drawsContentTabRow: false,
+                tabPlacement: .adaptiveContentRow,
+                drawsContentTabRow: visibleTabCount > 0,
                 preservesSystemWindowControls: true,
                 providesSystemSidebarRecovery: true,
                 removesDefaultSidebarToggle: shouldRemoveDefaultSidebarToggle(

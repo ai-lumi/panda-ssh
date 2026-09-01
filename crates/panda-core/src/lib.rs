@@ -2,8 +2,8 @@
 
 pub mod batch;
 pub mod config;
-pub mod credentials;
 pub mod connection_pool;
+pub mod credentials;
 pub mod groups;
 pub mod hostkey;
 pub mod sftp;
@@ -21,7 +21,7 @@ pub use groups::{
     delete_group_cascade, descendant_ids, move_group, Group, GroupStore, TomlGroupStore,
     MAX_GROUP_DEPTH,
 };
-pub use hostkey::{HostKeyStatus, KnownHostStatus, KnownHosts, fingerprint_sha256};
+pub use hostkey::{fingerprint_sha256, HostKeyStatus, KnownHostStatus, KnownHosts};
 pub use sftp::{FileConflictInfo, RemoteFile, SftpClient};
 pub use snippets::{Snippet, SnippetStore};
 pub use ssh::{Credentials, ExecOutput, ShellSession, SshSession, UnknownHostKeyPolicy};

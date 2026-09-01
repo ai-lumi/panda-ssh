@@ -31,6 +31,15 @@ struct WorkspaceTab: Identifiable, Equatable {
     var title: String
 }
 
+/// 标签页所掌握的当前连接状态。它只反映已打开会话的最近结果，
+/// 不对未连接的主机发起后台网络探测。
+enum WorkspaceConnectionStatus: Equatable {
+    case inactive
+    case connecting
+    case connected
+    case failed
+}
+
 /// 批量关闭待确认范围:关闭其他 / 关闭全部。
 /// `connectedTerminalCount` 为范围内已连接终端标签数,用于聚合确认文案。
 struct PendingBatchClose: Equatable {
@@ -65,6 +74,9 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var pendingBatchClose: PendingBatchClose?
     /// 已无打开标签页、但仍有活跃传输任务、等待传输完成后断开的主机集合。
     @Published private(set) var pendingDisconnectHosts: Set<String> = []
+    /// 每个已打开标签页上报的当前连接状态。用 `@Published` 使页签栏与侧栏
+    /// 能在读循环发现断开后立即重新渲染。
+    @Published private var tabConnectionStatuses: [UUID: WorkspaceConnectionStatus] = [:]
     /// 已连接终端标签集合(tabID)。独立于视图生命周期:
     /// TerminalTabView 在 phase→.shell 时 markConnected,仅在标签关闭时清理。
     /// 解决:非活动终端标签(视图已销毁)仍需关闭确认的问题。
@@ -140,6 +152,53 @@ final class WorkspaceStore: ObservableObject {
         connectedTerminalTabs.remove(tabID)
     }
 
+    /// 由终端/SFTP 页签在连接状态变化时调用。已被关闭的页签不得重新写入状态，
+    /// 以避免 SwiftUI 的延迟 onDisappear 产生“幽灵连接”。
+    func reportConnectionStatus(_ status: WorkspaceConnectionStatus, forTabID tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        tabConnectionStatuses[tabID] = status
+        if tabs.first(where: { $0.id == tabID })?.kind == .terminal {
+            if status == .connected {
+                markTerminalConnected(tabID: tabID)
+            } else if status == .failed || status == .inactive {
+                markTerminalDisconnected(tabID: tabID)
+            }
+        }
+    }
+
+    /// 终端读循环确认远端 shell 已结束后调用。结束的标签仍保留在工作区，
+    /// 但不再占用主机连接；只有没有其他活动会话和传输时才释放共享连接。
+    func handleTerminalSessionEnded(tabID: UUID) {
+        guard let tab = tabs.first(where: { $0.id == tabID }), tab.kind == .terminal else { return }
+        reportConnectionStatus(.failed, forTabID: tabID)
+        let hostID = tab.hostID
+        guard !hasActiveTabConnection(for: hostID) else {
+            pendingDisconnectHosts.remove(hostID)
+            return
+        }
+        if hasActiveTransfers(for: hostID) {
+            pendingDisconnectHosts.insert(hostID)
+        } else {
+            disconnectHandler(hostID)
+            pendingDisconnectHosts.remove(hostID)
+        }
+    }
+
+    /// 返回单个标签页的状态；不存在或已关闭时为 inactive。
+    func connectionStatus(forTabID tabID: UUID) -> WorkspaceConnectionStatus {
+        tabConnectionStatuses[tabID] ?? .inactive
+    }
+
+    /// 聚合同一主机全部已打开标签页的最近连接状态。只要任一会话可用就为 connected；
+    /// 这避免一个失败的并行标签把仍可交互的主机误标为不可达。
+    func connectionStatus(forHostID hostID: String) -> WorkspaceConnectionStatus {
+        let statuses = tabs.filter { $0.hostID == hostID }.map { connectionStatus(forTabID: $0.id) }
+        if statuses.contains(.connected) { return .connected }
+        if statuses.contains(.connecting) { return .connecting }
+        if statuses.contains(.failed) { return .failed }
+        return .inactive
+    }
+
     /// 打开终端标签页。总是新建,不做按主机的去重。
     @discardableResult
     func openTerminal(hostID: String) -> UUID {
@@ -166,6 +225,7 @@ final class WorkspaceStore: ObservableObject {
         let hostID = tabs[index].hostID
         connectedTerminalTabs.remove(tabID)
         terminalSessions.removeValue(forKey: tabID)
+        tabConnectionStatuses.removeValue(forKey: tabID)
         let closingActive = (activeTabID == tabID)
         tabs.remove(at: index)
         if closingActive {
@@ -264,6 +324,7 @@ final class WorkspaceStore: ObservableObject {
     private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
         let tab = WorkspaceTab(id: UUID(), hostID: hostID, kind: kind, title: "")
         tabs.append(tab)
+        tabConnectionStatuses[tab.id] = .connecting
         activeTabID = tab.id
         retitle()
         return tab.id
@@ -278,6 +339,7 @@ final class WorkspaceStore: ObservableObject {
         for id in removedIDs {
             connectedTerminalTabs.remove(id)
             terminalSessions.removeValue(forKey: id)
+            tabConnectionStatuses.removeValue(forKey: id)
         }
         tabs.removeAll { $0.hostID == hostID }
         if let active = activeTabID, !tabs.contains(where: { $0.id == active }) {
@@ -305,8 +367,18 @@ final class WorkspaceStore: ObservableObject {
     private func evaluatePendingDisconnects(currentTasks: [TransferTask]) {
         let pending = pendingDisconnectHosts
         for hostID in pending where !currentTasks.contains(where: { $0.hostID == hostID && Self.isActiveStatus($0.status) }) {
-            disconnectHandler(hostID)
+            if !hasActiveTabConnection(for: hostID) {
+                disconnectHandler(hostID)
+            }
             pendingDisconnectHosts.remove(hostID)
+        }
+    }
+
+    private func hasActiveTabConnection(for hostID: String) -> Bool {
+        tabs.contains { tab in
+            guard tab.hostID == hostID else { return false }
+            let status = connectionStatus(forTabID: tab.id)
+            return status == .connecting || status == .connected
         }
     }
 

@@ -137,7 +137,10 @@ pub async fn scan_local_sources(
     let mut stack: Vec<Frame> = sources
         .iter()
         .map(|source| Frame {
-            dest: join_path(dest_dir, source.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+            dest: join_path(
+                dest_dir,
+                source.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            ),
             source: source.clone(),
             depth: 0,
         })
@@ -193,7 +196,8 @@ pub async fn scan_local_sources(
             let mut entries = tokio::fs::read_dir(&frame.source).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let child = entry.path();
-                let child_dest = join_path(&frame.dest, entry.file_name().to_string_lossy().as_ref());
+                let child_dest =
+                    join_path(&frame.dest, entry.file_name().to_string_lossy().as_ref());
                 stack.push(Frame {
                     source: child,
                     dest: child_dest,
@@ -303,7 +307,11 @@ pub async fn scan_remote_sources(
             }
             Err(_) => {
                 // 当作文件处理；尝试获取元数据以累加 total_size。
-                let size = client.metadata(&frame.source).await.ok().and_then(|m| m.size);
+                let size = client
+                    .metadata(&frame.source)
+                    .await
+                    .ok()
+                    .and_then(|m| m.size);
                 if let Some(s) = size {
                     total_size += s;
                 }
@@ -344,7 +352,11 @@ pub async fn execute_batch_upload(
     let total_size = plan.total_size;
 
     for item in &plan.items {
-        if cancel.as_ref().map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        if cancel
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
             outcome.cancelled = true;
             break;
         }
@@ -354,21 +366,28 @@ pub async fn execute_batch_upload(
                 if options.stop_on_error {
                     return Err(e);
                 }
-                outcome.errors.push(format!("{} -> {}: {}", item.source, item.destination, e));
+                outcome
+                    .errors
+                    .push(format!("{} -> {}: {}", item.source, item.destination, e));
             }
             continue;
         }
 
         let local = PathBuf::from(&item.source);
         let should_upload = if let Some(ref cb) = conflict_callback {
-            match client.check_upload_conflict(&local, &item.destination).await {
+            match client
+                .check_upload_conflict(&local, &item.destination)
+                .await
+            {
                 Ok(Some(info)) => matches!(cb(item, &info), ConflictResolution::Overwrite),
                 Ok(None) => true,
                 Err(e) => {
                     if options.stop_on_error {
                         return Err(e);
                     }
-                    outcome.errors.push(format!("{} -> {}: {}", item.source, item.destination, e));
+                    outcome
+                        .errors
+                        .push(format!("{} -> {}: {}", item.source, item.destination, e));
                     continue;
                 }
             }
@@ -406,7 +425,9 @@ pub async fn execute_batch_upload(
                 if options.stop_on_error {
                     return Err(e);
                 }
-                outcome.errors.push(format!("{} -> {}: {}", item.source, item.destination, e));
+                outcome
+                    .errors
+                    .push(format!("{} -> {}: {}", item.source, item.destination, e));
             }
         }
     }
@@ -436,7 +457,11 @@ pub async fn execute_batch_download(
     let total_size = plan.total_size;
 
     for item in &plan.items {
-        if cancel.as_ref().map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        if cancel
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
             outcome.cancelled = true;
             break;
         }
@@ -447,7 +472,9 @@ pub async fn execute_batch_download(
                 if options.stop_on_error {
                     return Err(e.into());
                 }
-                outcome.errors.push(format!("{} -> {}: {}", item.source, item.destination, e));
+                outcome
+                    .errors
+                    .push(format!("{} -> {}: {}", item.source, item.destination, e));
             }
             continue;
         }
@@ -466,7 +493,9 @@ pub async fn execute_batch_download(
                     if options.stop_on_error {
                         return Err(e);
                     }
-                    outcome.errors.push(format!("{} -> {}: {}", item.source, item.destination, e));
+                    outcome
+                        .errors
+                        .push(format!("{} -> {}: {}", item.source, item.destination, e));
                     continue;
                 }
             }
@@ -504,7 +533,9 @@ pub async fn execute_batch_download(
                 if options.stop_on_error {
                     return Err(e);
                 }
-                outcome.errors.push(format!("{} -> {}: {}", item.source, item.destination, e));
+                outcome
+                    .errors
+                    .push(format!("{} -> {}: {}", item.source, item.destination, e));
             }
         }
     }
@@ -543,10 +574,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("project");
         tokio::fs::create_dir(&src).await.unwrap();
-        tokio::fs::write(src.join("README.md"), b"readme").await.unwrap();
+        tokio::fs::write(src.join("README.md"), b"readme")
+            .await
+            .unwrap();
         let sub = src.join("src");
         tokio::fs::create_dir(&sub).await.unwrap();
-        tokio::fs::write(sub.join("main.swift"), b"code").await.unwrap();
+        tokio::fs::write(sub.join("main.swift"), b"code")
+            .await
+            .unwrap();
 
         let plan = scan_local_sources(&[src.clone()], "/remote", &opts())
             .await
@@ -635,7 +670,9 @@ mod tests {
         tokio::fs::create_dir(&d2).await.unwrap();
         let d3 = d2.join("d3");
         tokio::fs::create_dir(&d3).await.unwrap();
-        tokio::fs::write(d3.join("deep.txt"), b"deep").await.unwrap();
+        tokio::fs::write(d3.join("deep.txt"), b"deep")
+            .await
+            .unwrap();
 
         let opts = ScanOptions {
             max_depth: 2,
@@ -658,7 +695,9 @@ mod tests {
         let file = dir.path().join("x.txt");
         tokio::fs::write(&file, b"x").await.unwrap();
 
-        let plan = scan_local_sources(&[file], "/remote/", &opts()).await.unwrap();
+        let plan = scan_local_sources(&[file], "/remote/", &opts())
+            .await
+            .unwrap();
         assert_eq!(plan.items[0].destination, "/remote/x.txt");
     }
 
@@ -688,7 +727,6 @@ mod tests {
         assert!(!plan.items[0].is_dir);
         assert_eq!(plan.total_size, 6);
     }
-
 
     #[tokio::test]
     async fn scan_local_broken_symlink_uses_link_size() {

@@ -85,6 +85,16 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(store.phase, .failed)
     }
 
+    func testRemoteShellExitReleasesConnectionAndMarksFailed() {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
+
+        store.handleRemoteShellExit()
+
+        XCTAssertEqual(store.phase, .failed)
+        XCTAssertNil(store.connection)
+    }
+
     func testCloseReleasesConnection() {
         let store = TerminalSessionStore(host: makeHost())
         store.finishConnecting()

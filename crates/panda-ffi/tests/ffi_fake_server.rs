@@ -4,15 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use panda_ffi::{
-    AuthMethodEnum, BatchTransferStatusEnum, HostConfigRecord, KnownHostStatusEnum, PandaError,
-    TransferDirectionEnum, TransferStatusEnum, accept_unknown_host_key, batch_transfer_cancel,
-    batch_transfer_list, batch_transfer_resolve_conflict, batch_transfer_status, delete_host,
-    host_key_status, init_store, list_hosts, save_host, scan_local_batch, scan_remote_batch,
+    accept_unknown_host_key, batch_transfer_cancel, batch_transfer_list,
+    batch_transfer_resolve_conflict, batch_transfer_status, delete_host, host_key_status,
+    init_store, list_hosts, save_host, scan_local_batch, scan_remote_batch,
     sftp_check_download_conflict, sftp_check_upload_conflict, sftp_create_dir, sftp_download,
     sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file, sftp_upload, shell_close,
     shell_open, shell_read, shell_resize, shell_write, start_batch_download, start_batch_upload,
     start_transfer, test_connection, transfer_cancel, transfer_list, transfer_pause,
-    transfer_resume, transfer_retry, transfer_status,
+    transfer_resume, transfer_retry, transfer_status, AuthMethodEnum, BatchTransferStatusEnum,
+    HostConfigRecord, KnownHostStatusEnum, PandaError, TransferDirectionEnum, TransferStatusEnum,
 };
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
@@ -2514,11 +2514,9 @@ fn ffi_scan_remote_batch_directory() {
 
     assert!(items.iter().any(|i| i.is_dir && i.source == "/scan"));
     assert!(items.iter().any(|i| !i.is_dir && i.source == "/scan/a.txt"));
-    assert!(
-        items
-            .iter()
-            .any(|i| !i.is_dir && i.source == "/scan/sub/b.txt")
-    );
+    assert!(items
+        .iter()
+        .any(|i| !i.is_dir && i.source == "/scan/sub/b.txt"));
     cleanup_store();
 }
 

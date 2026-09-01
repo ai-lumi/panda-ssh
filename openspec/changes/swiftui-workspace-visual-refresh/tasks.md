@@ -48,5 +48,5 @@
 
 - [ ] 8.1 运行受影响 Swift XCTest，确认正常流程、意外操作和边界条件全部通过；生成覆盖率并满足 lines >= 95%、regions >= 95%，不足分支先补测试再调整实现
 - [x] 8.2 按 `build-rust.sh` → `xcodegen` → macOS/iPadOS `xcodebuild` 顺序完成双端构建和测试，并运行 `cargo test` 与仓库要求的覆盖率门禁，所有结果必须全绿
-- [ ] 8.3 在 Mac 常规窗口、iPad 横屏常规宽度、iPad 紧凑分屏实机或模拟器逐项对照规格与评审稿，记录系统工具栏、侧栏恢复、标签触控、SFTP 状态保持和传输面板最终截图
+- [x] 8.3 在 Mac 常规窗口、iPad 横屏常规宽度、iPad 紧凑分屏实机或模拟器逐项对照规格与评审稿，记录系统工具栏、侧栏恢复、标签触控、SFTP 状态保持和传输面板最终截图
 - [ ] 8.4 将通过验收的 spec delta 合并回 `openspec/specs/workspace/spec.md`，归档 `swiftui-workspace-visual-refresh` change，并复跑 OpenSpec 严格校验确认规格与代码一致

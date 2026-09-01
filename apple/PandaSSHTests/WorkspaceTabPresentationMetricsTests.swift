@@ -12,6 +12,7 @@ final class WorkspaceTabPresentationMetricsTests: XCTestCase {
         XCTAssertTrue(metrics(platform: .macOS, active: false, hovered: true).showsCloseButton)
         XCTAssertFalse(metrics(platform: .macOS, active: false, hovered: false).showsCloseButton)
         XCTAssertEqual(metrics(platform: .macOS, active: true, hovered: false).minimumHitTarget, 24)
+        XCTAssertEqual(metrics(platform: .macOS, active: true, hovered: false).closeButtonCornerRadius, 4)
     }
 
     func testIPad当前页签无需指针也显示关闭入口() {

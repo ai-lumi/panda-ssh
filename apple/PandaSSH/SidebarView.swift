@@ -314,23 +314,24 @@ struct SidebarCallbacks {
 /// 作为 List/OutlineGroup 的行使用:单击选中由 List 负责,双击打开终端。
 struct HostRowView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var workspace: WorkspaceStore
     let host: HostEntry
     let callbacks: SidebarCallbacks
 
-    /// 状态圆点颜色(与原型 statusDot 一致)
+    /// 状态圆点只表达当前已打开会话的可达性；主机密钥验证状态是独立安全信息，
+    /// 不再以绿色伪装为“可连接”。
     private var dotColor: Color {
-        switch host.demo {
-        case .mismatch: return .red
-        case .unknown: return .yellow
-        default: return host.fingerprint != nil ? .green : Color(.gray).opacity(0.6)
-        }
+        workspace.connectionStatus(forHostID: host.id) == .connected
+            ? .green
+            : Color(.gray).opacity(0.6)
     }
 
     private var dotTip: String {
-        switch host.demo {
-        case .mismatch: return "主机密钥不匹配"
-        case .unknown: return "未验证过的主机"
-        default: return host.fingerprint != nil ? "已记录主机密钥" : "未记录主机密钥"
+        switch workspace.connectionStatus(forHostID: host.id) {
+        case .connected: return "当前存在可用 SSH 会话"
+        case .connecting: return "正在建立 SSH 会话"
+        case .failed: return "当前 SSH 会话不可达"
+        case .inactive: return "当前未建立 SSH 会话"
         }
     }
 

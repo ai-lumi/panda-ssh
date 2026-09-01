@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use base64ct::{Base64, Encoding};
 use sha2::{Digest, Sha256};
 
-use crate::Error;
 use crate::config::write_atomic;
+use crate::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyStatus {
     /// Stored key matches the presented one.
@@ -35,7 +35,10 @@ pub enum KnownHostStatus {
     /// No record for this host/port (any key type).
     Unknown,
     /// A record exists; carries its SHA256 fingerprint and key type.
-    Known { fingerprint: String, key_type: String },
+    Known {
+        fingerprint: String,
+        key_type: String,
+    },
 }
 
 /// SHA256 fingerprint of an OpenSSH public key string, in the colon-separated
@@ -136,7 +139,12 @@ impl KnownHosts {
     ///
     /// Entries are matched on `(host, keytype)`: a host with records but no
     /// record for this key type yields `Unknown`, not `Mismatch`.
-    pub fn check(&self, host: &str, port: u16, openssh_key_str: &str) -> Result<HostKeyStatus, Error> {
+    pub fn check(
+        &self,
+        host: &str,
+        port: u16,
+        openssh_key_str: &str,
+    ) -> Result<HostKeyStatus, Error> {
         let token = host_token(host, port);
         let keytype = keytype_of(openssh_key_str);
         for (stored_host, stored_key) in self.load()? {
@@ -295,10 +303,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kh = KnownHosts::new(dir.path().join("known_hosts"));
 
-        assert_eq!(kh.check("example.com", 22, KEY_A).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Unknown
+        );
 
         kh.store("example.com", 22, KEY_A).unwrap();
-        assert_eq!(kh.check("example.com", 22, KEY_A).unwrap(), HostKeyStatus::Match);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Match
+        );
 
         // Storing the same key again does not duplicate the line.
         kh.store("example.com", 22, KEY_A).unwrap();
@@ -329,8 +343,14 @@ mod tests {
         kh.store("example.com", 22, KEY_A).unwrap();
         kh.store("example.com", 22, KEY_B).unwrap();
 
-        assert_eq!(kh.check("example.com", 22, KEY_A).unwrap(), HostKeyStatus::Match);
-        assert_eq!(kh.check("example.com", 22, KEY_B).unwrap(), HostKeyStatus::Match);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Match
+        );
+        assert_eq!(
+            kh.check("example.com", 22, KEY_B).unwrap(),
+            HostKeyStatus::Match
+        );
         assert_eq!(kh.load().unwrap().len(), 2);
     }
 
@@ -341,7 +361,10 @@ mod tests {
         kh.store("example.com", 22, KEY_A).unwrap();
 
         // Host has an ed25519 record; an rsa key is a new keytype, not a change.
-        assert_eq!(kh.check("example.com", 22, KEY_B).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_B).unwrap(),
+            HostKeyStatus::Unknown
+        );
     }
 
     #[test]
@@ -360,8 +383,14 @@ mod tests {
                 stored: KEY_A2.to_string(),
             }
         );
-        assert_eq!(kh.check("example.com", 22, KEY_A2).unwrap(), HostKeyStatus::Match);
-        assert_eq!(kh.check("example.com", 22, KEY_B).unwrap(), HostKeyStatus::Match);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A2).unwrap(),
+            HostKeyStatus::Match
+        );
+        assert_eq!(
+            kh.check("example.com", 22, KEY_B).unwrap(),
+            HostKeyStatus::Match
+        );
         assert_eq!(kh.load().unwrap().len(), 2);
 
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -379,10 +408,19 @@ mod tests {
         kh.store("other.com", 22, KEY_A).unwrap();
 
         kh.remove("example.com", 22).unwrap();
-        assert_eq!(kh.check("example.com", 22, KEY_A).unwrap(), HostKeyStatus::Unknown);
-        assert_eq!(kh.check("example.com", 22, KEY_B).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Unknown
+        );
+        assert_eq!(
+            kh.check("example.com", 22, KEY_B).unwrap(),
+            HostKeyStatus::Unknown
+        );
         // Other hosts are untouched; removing a missing host is a no-op.
-        assert_eq!(kh.check("other.com", 22, KEY_A).unwrap(), HostKeyStatus::Match);
+        assert_eq!(
+            kh.check("other.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Match
+        );
         kh.remove("example.com", 22).unwrap();
         kh.remove("absent.com", 22).unwrap();
     }
@@ -395,11 +433,20 @@ mod tests {
         kh.store("example.com", 2222, KEY_A).unwrap();
 
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("[example.com]:2222 ssh-ed25519"), "file was: {raw}");
+        assert!(
+            raw.contains("[example.com]:2222 ssh-ed25519"),
+            "file was: {raw}"
+        );
 
-        assert_eq!(kh.check("example.com", 2222, KEY_A).unwrap(), HostKeyStatus::Match);
+        assert_eq!(
+            kh.check("example.com", 2222, KEY_A).unwrap(),
+            HostKeyStatus::Match
+        );
         // Port 22 entry is a different host token.
-        assert_eq!(kh.check("example.com", 22, KEY_A).unwrap(), HostKeyStatus::Unknown);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Unknown
+        );
     }
 
     #[test]
@@ -425,7 +472,10 @@ mod tests {
 
         kh.store("example.com", 22, KEY_A).unwrap();
         assert!(path.exists());
-        assert_eq!(kh.check("example.com", 22, KEY_A).unwrap(), HostKeyStatus::Match);
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Match
+        );
     }
 
     #[test]

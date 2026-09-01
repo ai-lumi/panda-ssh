@@ -11,6 +11,7 @@ struct WorkspaceTabPresentationMetrics: Equatable {
 
     let showsCloseButton: Bool
     let minimumHitTarget: Double
+    let closeButtonCornerRadius: Double
     let minimumTabHeight: Double
     let maximumTitleWidth: Double
 
@@ -34,6 +35,7 @@ struct WorkspaceTabPresentationMetrics: Equatable {
             return WorkspaceTabPresentationMetrics(
                 showsCloseButton: isActive || isHovered,
                 minimumHitTarget: 24,
+                closeButtonCornerRadius: 4,
                 minimumTabHeight: 28,
                 maximumTitleWidth: titleWidth
             )
@@ -41,6 +43,7 @@ struct WorkspaceTabPresentationMetrics: Equatable {
             return WorkspaceTabPresentationMetrics(
                 showsCloseButton: isActive || isHovered,
                 minimumHitTarget: 44,
+                closeButtonCornerRadius: 6,
                 minimumTabHeight: 44,
                 maximumTitleWidth: titleWidth
             )

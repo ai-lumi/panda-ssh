@@ -179,11 +179,7 @@ pub fn delete_group_cascade(
 ) -> Result<(), Error> {
     let doomed: HashSet<String> = descendant_ids(&groups.list()?, id).into_iter().collect();
     for mut host in hosts.list()? {
-        if host
-            .group_id
-            .as_ref()
-            .is_some_and(|g| doomed.contains(g))
-        {
+        if host.group_id.as_ref().is_some_and(|g| doomed.contains(g)) {
             host.group_id = None;
             hosts.upsert(host)?;
         }
@@ -446,7 +442,10 @@ mod tests {
         assert_eq!(h1.name, "h1");
         assert_eq!(h1.host, "example.com");
         assert_eq!(hosts.get("h2").unwrap().unwrap().group_id, None);
-        assert_eq!(hosts.get("h3").unwrap().unwrap().group_id.as_deref(), Some("keep"));
+        assert_eq!(
+            hosts.get("h3").unwrap().unwrap().group_id.as_deref(),
+            Some("keep")
+        );
         assert_eq!(hosts.get("h4").unwrap().unwrap().group_id, None);
     }
 
@@ -468,7 +467,9 @@ mod tests {
         let groups = TomlGroupStore::new(dir.path().join("groups.toml"));
         let hosts = TomlConfigStore::new(dir.path().join("hosts.toml"));
         groups.upsert(group("a", "A", None)).unwrap();
-        hosts.upsert(host_in_group("h1", Some("other-ghost"))).unwrap();
+        hosts
+            .upsert(host_in_group("h1", Some("other-ghost")))
+            .unwrap();
 
         delete_group_cascade(&groups, &hosts, "a").unwrap();
         assert_eq!(
@@ -493,7 +494,10 @@ mod tests {
             Some("e")
         );
         // 子分组随父级整体移动(b 的后代关系不变)
-        assert_eq!(descendant_ids(&store.list().unwrap(), "e"), vec!["e", "b", "c", "d"]);
+        assert_eq!(
+            descendant_ids(&store.list().unwrap(), "e"),
+            vec!["e", "b", "c", "d"]
+        );
     }
 
     #[test]

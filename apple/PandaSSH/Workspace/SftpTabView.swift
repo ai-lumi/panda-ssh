@@ -105,12 +105,19 @@ struct SftpTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            workspace.reportConnectionStatus(status(for: phase), forTabID: tab.id)
             if model.usesMockBackend {
                 session.useDemoSource()
             }
             evaluateGate()
         }
-        .onDisappear { session.disconnect() }
+        .onDisappear {
+            session.disconnect()
+            workspace.reportConnectionStatus(.inactive, forTabID: tab.id)
+        }
+        .onChange(of: phase) { _, newPhase in
+            workspace.reportConnectionStatus(status(for: newPhase), forTabID: tab.id)
+        }
         .preconnectSheets(gate: gate, host: host, tabID: tab.id)
         .task(id: "\(attempt)-\(gate.unlocked)") {
             guard gate.unlocked, phase == .connecting else { return }
@@ -121,6 +128,14 @@ struct SftpTabView: View {
             } else {
                 await startRealConnection()
             }
+        }
+    }
+
+    private func status(for phase: Phase) -> WorkspaceConnectionStatus {
+        switch phase {
+        case .connecting: return .connecting
+        case .connected: return .connected
+        case .failed: return .failed
         }
     }
 

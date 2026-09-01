@@ -50,7 +50,9 @@ fn snippet_lifecycle_and_edge_cases() {
     std::fs::create_dir_all(&dir2).unwrap();
 
     let mut valid = std::fs::File::create(dir2.join("valid.md")).unwrap();
-    valid.write_all(b"---\ntitle: \"OK\"\ntags: []\n---\nbody").unwrap();
+    valid
+        .write_all(b"---\ntitle: \"OK\"\ntags: []\n---\nbody")
+        .unwrap();
 
     let mut broken = std::fs::File::create(dir2.join("broken.md")).unwrap();
     broken.write_all(b"---\nunclosed frontmatter").unwrap();
