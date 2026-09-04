@@ -2,13 +2,14 @@
 
 pub mod batch;
 pub mod config;
-pub mod connection_pool;
+pub mod connection_registry;
 pub mod credentials;
 pub mod groups;
 pub mod hostkey;
 pub mod sftp;
 pub mod snippets;
 pub mod ssh;
+pub mod telemetry;
 
 pub use batch::{
     execute_batch_download, execute_batch_upload, scan_local_sources, scan_remote_sources,
@@ -72,6 +73,9 @@ pub enum Error {
 
     #[error("shell session closed")]
     ShellSessionClosed,
+
+    #[error("unknown connection telemetry id {0}")]
+    UnknownConnection(u64),
 
     #[error("operation cancelled")]
     Cancelled,

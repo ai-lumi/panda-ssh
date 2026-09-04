@@ -82,6 +82,53 @@ final class AppModelSelectionTests: XCTestCase {
         XCTAssertEqual(model.workspacePresentation, .tab(tabID: tabID))
     }
 
+    func testConnectionMonitorPresentationPreservesCurrentWorkspaceSelection() {
+        model.selectHost("h-webprod")
+        let presentation = model.workspacePresentation
+
+        model.showConnectionMonitor()
+
+        #if os(macOS)
+        XCTAssertEqual(model.sidebarPage, .hosts, "macOS 应由独立窗口呈现监控，不覆盖主工作区")
+        #else
+        XCTAssertEqual(model.sidebarPage, .connectionMonitor)
+        #endif
+        XCTAssertEqual(model.workspacePresentation, presentation)
+        XCTAssertEqual(model.selectedHostID, "h-webprod")
+    }
+
+    func testRepeatedConnectionMonitorPresentationDoesNotMutateExistingSelection() {
+        model.selectGroup("g-prod")
+        let presentation = model.workspacePresentation
+
+        model.showConnectionMonitor()
+        model.showConnectionMonitor()
+
+        #if os(macOS)
+        XCTAssertEqual(model.sidebarPage, .hosts)
+        #else
+        XCTAssertEqual(model.sidebarPage, .connectionMonitor)
+        #endif
+        XCTAssertEqual(model.workspacePresentation, presentation)
+        XCTAssertEqual(model.selectedGroupID, "g-prod")
+        XCTAssertNil(model.selectedHostID)
+    }
+
+    func testConnectionMonitorPresentationHandlesEmptyWorkspace() {
+        XCTAssertEqual(model.workspacePresentation, .empty)
+
+        model.showConnectionMonitor()
+
+        #if os(macOS)
+        XCTAssertEqual(model.sidebarPage, .hosts)
+        #else
+        XCTAssertEqual(model.sidebarPage, .connectionMonitor)
+        #endif
+        XCTAssertEqual(model.workspacePresentation, .empty)
+        XCTAssertNil(model.selectedHostID)
+        XCTAssertNil(model.selectedGroupID)
+    }
+
     func testDeletePresentedHostCle空内容选择() {
         model.selectHost("h-webprod")
 

@@ -5,12 +5,12 @@ struct PandaSSHApp: App {
     @StateObject private var model: AppModel
     @StateObject private var workspace: WorkspaceStore
     /// 全局传输任务队列(与原型全局传输列表一致,各 SFTP 标签共享)。
-    /// 在 init 中与 workspace 共享同一实例(注入到 WorkspaceStore 协调连接释放)。
+    /// 在 init 中与 workspace 共享同一实例。
     @StateObject private var transfers: TransferStore
 
     init() {
         // 先建 AppModel 与 TransferStore,再把主机名查询闭包与传输队列注入工作区
-        // store,保证标签标题消歧时能拿到最新主机名、关闭标签时能协调连接释放,
+        // store,保证标签标题消歧时能拿到最新主机名，
         // 且三者与 App 同生命周期。
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
@@ -19,9 +19,6 @@ struct PandaSSHApp: App {
         _workspace = StateObject(wrappedValue: WorkspaceStore(
             hostNameProvider: { hostID in
                 model.hosts.first(where: { $0.id == hostID })?.name
-            },
-            disconnectHandler: { hostID in
-                try? disconnectHost(hostId: hostID)
             },
             transferStore: transfers
         ))
@@ -34,6 +31,15 @@ struct PandaSSHApp: App {
                 .environmentObject(workspace)
                 .environmentObject(transfers)
                 .environmentObject(Logger.shared)
+                .task {
+                    // 独立于监控窗口的应用级日志消费；只读取 Rust 内存事件，不主动探测网络。
+                    guard !model.usesMockBackend else { return }
+                    while !Task.isCancelled {
+                        Logger.shared.logConnectionEvents(connectionLifecycleDrain())
+                        do { try await Task.sleep(for: .milliseconds(250)) }
+                        catch { break }
+                    }
+                }
         }
         #if os(macOS)
         // 保留原生工具栏、红绿灯、拖拽和全屏行为，只隐藏应用名称标题。
@@ -51,8 +57,17 @@ struct PandaSSHApp: App {
         WindowGroup("日志", id: "panda-log") {
             LogView(logger: Logger.shared)
         }
+        WindowGroup(ConnectionMonitorWindow.title, id: ConnectionMonitorWindow.id) {
+            ConnectionMonitorView()
+        }
+        .defaultSize(width: 920, height: 680)
         #endif
     }
+}
+
+enum ConnectionMonitorWindow {
+    static let title = "连接监控"
+    static let id = "panda-connection-monitor"
 }
 
 /// 全局开关:DEBUG 构建默认走真实后端,只有 Preview 与单元测试显式使用 Mock。
@@ -63,6 +78,7 @@ enum AppConfig {
 /// 侧栏底部入口决定主区页面:主机(工作区)/代码片段/设置。
 enum SidebarPage: Equatable {
     case hosts
+    case connectionMonitor
     case snippets
     case settings
     case logs
@@ -156,6 +172,11 @@ final class AppModel: ObservableObject {
     }
 
     func showSnippets() { sidebarPage = .snippets }
+    func showConnectionMonitor() {
+        #if os(iOS)
+        sidebarPage = .connectionMonitor
+        #endif
+    }
     func showSettings() { sidebarPage = .settings }
     func showLogs() { sidebarPage = .logs }
 

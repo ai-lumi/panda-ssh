@@ -7,9 +7,9 @@
 ## Requirements
 ### Requirement: 建立会话
 
-系统 SHALL 支持以 `HostConfig` + `Credentials` 建立 SSH 会话。`Credentials` MUST 为 `Password(明文)` 或 `KeyFile { path, passphrase }` 之一，由调用方从本地凭据文件或当前会话输入取回后传入，核心库 SHALL NOT 直接访问平台凭据服务。连接与认证 MUST 各有超时（默认 30 秒），空闲超时默认 30 秒。
+系统 SHALL 支持以 `HostConfig` + `Credentials` 建立 SSH 会话。`Credentials` MUST 为 `Password(明文)` 或 `KeyFile { path, passphrase }` 之一，由调用方从本地凭据文件或当前会话输入取回后传入，核心库 SHALL NOT 直接访问平台凭据服务。连接与认证 MUST 各有超时（默认 30 秒）；已认证会话 SHALL NOT 配置基于无业务流量的 inactivity timeout，并 SHALL 使用 SSH keepalive 及有限失败次数检测不可用。
 
-系统 SHALL 优先从连接池中获取已有可用会话；池中无可用会话时，按原有流程新建连接。新建成功的会话 MUST 自动加入连接池以供后续复用。
+每次连接请求 SHALL 新建一条 `SshSession`，MUST NOT 从全局连接池取得或向不同所有者共享会话。调用方 SHALL 成为该会话的唯一业务所有者，并在自身生命周期结束时释放会话。
 
 #### Scenario: 密码认证
 
@@ -31,10 +31,16 @@
 - **WHEN** 选择的私钥受口令保护且未提供口令
 - **THEN** 返回可区分的 `MissingPassphrase` 错误而非 `Timeout`
 
-#### Scenario: 复用已有会话
+#### Scenario: 同一主机独立建立会话
 
-- **WHEN** 针对同一主机的第二次操作发生时，池中已有该主机的存活会话
-- **THEN** 直接复用该会话，SHALL NOT 触发新的 TCP 连接或 SSH 握手
+- **WHEN** 两个所有者使用相同凭据连接同一主机
+- **THEN** 系统分别建立两条 SSH 会话与底层 Socket，MUST NOT 跨所有者复用
+
+#### Scenario: 已认证会话正常空闲
+
+- **GIVEN** 已认证会话没有业务流量且 keepalive 正常
+- **WHEN** 空闲时间超过三十秒
+- **THEN** 会话保持存活，MUST NOT 因 inactivity timeout 关闭
 
 ### Requirement: 命令执行
 
@@ -52,7 +58,7 @@
 
 ### Requirement: 交互式 shell 会话
 
-系统 SHALL 支持在已认证的 SSH 会话上建立交互式 shell 会话。Shell 会话 MUST 先分配 PTY（伪终端），再请求远程 shell，使远程 shell 运行在正确的终端语义环境中（ANSI 转义码、行编辑、作业控制）。Shell 会话 MUST 支持双向数据流：客户端输入字节通过 SSH 通道发送到服务端 PTY，服务端 PTY 输出由客户端读取并传递给终端视图。Shell 会话 MUST 支持窗口尺寸动态调整。
+系统 SHALL 支持在已认证的 SSH 会话上建立交互式 shell 会话。Shell 会话 MUST 先分配 PTY（伪终端），再请求远程 shell，使远程 shell 运行在正确的终端语义环境中（ANSI 转义码、行编辑、作业控制）。Shell 会话 MUST 支持双向数据流：客户端输入字节通过 SSH 通道发送到服务端 PTY，服务端 PTY 输出由客户端读取并传递给终端视图。Shell 会话 MUST 支持窗口尺寸动态调整。终端所有者 SHALL 独占该 shell Channel 与 SSH Transport；shell 正常结束、本地关闭或失败后 SHALL 释放所属 Transport，MUST NOT 影响其他所有者。
 
 #### Scenario: 成功建立 shell 会话
 
@@ -66,5 +72,5 @@
 
 #### Scenario: shell 会话关闭
 
-- **WHEN** 客户端关闭 shell 会话
-- **THEN** shell 通道被关闭，底层 SSH 连接保持（以便连接池复用）
+- **WHEN** 客户端关闭 shell 会话或远端 shell 正常结束
+- **THEN** shell 通道与该终端所有者的底层 SSH 连接被释放，其他所有者的连接保持不变

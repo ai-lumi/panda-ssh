@@ -95,6 +95,14 @@ final class Logger: ObservableObject {
 
     // MARK: - 日志记录
 
+    /// 原因由 Rust 固定枚举生成；桥接层不读取终端数据或凭据。
+    func logConnectionEvents(_ events: [ConnectionLifecycleRecord]) {
+        for event in events {
+            log("host=\(event.address); connection=\(event.connectionId); owner=\(event.ownerKind)#\(event.ownerId); \(event.reason)",
+                level: event.isError ? .error : .info, module: LogModule.ssh)
+        }
+    }
+
     /// 记录一条日志。`module` 必须使用规范模块名
     /// （SSH / SFTP / Transfer / HostKey / Config / FFI）；默认 `Config` 归入配置/通用类别。
     func log(_ message: String, level: LogLevel = .info, module: String = LogModule.config) {

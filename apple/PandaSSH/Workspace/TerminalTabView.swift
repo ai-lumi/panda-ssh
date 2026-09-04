@@ -35,6 +35,8 @@ struct TerminalTabView: View {
             evaluateGate()
         }
         .onDisappear {
+            // 切换到日志/监控等页面不会改变标签所有权；仅标签真正移除时关闭。
+            guard !workspace.tabs.contains(where: { $0.id == tab.id }) else { return }
             // 不在此注销会话:连接态由 connectedTerminalTabs 独立追踪,
             // 切换标签时视图销毁不应清除「已连接」标记(关闭确认仍需生效)。
             // 注销在 WorkspaceStore.close(tabID:) 中统一执行。
@@ -88,12 +90,14 @@ struct TerminalTabView: View {
                 )
                 .padding(24)
             case .shell:
+                let readingAttempt = session.attempt
                 SwiftTermWrapper(
                     connection: session.connection,
                     isActive: isActive,
-                    onReadError: {
-                        session.handleRemoteShellExit()
-                        workspace.handleTerminalSessionEnded(tabID: tab.id)
+                    onReadError: { error in
+                        if session.handleSessionEnd(error, attempt: readingAttempt) {
+                            workspace.handleTerminalSessionEnded(tabID: tab.id)
+                        }
                     }
                 )
             }
@@ -168,7 +172,7 @@ struct TerminalTabView: View {
 struct SwiftTermWrapper: View {
     let connection: ShellConnection?
     let isActive: Bool
-    let onReadError: () -> Void
+    let onReadError: (Error) -> Void
 
     var body: some View {
         #if os(macOS)
@@ -194,7 +198,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private weak var terminalView: TerminalView?
     private var connection: ShellConnection?
     private var readTask: Task<Void, Never>?
-    private let onReadError: () -> Void
+    private let onReadError: (Error) -> Void
     private var shouldRequestInputFocus = false
 
     /// 最近一次上报（或待上报）给服务端的终端尺寸；nil 表示从未上报。
@@ -229,8 +233,17 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     /// 非 `open` 方法，无法在 spy 子类中重写；用此 flag 验证调用。
     internal private(set) var testDidCallSelectAll = false
 
-    init(onReadError: @escaping () -> Void) {
-        self.onReadError = onReadError
+    init(onSessionEnd: @escaping (Error) -> Void) {
+        self.onReadError = onSessionEnd
+    }
+
+    convenience init(onReadError: @escaping () -> Void) {
+        self.init(onSessionEnd: { _ in onReadError() })
+    }
+
+    private func reportError(_ error: Error, from source: ShellConnection) {
+        guard source === connection else { return }
+        onReadError(error)
     }
 
     func setup(terminalView: TerminalView, connection: ShellConnection?) {
@@ -283,7 +296,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     func requestInputFocus(for terminalView: TerminalView) {
         DispatchQueue.main.async { [weak self, weak terminalView] in
             guard let self, self.shouldRequestInputFocus, let terminalView else { return }
-            terminalView.becomeFirstResponder()
+            _ = terminalView.becomeFirstResponder()
         }
     }
     #endif
@@ -305,20 +318,25 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private func startReading() {
         guard let connection else { return }
         readTask?.cancel()
-        readTask = Task { [weak self] in
+        // Coordinator 与读取任务在视图存续期内共同存活；dismantle 时 detach()
+        // 会取消任务并打破引用环。使用稳定强引用也避免 Swift 6 将弱变量跨
+        // MainActor 闭包捕获判定为并发不安全。
+        readTask = Task { [self] in
             while !Task.isCancelled {
                 do {
                     let data = try connection.read(max: 4096)
                     if !data.isEmpty {
                         await MainActor.run {
-                            guard let self = self, let tv = self.terminalView else { return }
+                            guard !Task.isCancelled, self.connection === connection,
+                                  let tv = self.terminalView else { return }
                             tv.feed(byteArray: Array(data)[...])
                         }
                         // 有数据时立即继续读取，不 sleep，降低延迟。
                         continue
                     }
                 } catch {
-                    await MainActor.run { self?.onReadError() }
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run { self.reportError(error, from: connection) }
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(16))
@@ -329,7 +347,17 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     // MARK: - TerminalViewDelegate
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        try? connection?.write(Data(data))
+        sendToShell(Data(data))
+    }
+
+    /// 所有终端输入统一走此入口；写入失败立即通知会话进入不可交互状态。
+    internal func sendToShell(_ data: Data) {
+        guard currentPhase == .shell, let connection else { return }
+        do {
+            try connection.write(data)
+        } catch {
+            reportError(error, from: connection)
+        }
     }
 
     /// 视图尺寸变化回调（SwiftTerm 在**主线程布局过程**中同步触发）。
@@ -393,27 +421,27 @@ extension TerminalCoordinator: TerminalMenuActionPerformer {
             guard currentPhase == .shell else { return }
             let text = readClipboardText()
             guard !text.isEmpty else { return }
-            try? connection?.write(text.data(using: .utf8) ?? Data())
+            sendToShell(text.data(using: .utf8) ?? Data())
         case .pasteAndEnter:
             guard currentPhase == .shell else { return }
             let text = readClipboardText()
             guard !text.isEmpty else { return }
             var data = text.data(using: .utf8) ?? Data()
             data.append(0x0A) // LF
-            try? connection?.write(data)
+            sendToShell(data)
         case .selectAll:
             terminalView?.selectAll()
             testDidCallSelectAll = true
         case .clearScreen:
             guard currentPhase == .shell, connection != nil else { return }
-            try? connection?.write("clear\n".data(using: .utf8) ?? Data())
+            sendToShell("clear\n".data(using: .utf8) ?? Data())
         case .resetTerminal:
             // macOS 端 SwiftTerm 公开了 `terminal` 属性，可直接 softReset；
             // iOS 端 `terminal` 为 internal，通过发送 RIS 序列让远端触发终端重置。
             #if os(macOS)
             terminalView?.terminal?.softReset()
             #endif
-            try? connection?.write("\u{1B}c".data(using: .utf8) ?? Data())
+            sendToShell("\u{1B}c".data(using: .utf8) ?? Data())
         case .copyAndPaste:
             #if os(macOS)
             terminalView?.copy(self)
@@ -421,7 +449,7 @@ extension TerminalCoordinator: TerminalMenuActionPerformer {
             guard currentPhase == .shell else { return }
             let text = readClipboardText()
             guard !text.isEmpty else { return }
-            try? connection?.write(text.data(using: .utf8) ?? Data())
+            sendToShell(text.data(using: .utf8) ?? Data())
         case .reconnect:
             onReconnect?()
         case .closeTab:
@@ -463,10 +491,8 @@ extension TerminalCoordinator: PandaTerminalViewDelegate {
     /// - 不追加换行符（spec「SHALL NOT 追加换行符」）。
     /// - 不修改系统剪贴板（spec「SHALL NOT 写入系统剪贴板」）。
     func pastePrimarySelection() {
-        guard currentPhase == .shell,
-              !primarySelection.isEmpty,
-              let connection = connection else { return }
-        try? connection.write(primarySelection.data(using: .utf8) ?? Data())
+        guard currentPhase == .shell, !primarySelection.isEmpty else { return }
+        sendToShell(primarySelection.data(using: .utf8) ?? Data())
     }
 
     /// 测试可见的 PRIMARY 缓冲读取入口（便于断言缓冲值）。
@@ -543,10 +569,10 @@ extension TerminalCoordinator {
 private struct MacTerminalRepresentable: NSViewRepresentable {
     let connection: ShellConnection?
     let isActive: Bool
-    let onReadError: () -> Void
+    let onReadError: (Error) -> Void
 
     func makeCoordinator() -> TerminalCoordinator {
-        TerminalCoordinator(onReadError: onReadError)
+        TerminalCoordinator(onSessionEnd: onReadError)
     }
 
     func makeNSView(context: Context) -> TerminalView {
@@ -582,10 +608,10 @@ private struct MacTerminalRepresentable: NSViewRepresentable {
 private struct IOSTerminalRepresentable: UIViewRepresentable {
     let connection: ShellConnection?
     let isActive: Bool
-    let onReadError: () -> Void
+    let onReadError: (Error) -> Void
 
     func makeCoordinator() -> TerminalCoordinator {
-        TerminalCoordinator(onReadError: onReadError)
+        TerminalCoordinator(onSessionEnd: onReadError)
     }
 
     func makeUIView(context: Context) -> TerminalView {

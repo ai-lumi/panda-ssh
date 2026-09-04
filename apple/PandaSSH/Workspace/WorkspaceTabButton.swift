@@ -24,36 +24,27 @@ struct WorkspaceTabButton: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Button(action: onSelect) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
+            Circle()
+                .fill(dotColor)
+                .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
 
-                    Text(tab.title)
-                        .font(.callout)
-                        .lineLimit(1)
-                        .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(tab.title)
-            .accessibilityValue(statusLabel)
-            .accessibilityHint("切换到此标签页")
-            .accessibilityAddTraits(isActive ? .isSelected : [])
+            Text(tab.title)
+                .font(.callout)
+                .lineLimit(1)
+                .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
+                    // `.plain` 在 macOS 会按 label 建立命中区域；尺寸与形状必须在此处定义。
+                    .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
+                    .contentShape(
+                        RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
+                    )
             }
             .buttonStyle(.plain)
-            .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
             .foregroundStyle(.secondary)
-            .contentShape(
-                RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
-            )
             .background(
                 hovering ? Color.primary.opacity(0.12) : Color.clear,
                 in: RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
@@ -69,7 +60,16 @@ struct WorkspaceTabButton: View {
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .gesture(
+            TapGesture().onEnded(onSelect),
+            including: metrics.selectionGestureIncludesSubviews ? .all : .gesture
+        )
         .onHover { hovering = $0 }
+        .accessibilityLabel(tab.title)
+        .accessibilityValue(statusLabel)
+        .accessibilityHint("切换到此标签页")
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction(.default, onSelect)
         .accessibilityElement(children: .contain)
     }
 }

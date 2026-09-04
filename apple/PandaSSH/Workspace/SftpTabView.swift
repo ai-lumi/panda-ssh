@@ -83,6 +83,7 @@ struct SftpTabView: View {
                         host: host,
                         failure: failure,
                         onRetry: {
+                            session.disconnect()
                             attempt += 1
                             phase = .connecting
                         },
@@ -105,6 +106,7 @@ struct SftpTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            workspace.registerSftp(session, for: tab.id)
             workspace.reportConnectionStatus(status(for: phase), forTabID: tab.id)
             if model.usesMockBackend {
                 session.useDemoSource()
@@ -112,6 +114,8 @@ struct SftpTabView: View {
             evaluateGate()
         }
         .onDisappear {
+            // 仅页面切换时标签仍存在，必须保留其专属 SFTP 连接。
+            guard !workspace.tabs.contains(where: { $0.id == tab.id }) else { return }
             session.disconnect()
             workspace.reportConnectionStatus(.inactive, forTabID: tab.id)
         }
@@ -827,6 +831,7 @@ struct SftpTabView: View {
     // MARK: - 真实连接
 
     private func startRealConnection() async {
+        let generation = attempt
         guard model.configRecord(for: host.id) != nil else {
             phase = .failed
             return
@@ -838,7 +843,10 @@ struct SftpTabView: View {
             _ = gate.requestCredentialsIfNeeded(for: host)
             return
         }
-        if let error = await session.connect(password: secrets.password, passphrase: secrets.passphrase) {
+        let error = await session.connect(password: secrets.password, passphrase: secrets.passphrase)
+        guard !Task.isCancelled, generation == attempt,
+              workspace.tabs.contains(where: { $0.id == tab.id }) else { return }
+        if let error {
             let classified = ConnectionFailure(error: error)
             if classified == .missingCredential {
                 gate.requireCredentialInput()
@@ -856,7 +864,7 @@ struct SftpTabView: View {
         let localOK = await session.localPane.reload()
         let remoteOK = await session.remotePane.reload()
         try? await Task.sleep(for: .milliseconds(300))
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == attempt else { return }
         if localOK && remoteOK {
             phase = .connected
         } else {

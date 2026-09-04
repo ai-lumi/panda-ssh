@@ -68,6 +68,21 @@ final class LogEntryTests: XCTestCase {
 
 /// 覆盖正常流程、边界条件(缓冲区满)、意外操作(clear 后继续记录)。
 final class LoggerBufferTests: XCTestCase {
+    @MainActor
+    func testConnectionLifecycleLogsIncludeOwnerAndDistinguishFailure() async throws {
+        let logger = Logger(configDirectory: nil)
+        logger.logConnectionEvents([
+            ConnectionLifecycleRecord(connectionId: 42, address: "example.test:22", ownerKind: "终端标签", ownerId: "7", reason: "Channel 正常结束", isError: false),
+            ConnectionLifecycleRecord(connectionId: 43, address: "example.test:22", ownerKind: "SFTP 标签", ownerId: "8", reason: "SSH keepalive 失败", isError: true),
+        ])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(logger.entries.map(\.level), [.info, .error])
+        XCTAssertTrue(logger.entries[0].message.contains("connection=42"))
+        XCTAssertTrue(logger.entries[0].message.contains("终端标签#7"))
+        XCTAssertTrue(logger.entries[1].message.contains("keepalive"))
+        logger.logConnectionEvents([])
+        XCTAssertEqual(logger.entries.count, 2)
+    }
 
     /// 临时目录,每次测试新建,隔离文件副作用。
     private func makeLogger(maxFileSize: Int64 = 1024) -> (Logger, URL) {

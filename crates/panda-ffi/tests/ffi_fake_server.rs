@@ -5,14 +5,17 @@ use std::time::Duration;
 
 use panda_ffi::{
     accept_unknown_host_key, batch_transfer_cancel, batch_transfer_list,
-    batch_transfer_resolve_conflict, batch_transfer_status, delete_host, host_key_status,
+    batch_transfer_resolve_conflict, batch_transfer_status, connection_health_check,
+    connection_lifecycle_drain, connection_telemetry_list, delete_host, host_key_status,
     init_store, list_hosts, save_host, scan_local_batch, scan_remote_batch,
     sftp_check_download_conflict, sftp_check_upload_conflict, sftp_create_dir, sftp_download,
-    sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file, sftp_upload, shell_close,
-    shell_open, shell_read, shell_resize, shell_write, start_batch_download, start_batch_upload,
-    start_transfer, test_connection, transfer_cancel, transfer_list, transfer_pause,
-    transfer_resume, transfer_retry, transfer_status, AuthMethodEnum, BatchTransferStatusEnum,
-    HostConfigRecord, KnownHostStatusEnum, PandaError, TransferDirectionEnum, TransferStatusEnum,
+    sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file, sftp_session_close,
+    sftp_session_list, sftp_session_open, sftp_upload, shell_close, shell_open, shell_read,
+    shell_resize, shell_write, start_batch_download, start_batch_upload, start_transfer,
+    test_connection, transfer_cancel, transfer_list, transfer_pause, transfer_resume,
+    transfer_retry, transfer_status, AuthMethodEnum, BatchTransferStatusEnum, ChannelKindEnum,
+    ChannelStateEnum, ConnectionStateEnum, HealthStateEnum, HostConfigRecord, KnownHostStatusEnum,
+    PandaError, SshConnectionStateEnum, TransferDirectionEnum, TransferStatusEnum,
 };
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
@@ -656,6 +659,12 @@ fn ffi_sftp_and_connection_success_paths() {
         .unwrap();
     let msg = test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     assert!(msg.contains("connected to"));
+    assert!(
+        connection_telemetry_list()
+            .into_iter()
+            .all(|record| record.host_id != host.id),
+        "一次性连接探测结束后必须释放自己的 Transport"
+    );
 
     let local = dir.path().join("local.txt");
     std::fs::write(&local, b"ffi payload").unwrap();
@@ -718,6 +727,132 @@ fn ffi_sftp_and_connection_success_paths() {
 
     delete_host(host.id).unwrap();
     cleanup_store();
+}
+
+#[test]
+fn ffi_connection_telemetry_maps_all_states_channels_and_large_counts() {
+    use panda_core::telemetry::{global_registry, ChannelKind, ChannelState, HealthState};
+
+    let registry = global_registry();
+    let connecting = registry.register_connection("telemetry-connecting".into(), "a:22".into());
+    let active = registry.register_connection("telemetry-active".into(), "b:22".into());
+    registry.set_authenticated(active);
+    registry.record_io(active, u64::MAX, u64::MAX);
+    let idle = registry.register_connection("telemetry-idle".into(), "c:22".into());
+    registry.set_authenticated(idle);
+    registry.mark_idle(idle);
+    let closed = registry.register_connection("telemetry-closed".into(), "d:22".into());
+    registry.set_authenticated(closed);
+    registry.close_connection(closed);
+    let failed = registry.register_connection("telemetry-failed".into(), "e:22".into());
+    registry.fail(failed, "failure".into());
+
+    let shell = registry.open_channel(active, ChannelKind::Shell);
+    let sftp = registry.open_channel(active, ChannelKind::Sftp);
+    let exec = registry.open_channel(active, ChannelKind::Exec);
+    registry.update_channel(active, shell, 1, 2, Some(ChannelState::Closed));
+    registry.update_channel(active, sftp, 3, 4, Some(ChannelState::Failed));
+    registry.update_channel(active, exec, 5, 6, None);
+    registry.set_health(connecting, HealthState::Unknown, None);
+
+    let records = connection_telemetry_list();
+    let by_host = |host: &str| {
+        records
+            .iter()
+            .find(|record| record.host_id == host)
+            .unwrap()
+    };
+    assert_eq!(
+        by_host("telemetry-connecting").transport_state,
+        ConnectionStateEnum::Connecting
+    );
+    assert_eq!(
+        by_host("telemetry-connecting").ssh_state,
+        SshConnectionStateEnum::Connecting
+    );
+    assert_eq!(
+        by_host("telemetry-connecting").health_state,
+        HealthStateEnum::Unknown
+    );
+    assert_eq!(
+        by_host("telemetry-active").transport_state,
+        ConnectionStateEnum::Active
+    );
+    assert_eq!(
+        by_host("telemetry-active").ssh_state,
+        SshConnectionStateEnum::Authenticated
+    );
+    assert_eq!(
+        by_host("telemetry-active").health_state,
+        HealthStateEnum::Healthy
+    );
+    assert_eq!(by_host("telemetry-active").received_bytes, u64::MAX);
+    assert_eq!(
+        by_host("telemetry-idle").transport_state,
+        ConnectionStateEnum::Idle
+    );
+    assert_eq!(
+        by_host("telemetry-closed").transport_state,
+        ConnectionStateEnum::Closed
+    );
+    assert_eq!(
+        by_host("telemetry-closed").ssh_state,
+        SshConnectionStateEnum::Closed
+    );
+    assert_eq!(
+        by_host("telemetry-failed").transport_state,
+        ConnectionStateEnum::Failed
+    );
+    assert_eq!(
+        by_host("telemetry-failed").ssh_state,
+        SshConnectionStateEnum::Failed
+    );
+    assert_eq!(
+        by_host("telemetry-failed").health_state,
+        HealthStateEnum::Unavailable
+    );
+
+    let channels = &by_host("telemetry-active").channels;
+    assert!(channels
+        .iter()
+        .any(|record| record.kind == ChannelKindEnum::Shell
+            && record.state == ChannelStateEnum::Closed));
+    assert!(channels
+        .iter()
+        .any(|record| record.kind == ChannelKindEnum::Sftp
+            && record.state == ChannelStateEnum::Failed));
+    assert!(channels.iter().any(
+        |record| record.kind == ChannelKindEnum::Exec && record.state == ChannelStateEnum::Open
+    ));
+    assert!(matches!(
+        connection_health_check(u64::MAX),
+        Err(PandaError::UnknownConnection(id)) if id == u64::MAX
+    ));
+
+    for id in [connecting, active, idle, closed, failed] {
+        registry.unregister_connection(id);
+    }
+}
+
+#[test]
+fn ffi_lifecycle_events_can_be_drained_after_owner_release() {
+    use panda_core::telemetry::{global_registry, LifecycleKind};
+    let _guard = TEST_LOCK.lock().unwrap();
+    let registry = global_registry();
+    let id = registry.register_connection("events".into(), "example.test:22".into());
+    registry.set_owner(id, "SFTP 标签", "fixture-handle");
+    registry.record_event(id, LifecycleKind::ReadError);
+    registry.unregister_connection(id);
+    let events = panda_ffi::connection_lifecycle_drain();
+    let own: Vec<_> = events.iter().filter(|e| e.connection_id == id).collect();
+    assert_eq!(own.len(), 3);
+    assert_eq!(own[0].address, "example.test:22");
+    assert_eq!(own[0].owner_kind, "SFTP 标签");
+    assert_eq!(own[0].owner_id, "fixture-handle");
+    assert!(!own[0].is_error);
+    assert!(own[1].is_error);
+    assert_eq!(own[2].reason, "所有者释放");
+    assert!(panda_ffi::connection_lifecycle_drain().is_empty());
 }
 
 #[test]
@@ -1274,6 +1409,19 @@ fn ffi_shell_session_lifecycle() {
 
     let handle = shell_open(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
 
+    let connection = connection_telemetry_list()
+        .into_iter()
+        .find(|record| record.owner_kind == "终端标签" && record.owner_id == handle.to_string())
+        .expect("终端句柄应关联唯一连接");
+    let lifecycle = connection_lifecycle_drain();
+    let connected: Vec<_> = lifecycle
+        .iter()
+        .filter(|event| event.connection_id == connection.id && event.reason == "连接成功")
+        .collect();
+    assert_eq!(connected.len(), 1, "同一连接只能记录一次成功事件");
+    assert_eq!(connected[0].owner_kind, "终端标签");
+    assert_eq!(connected[0].owner_id, handle.to_string());
+
     std::thread::sleep(Duration::from_millis(150));
     let banner = shell_read(handle, 1024).unwrap();
     assert!(String::from_utf8_lossy(&banner).contains("Panda fake shell"));
@@ -1285,11 +1433,179 @@ fn ffi_shell_session_lifecycle() {
     shell_resize(handle, 120, 40).unwrap();
 
     shell_close(handle).unwrap();
+    shell_close(handle).unwrap();
 
     assert!(matches!(
         shell_read(handle, 1024),
         Err(PandaError::UnknownShellHandle(_))
     ));
+
+    delete_host(host.id).unwrap();
+    cleanup_store();
+}
+
+#[test]
+fn ffi_same_host_shells_are_isolated_when_one_closes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    save_host(HostConfigRecord {
+        id: String::new(),
+        name: "shell-isolated".into(),
+        host: "127.0.0.1".into(),
+        port,
+        username: USERNAME.into(),
+        auth: AuthMethodEnum::Password { password_ref: None },
+        notes: None,
+        group_id: None,
+    })
+    .unwrap();
+    let host = list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|host| host.name == "shell-isolated")
+        .unwrap();
+
+    let first = shell_open(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    let second = shell_open(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                shell_close(first)
+            })
+        })
+        .collect();
+    barrier.wait();
+    for worker in workers {
+        worker.join().unwrap().unwrap();
+    }
+    shell_write(second, b"still-alive\n".to_vec()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let output = shell_read(second, 4096).unwrap();
+    assert!(String::from_utf8_lossy(&output).contains("still-alive"));
+    shell_close(second).unwrap();
+
+    delete_host(host.id).unwrap();
+    cleanup_store();
+}
+
+#[test]
+fn ffi_same_host_sftp_handles_are_isolated_and_close_is_idempotent() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+
+    let port = start_server();
+    save_host(HostConfigRecord {
+        id: String::new(),
+        name: "sftp-owned".into(),
+        host: "127.0.0.1".into(),
+        port,
+        username: USERNAME.into(),
+        auth: AuthMethodEnum::Password { password_ref: None },
+        notes: None,
+        group_id: None,
+    })
+    .unwrap();
+    let host = list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|host| host.name == "sftp-owned")
+        .unwrap();
+
+    let first = sftp_session_open(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    let second = sftp_session_open(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    assert_ne!(first.handle, second.handle);
+    assert_ne!(first.connection_id, second.connection_id);
+
+    // 标签句柄覆盖目录、文件、冲突和错误路径，操作后仍是原连接。
+    use panda_ffi::{
+        sftp_session_check_download_conflict, sftp_session_check_upload_conflict,
+        sftp_session_create_dir, sftp_session_remove_dir, sftp_session_remove_file,
+    };
+    let local = tempfile::tempdir().unwrap();
+    let source = local.path().join("source");
+    std::fs::write(&source, b"data").unwrap();
+    sftp_session_create_dir(second.handle, "/owned".into()).unwrap();
+    assert!(sftp_session_list(second.handle, "/".into())
+        .unwrap()
+        .iter()
+        .any(|f| f.name == "owned"));
+    assert!(sftp_session_check_upload_conflict(
+        second.handle,
+        source.to_string_lossy().into(),
+        "/missing".into()
+    )
+    .unwrap()
+    .is_none());
+    sftp_upload(
+        host.id.clone(),
+        source.to_string_lossy().into(),
+        "/owned/file".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(sftp_session_check_upload_conflict(
+        second.handle,
+        source.to_string_lossy().into(),
+        "/owned/file".into()
+    )
+    .unwrap()
+    .is_some());
+    assert!(sftp_session_check_download_conflict(
+        second.handle,
+        "/owned/file".into(),
+        source.to_string_lossy().into()
+    )
+    .unwrap()
+    .is_some());
+    assert!(sftp_session_check_download_conflict(
+        second.handle,
+        "/owned/file".into(),
+        local.path().join("absent").to_string_lossy().into()
+    )
+    .unwrap()
+    .is_none());
+    assert!(sftp_session_list(second.handle, "/absent".into()).is_err());
+    assert!(sftp_session_check_upload_conflict(
+        second.handle,
+        "/nonexistent/local".into(),
+        "/owned/file".into()
+    )
+    .is_err());
+    // 冲突检查只呈现元数据；缺失源文件由真正传输报告，不在本变更改变既有规则。
+    assert!(sftp_session_check_download_conflict(
+        second.handle,
+        "/absent".into(),
+        source.to_string_lossy().into()
+    )
+    .is_ok());
+    sftp_session_remove_file(second.handle, "/owned/file".into()).unwrap();
+    assert!(sftp_session_remove_file(second.handle, "/owned/file".into()).is_err());
+    sftp_session_remove_dir(second.handle, "/owned".into()).unwrap();
+    assert!(sftp_session_remove_dir(second.handle, "/owned".into()).is_err());
+
+    sftp_session_close(first.handle).unwrap();
+    sftp_session_close(first.handle).unwrap();
+    assert!(matches!(
+        sftp_session_list(first.handle, "/".into()),
+        Err(PandaError::UnknownSftpHandle(_))
+    ));
+    assert!(sftp_session_create_dir(first.handle, "/unused".into()).is_err());
+    assert!(sftp_session_remove_file(first.handle, String::new()).is_err());
+    assert!(sftp_session_remove_dir(first.handle, String::new()).is_err());
+    assert!(
+        sftp_session_check_upload_conflict(first.handle, String::new(), String::new()).is_err()
+    );
+    assert!(
+        sftp_session_check_download_conflict(first.handle, String::new(), String::new()).is_err()
+    );
+    sftp_session_list(second.handle, "/".into()).unwrap();
+    sftp_session_close(second.handle).unwrap();
 
     delete_host(host.id).unwrap();
     cleanup_store();

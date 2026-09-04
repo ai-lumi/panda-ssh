@@ -2,71 +2,79 @@
 
 ## Purpose
 
-为 Panda SSH 提供 SSH 会话的连接复用与生命周期管理能力，避免每次操作重复建立 TCP + SSH 握手，降低操作延迟与服务器连接负载。连接生命周期由 UI 标签页驱动，切换 tab 时连接保持存活，关闭最后一个指向某主机的标签页时显式断开。
+为 Panda SSH 提供显式、按所有者隔离的 SSH Transport 生命周期管理。终端标签、SFTP 标签和后台传输各自独占 Socket；活动连接注册表只承担运行时查找、精确关闭与遥测，不缓存或复用业务连接。
 
 ## Requirements
 
-### Requirement: 连接复用
+### Requirement: 显式连接所有权
 
-系统 SHALL 维护一个以 `(host_id, credentials)` 为键的连接缓存。对同一主机的后续操作优先复用缓存中已有的可用 `SshSession`，SHALL NOT 在无可用会话时直接新建连接。连接缓存 SHALL NOT 有空闲超时——连接持久存活，直到被显式断开或检测到失效。
+系统 SHALL 为终端标签、SFTP 标签和后台传输分别建立由该所有者独占的 SSH Transport。不同所有者即使连接同一主机并使用相同凭据，也 MUST NOT 隐式共享 Socket。系统 MAY 维护仅用于查找、监控和精确关闭的活动连接注册表，但该注册表 MUST NOT 缓存或复用连接。
 
-#### Scenario: 复用已有会话执行 SFTP 列表
+#### Scenario: 同一主机的两个终端独立建连
 
-- **WHEN** 已有一条针对某主机的存活会话存在于缓存中，随后调用 `sftp_list`
-- **THEN** 该操作复用已有会话，SHALL NOT 触发新的 TCP 连接或 SSH 握手
+- **WHEN** 用户为同一主机打开两个终端标签
+- **THEN** 系统建立两条独立 SSH Transport，每个标签仅拥有其中一条
 
-#### Scenario: 无可用会话时新建连接
+#### Scenario: 终端与 SFTP 不共享 Socket
 
-- **WHEN** 缓存中不存在针对该主机的可用会话
-- **THEN** 新建 SSH 连接并按原有认证流程完成握手与认证
+- **WHEN** 用户已打开某主机的终端标签，随后打开同一主机的 SFTP 标签
+- **THEN** SFTP 标签建立自己的 SSH Transport，MUST NOT 复用终端标签的 Socket
 
-#### Scenario: 切换 tab 后连接保持
+### Requirement: 按连接标识精确关闭
 
-- **WHEN** 用户从主机 A 的终端标签切换到主机 B 的标签，随后切回主机 A
-- **THEN** 主机 A 的 SSH 连接 SHALL 仍然存活，SHALL NOT 重新握手
+系统 SHALL 按稳定的运行时连接标识释放指定所有者的连接，MUST NOT 因关闭一个终端、SFTP 标签或传输任务而按主机批量关闭其他连接。关闭操作 SHALL 具备幂等性。
 
-### Requirement: 显式断开
+#### Scenario: 关闭一个终端不影响同主机其他终端
 
-系统 SHALL 提供 `disconnect_host(host_id)` 方法，移除缓存中该主机的全部会话条目。当最后一个指向某主机的 UI 标签页关闭时，系统 SHALL 调用此方法断开连接。若此时有其他代码持有会话的强引用（如正在执行的 SFTP 操作），会话在最后一个引用释放后断开。
+- **GIVEN** 同一主机有两个已连接终端标签
+- **WHEN** 其中一个终端执行 `exit` 或被用户关闭
+- **THEN** 系统只关闭该终端拥有的 Channel 与 Socket，另一个终端保持可交互
 
-#### Scenario: 关闭最后一个标签页时断开连接
+#### Scenario: 重复关闭同一连接
 
-- **WHEN** 用户关闭主机 A 的最后一个标签页（终端或 SFTP）
-- **THEN** 系统 SHALL 调用 `disconnect_host` 移除缓存条目，SSH 连接在无其他引用后断开
+- **WHEN** 同一连接标识被连续关闭两次
+- **THEN** 第二次关闭安全返回，且 MUST NOT 关闭其他连接
 
-#### Scenario: 仍有同主机标签页时不断开
+### Requirement: 空闲连接与保活
 
-- **WHEN** 主机 A 同时有终端和 SFTP 标签页打开，用户关闭其中终端标签页
-- **THEN** 系统 SHALL NOT 调用 `disconnect_host`，SSH 连接保持存活
+已认证连接 SHALL NOT 因没有业务流量而被客户端 inactivity timeout 关闭。系统 SHALL 使用 SSH keepalive 及有限失败次数判定不可用；未发生 EOF、读写错误或 keepalive 失败的无流量连接 MUST 报告为空闲而非异常。
 
-#### Scenario: disconnect_host 后新建连接
+#### Scenario: 空闲超过三十秒
 
-- **WHEN** `disconnect_host` 被调用后，用户再次打开该主机的标签页
-- **THEN** 系统 SHALL 新建 SSH 连接并完成握手认证
+- **GIVEN** 已认证连接没有终端输入、输出或文件传输
+- **WHEN** 连接空闲超过三十秒且 keepalive 正常
+- **THEN** 连接保持存活并报告为空闲，MUST NOT 因 inactivity timeout 被关闭
 
 ### Requirement: 连接失效检测与重连
 
-系统 SHALL 在复用会话前检测其存活状态。若检测到会话已断开或频道打开失败，系统 SHALL 自动将其从缓存中移除并新建连接，对调用方透明。
+系统 SHALL 根据 EOF、Socket 读写错误、SSH keepalive 连续失败或通道打开失败检测指定连接失效，并将失效状态同步给其唯一所有者。系统 MUST NOT 自动为其他所有者替换连接；用户触发终端重试时 SHALL 为该标签只提交一次建连并建立一条新 Transport。
 
-#### Scenario: 断开会话被检测并替换
+#### Scenario: 失效连接被标记
 
-- **WHEN** 复用一条已因网络中断而断开的会话
-- **THEN** 系统检测到失效，移除旧会话，新建连接并完成操作
+- **WHEN** 某终端拥有的连接因网络中断失效
+- **THEN** 系统将该终端标记为不可交互并保留可重试入口，且同主机其他独立连接状态不变
 
-### Requirement: 多路频道复用
+#### Scenario: 单次重试只建立一条连接
 
-系统 SHALL 支持在单个复用的 `SshSession` 上同时打开多个频道（终端 shell、SFTP 子系统、exec），满足同一主机下终端与 SFTP 并发使用的需求。
-
-#### Scenario: 终端与 SFTP 共享同一连接
-
-- **WHEN** 用户已打开某主机的终端标签，随后在同一主机打开 SFTP 标签
-- **THEN** SFTP 操作复用终端持有的同一会话，SHALL NOT 新建独立连接
+- **GIVEN** 一个已关闭或失败的终端标签
+- **WHEN** 用户点击一次重试
+- **THEN** 系统只提交一次建连并为该标签建立一条新 Transport，MUST NOT 出现瞬时重复 Socket
 
 ### Requirement: 线程安全
 
-连接缓存的获取、归还、断开操作 SHALL 是线程安全的，支持在多线程 / 多 tokio task 环境下并发访问而不引发数据竞争或重复断开。
+活动连接注册、查找、精确关闭和遥测操作 SHALL 是线程安全的，支持在多线程或多 tokio task 环境下并发访问而不引发数据竞争、重复关闭或所有权串扰。
 
-#### Scenario: 并发获取同一主机会话
+#### Scenario: 并发建立同一主机的独立连接
 
-- **WHEN** 两个 tokio task 同时请求同一主机的会话
-- **THEN** 两者均获得有效的独立频道，SHALL NOT 共享同一频道或触发竞态
+- **WHEN** 两个所有者并发请求连接同一主机
+- **THEN** 两者分别获得一条有效 Transport，连接标识不同且生命周期互不影响
+
+### Requirement: 连接生命周期遥测
+
+系统 SHALL 为每条新建的传输/SSH 连接分配稳定的运行时连接标识，并在显式关闭、检测失效及最终释放时维护可查询的生命周期状态。遥测 MUST 以实际 Socket I/O、SSH keepalive 与通道事件更新状态，MUST NOT 通过另建连接伪造健康状态。已释放或判定失效的连接 MUST 不再被报告为健康的活动连接。
+
+#### Scenario: 失效连接状态同步
+
+- **GIVEN** 一条 SSH 连接因通道打开失败或 keepalive 连续失败而失效
+- **WHEN** 活动连接注册表同步其状态
+- **THEN** 后续遥测快照将该连接标记为不可用或不再列为活动连接，且 MUST NOT 将其继续报告为健康

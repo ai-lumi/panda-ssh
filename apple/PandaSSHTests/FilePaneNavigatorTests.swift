@@ -254,6 +254,62 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     // MARK: - 后台 home 解析
 
+    func testRemotePaneWithoutHandleFailsWithoutOpeningConnection() async {
+        let source = RemoteFilePaneSource(root: "/", rootTitle: "远程", sessionHandle: nil)
+        do {
+            _ = try await source.list(path: "/")
+            XCTFail("无句柄不能隐式重新连接")
+        } catch {
+            XCTAssertEqual(error as? PandaError, .UnknownSftpHandle(0))
+        }
+    }
+
+    func testSftpCloseDuringHandshakeDisposesLateHandle() async {
+        let (session, _) = makeSession()
+        let initialRoot = session.remotePane.root
+        let started = expectation(description: "SFTP 握手开始")
+        let closed = expectation(description: "过期 SFTP 句柄释放")
+        let gate = DispatchSemaphore(value: 0)
+        session.sessionOpener = { _, _, _ in
+            started.fulfill()
+            _ = gate.wait(timeout: .now() + 2)
+            return SftpSessionRecord(handle: 9, connectionId: 19, homeDir: "/late")
+        }
+        session.sessionCloser = { handle in
+            XCTAssertEqual(handle, 9)
+            closed.fulfill()
+        }
+        let connecting = Task { await session.connect(password: nil, passphrase: nil) }
+        await fulfillment(of: [started], timeout: 2)
+        session.disconnect()
+        gate.signal()
+        let error = await connecting.value
+        await fulfillment(of: [closed], timeout: 2)
+        XCTAssertNotNil(error)
+        XCTAssertEqual(session.remotePane.root, initialRoot)
+    }
+
+    func testRepeatedSftpConnectSharesOnlyItsOwnPendingHandshake() async {
+        let (session, _) = makeSession()
+        let opened = LockedCounter()
+        let closed = expectation(description: "SFTP 只关闭一次")
+        session.sessionOpener = { _, _, _ in
+            opened.increment()
+            Thread.sleep(forTimeInterval: 0.1)
+            return SftpSessionRecord(handle: 9, connectionId: 19, homeDir: "/owned")
+        }
+        session.sessionCloser = { _ in closed.fulfill() }
+        async let first = session.connect(password: nil, passphrase: nil)
+        async let second = session.connect(password: nil, passphrase: nil)
+        let results = await [first, second]
+        XCTAssertTrue(results.allSatisfy { $0 == nil })
+        XCTAssertEqual(opened.value, 1)
+        XCTAssertEqual(session.remotePane.root, "/owned")
+        session.disconnect()
+        session.disconnect()
+        await fulfillment(of: [closed], timeout: 2)
+    }
+
     /// connect 的 home 解析在后台线程执行：注入 resolver 记录线程，
     /// 断言非主线程、结果用于远程面板根目录。
     func testConnectResolvesHomeDirOffMainThread() async {

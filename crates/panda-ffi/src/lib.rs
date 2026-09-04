@@ -14,6 +14,7 @@ use panda_core::{
     UnknownHostKeyPolicy,
 };
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 uniffi::setup_scaffolding!();
@@ -62,6 +63,10 @@ pub enum PandaError {
     MissingPassphrase(String),
     #[error("unknown shell session handle {0}")]
     UnknownShellHandle(u64),
+    #[error("shell session closed")]
+    ShellSessionClosed,
+    #[error("unknown SFTP session handle {0}")]
+    UnknownSftpHandle(u64),
     #[error("operation cancelled")]
     Cancelled,
     #[error("credential protection key is required")]
@@ -72,6 +77,8 @@ pub enum PandaError {
     InvalidCredentialFile,
     #[error("unknown transfer task {0}")]
     UnknownTransferTask(String),
+    #[error("unknown connection {0}")]
+    UnknownConnection(u64),
     /// Fallback for everything without a dedicated category.
     #[error("{0}")]
     Core(String),
@@ -101,11 +108,13 @@ impl From<panda_core::Error> for PandaError {
                 fingerprint,
             },
             panda_core::Error::Cancelled => PandaError::Cancelled,
+            panda_core::Error::ShellSessionClosed => PandaError::ShellSessionClosed,
             panda_core::Error::CredentialProtectionKeyRequired => {
                 PandaError::CredentialProtectionKeyRequired
             }
             panda_core::Error::CredentialUnlockFailed => PandaError::CredentialUnlockFailed,
             panda_core::Error::InvalidCredentialFile => PandaError::InvalidCredentialFile,
+            panda_core::Error::UnknownConnection(id) => PandaError::UnknownConnection(id),
             other => PandaError::Core(other.to_string()),
         }
     }
@@ -169,6 +178,14 @@ pub struct RemoteFileRecord {
     pub modified: Option<u64>,
 }
 
+/// 持久 SFTP 标签会话的稳定句柄与初始目录。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SftpSessionRecord {
+    pub handle: u64,
+    pub connection_id: u64,
+    pub home_dir: String,
+}
+
 /// SFTP 覆盖确认所需信息：源文件与目标文件的大小、最后修改时间。
 /// `*_mtime` 为 Unix 时间戳（秒），无法获取时为 `None`。
 #[derive(Debug, Clone, uniffi::Record)]
@@ -177,6 +194,149 @@ pub struct RemoteFileConflictRecord {
     pub source_mtime: Option<u64>,
     pub target_size: u64,
     pub target_mtime: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConnectionStateEnum {
+    Connecting,
+    Active,
+    Idle,
+    Closed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SshConnectionStateEnum {
+    Connecting,
+    Authenticated,
+    Closed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HealthStateEnum {
+    Unknown,
+    Healthy,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChannelStateEnum {
+    Open,
+    Closed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChannelKindEnum {
+    Shell,
+    Sftp,
+    Exec,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChannelTelemetryRecord {
+    pub id: u64,
+    pub kind: ChannelKindEnum,
+    pub state: ChannelStateEnum,
+    pub created_at_ms: u64,
+    pub last_activity_at_ms: u64,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ConnectionTelemetryRecord {
+    pub id: u64,
+    pub host_id: String,
+    pub address: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub created_at_ms: u64,
+    pub last_activity_at_ms: u64,
+    pub transport_state: ConnectionStateEnum,
+    pub ssh_state: SshConnectionStateEnum,
+    pub health_state: HealthStateEnum,
+    pub last_health_check_at_ms: Option<u64>,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
+    pub receive_bytes_per_second: u64,
+    pub send_bytes_per_second: u64,
+    pub last_error: Option<String>,
+    pub channels: Vec<ChannelTelemetryRecord>,
+}
+
+impl From<panda_core::telemetry::HealthState> for HealthStateEnum {
+    fn from(value: panda_core::telemetry::HealthState) -> Self {
+        match value {
+            panda_core::telemetry::HealthState::Unknown => Self::Unknown,
+            panda_core::telemetry::HealthState::Healthy => Self::Healthy,
+            panda_core::telemetry::HealthState::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+impl From<panda_core::telemetry::ChannelSnapshot> for ChannelTelemetryRecord {
+    fn from(value: panda_core::telemetry::ChannelSnapshot) -> Self {
+        use panda_core::telemetry::{ChannelKind, ChannelState};
+        Self {
+            id: value.id,
+            kind: match value.kind {
+                ChannelKind::Shell => ChannelKindEnum::Shell,
+                ChannelKind::Sftp => ChannelKindEnum::Sftp,
+                ChannelKind::Exec => ChannelKindEnum::Exec,
+            },
+            state: match value.state {
+                ChannelState::Open => ChannelStateEnum::Open,
+                ChannelState::Closed => ChannelStateEnum::Closed,
+                ChannelState::Failed => ChannelStateEnum::Failed,
+            },
+            created_at_ms: value.created_at_ms,
+            last_activity_at_ms: value.last_activity_at_ms,
+            received_bytes: value.received_bytes,
+            sent_bytes: value.sent_bytes,
+        }
+    }
+}
+
+impl From<panda_core::telemetry::ConnectionSnapshot> for ConnectionTelemetryRecord {
+    fn from(value: panda_core::telemetry::ConnectionSnapshot) -> Self {
+        use panda_core::telemetry::{SshState, TransportState};
+        Self {
+            id: value.id,
+            host_id: value.host_id,
+            address: value.address,
+            owner_kind: value.owner_kind,
+            owner_id: value.owner_id,
+            created_at_ms: value.created_at_ms,
+            last_activity_at_ms: value.last_activity_at_ms,
+            transport_state: match value.transport_state {
+                TransportState::Connecting => ConnectionStateEnum::Connecting,
+                TransportState::Active => ConnectionStateEnum::Active,
+                TransportState::Idle => ConnectionStateEnum::Idle,
+                TransportState::Closed => ConnectionStateEnum::Closed,
+                TransportState::Failed => ConnectionStateEnum::Failed,
+            },
+            ssh_state: match value.ssh_state {
+                SshState::Connecting => SshConnectionStateEnum::Connecting,
+                SshState::Authenticated => SshConnectionStateEnum::Authenticated,
+                SshState::Closed => SshConnectionStateEnum::Closed,
+                SshState::Failed => SshConnectionStateEnum::Failed,
+            },
+            health_state: value.health_state.into(),
+            last_health_check_at_ms: value.last_health_check_at_ms,
+            received_bytes: value.received_bytes,
+            sent_bytes: value.sent_bytes,
+            receive_bytes_per_second: value.receive_bytes_per_second,
+            send_bytes_per_second: value.send_bytes_per_second,
+            last_error: value.last_error,
+            channels: value
+                .channels
+                .into_iter()
+                .map(ChannelTelemetryRecord::from)
+                .collect(),
+        }
+    }
 }
 
 impl From<panda_core::FileConflictInfo> for RemoteFileConflictRecord {
@@ -316,12 +476,38 @@ pub(crate) fn stores() -> Result<Arc<Stores>, PandaError> {
 static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, ShellSession>>> = OnceLock::new();
 static NEXT_SHELL_ID: AtomicU64 = AtomicU64::new(1);
 
+struct OwnedSftpSession {
+    session: Arc<SshSession>,
+    client: Option<SftpClient>,
+}
+
+static SFTP_SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<AsyncMutex<OwnedSftpSession>>>>> =
+    OnceLock::new();
+static NEXT_SFTP_ID: AtomicU64 = AtomicU64::new(1);
+
 fn shell_sessions() -> &'static Mutex<HashMap<u64, ShellSession>> {
     SHELL_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn next_shell_id() -> u64 {
     NEXT_SHELL_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+fn sftp_sessions() -> &'static Mutex<HashMap<u64, Arc<AsyncMutex<OwnedSftpSession>>>> {
+    SFTP_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_sftp_id() -> u64 {
+    NEXT_SFTP_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+fn sftp_session(handle: u64) -> Result<Arc<AsyncMutex<OwnedSftpSession>>, PandaError> {
+    sftp_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&handle)
+        .cloned()
+        .ok_or(PandaError::UnknownSftpHandle(handle))
 }
 
 // ---------------------------------------------------------------------------
@@ -528,10 +714,9 @@ pub(crate) fn credentials_for(
     }
 }
 
-/// 从连接池获取已有会话，或新建并放入池中。
+/// 建立一条由当前调用方显式拥有的独立 SSH Transport。
 /// Unknown host keys follow `trust_on_first_use`.
-async fn get_or_create_session(
-    host_id: &str,
+async fn connect_session(
     cfg: &HostConfig,
     password: Option<String>,
     passphrase: Option<String>,
@@ -544,26 +729,24 @@ async fn get_or_create_session(
     } else {
         UnknownHostKeyPolicy::Reject
     };
-    Ok(panda_core::connection_pool::global_pool()
-        .get_or_create(host_id.to_string(), cfg, creds, &mut known_hosts, policy)
-        .await?)
+    let session = SshSession::connect_shared(cfg, creds, &mut known_hosts, policy).await?;
+    Ok(session)
 }
 
-/// 从连接池获取会话并打开 SFTP 频道。
+/// 为独立操作建立专属连接，调用方必须持有返回的 Transport 直到操作结束。
 async fn open_sftp_session(
-    host_id: &str,
     cfg: &HostConfig,
     password: Option<String>,
     passphrase: Option<String>,
     trust_on_first_use: bool,
 ) -> Result<(Arc<SshSession>, SftpClient), PandaError> {
-    let session =
-        get_or_create_session(host_id, cfg, password, passphrase, trust_on_first_use).await?;
+    let session = connect_session(cfg, password, passphrase, trust_on_first_use).await?;
+    session.set_owner("SFTP 操作", cfg.id.clone());
     let sftp = SftpClient::new(&session).await?;
     Ok((session, sftp))
 }
 
-/// 关闭 SFTP 客户端，保留底层 SSH 连接在池中复用。
+/// 关闭 SFTP Channel；Transport 在调用方的独立操作作用域结束时释放。
 async fn close_sftp(sftp: SftpClient) -> Result<(), PandaError> {
     sftp.close().await?;
     Ok(())
@@ -572,6 +755,172 @@ async fn close_sftp(sftp: SftpClient) -> Result<(), PandaError> {
 // ---------------------------------------------------------------------------
 // SSH / SFTP API
 // ---------------------------------------------------------------------------
+
+fn remote_file_records(files: Vec<panda_core::RemoteFile>) -> Vec<RemoteFileRecord> {
+    files
+        .into_iter()
+        .map(|file| RemoteFileRecord {
+            name: file.name,
+            path: file.path,
+            is_dir: file.is_dir,
+            size: file.size,
+            modified: file
+                .modified
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs()),
+        })
+        .collect()
+}
+
+/// 为一个 SFTP 标签建立独立 Transport，并返回后续操作使用的稳定句柄。
+#[uniffi::export]
+pub fn sftp_session_open(
+    host_id: String,
+    password: Option<String>,
+    passphrase: Option<String>,
+    trust_on_first_use: bool,
+) -> Result<SftpSessionRecord, PandaError> {
+    let cfg = load_host(&host_id)?;
+    runtime().block_on(async {
+        let handle = next_sftp_id();
+        let session = connect_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        session.set_owner("SFTP 标签", handle.to_string());
+        let connection_id = session.telemetry_id();
+        let client = SftpClient::new(&session).await?;
+        let home_dir = client.home_dir().await?;
+        sftp_sessions()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                handle,
+                Arc::new(AsyncMutex::new(OwnedSftpSession {
+                    session,
+                    client: Some(client),
+                })),
+            );
+        Ok(SftpSessionRecord {
+            handle,
+            connection_id,
+            home_dir,
+        })
+    })
+}
+
+#[uniffi::export]
+pub fn sftp_session_list(handle: u64, path: String) -> Result<Vec<RemoteFileRecord>, PandaError> {
+    let owned = sftp_session(handle)?;
+    runtime().block_on(async {
+        let guard = owned.lock().await;
+        let client = guard
+            .client
+            .as_ref()
+            .ok_or(PandaError::UnknownSftpHandle(handle))?;
+        Ok(remote_file_records(client.list_dir(&path).await?))
+    })
+}
+
+#[uniffi::export]
+pub fn sftp_session_check_upload_conflict(
+    handle: u64,
+    local_path: String,
+    remote_path: String,
+) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
+    let owned = sftp_session(handle)?;
+    runtime().block_on(async {
+        let guard = owned.lock().await;
+        let client = guard
+            .client
+            .as_ref()
+            .ok_or(PandaError::UnknownSftpHandle(handle))?;
+        Ok(client
+            .check_upload_conflict(PathBuf::from(local_path).as_path(), &remote_path)
+            .await?
+            .map(RemoteFileConflictRecord::from))
+    })
+}
+
+#[uniffi::export]
+pub fn sftp_session_check_download_conflict(
+    handle: u64,
+    remote_path: String,
+    local_path: String,
+) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
+    let owned = sftp_session(handle)?;
+    runtime().block_on(async {
+        let guard = owned.lock().await;
+        let client = guard
+            .client
+            .as_ref()
+            .ok_or(PandaError::UnknownSftpHandle(handle))?;
+        Ok(client
+            .check_download_conflict(&remote_path, PathBuf::from(local_path).as_path())
+            .await?
+            .map(RemoteFileConflictRecord::from))
+    })
+}
+
+#[uniffi::export]
+pub fn sftp_session_remove_file(handle: u64, remote_path: String) -> Result<(), PandaError> {
+    let owned = sftp_session(handle)?;
+    runtime().block_on(async {
+        let guard = owned.lock().await;
+        guard
+            .client
+            .as_ref()
+            .ok_or(PandaError::UnknownSftpHandle(handle))?
+            .remove_file(&remote_path)
+            .await?;
+        Ok(())
+    })
+}
+
+#[uniffi::export]
+pub fn sftp_session_remove_dir(handle: u64, remote_path: String) -> Result<(), PandaError> {
+    let owned = sftp_session(handle)?;
+    runtime().block_on(async {
+        let guard = owned.lock().await;
+        guard
+            .client
+            .as_ref()
+            .ok_or(PandaError::UnknownSftpHandle(handle))?
+            .remove_all(&remote_path)
+            .await?;
+        Ok(())
+    })
+}
+
+#[uniffi::export]
+pub fn sftp_session_create_dir(handle: u64, remote_path: String) -> Result<(), PandaError> {
+    let owned = sftp_session(handle)?;
+    runtime().block_on(async {
+        let guard = owned.lock().await;
+        guard
+            .client
+            .as_ref()
+            .ok_or(PandaError::UnknownSftpHandle(handle))?
+            .create_dir(&remote_path)
+            .await?;
+        Ok(())
+    })
+}
+
+/// 精确关闭一个 SFTP 标签句柄。重复关闭为幂等 no-op。
+#[uniffi::export]
+pub fn sftp_session_close(handle: u64) -> Result<(), PandaError> {
+    let owned = sftp_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&handle);
+    let Some(owned) = owned else { return Ok(()) };
+    runtime().block_on(async {
+        let mut guard = owned.lock().await;
+        if let Some(client) = guard.client.take() {
+            client.close().await?;
+        }
+        guard.session.disconnect().await?;
+        Ok(())
+    })
+}
 
 /// Connect and run `true` to verify auth; returns a human-readable summary.
 ///
@@ -587,9 +936,10 @@ pub fn test_connection(
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let session =
-            get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let session = connect_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        session.set_owner("连接探测", host_id.clone());
         let output = session.exec("true").await?;
+        session.disconnect().await?;
         Ok(format!(
             "connected to {}@{}:{} (exit status: {:?})",
             cfg.username, cfg.host, cfg.port, output.exit_status
@@ -607,23 +957,11 @@ pub fn sftp_list(
 ) -> Result<Vec<RemoteFileRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         let files = sftp.list_dir(&path).await?;
         close_sftp(sftp).await?;
-        Ok(files
-            .into_iter()
-            .map(|f| RemoteFileRecord {
-                name: f.name,
-                path: f.path,
-                is_dir: f.is_dir,
-                size: f.size,
-                modified: f
-                    .modified
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()),
-            })
-            .collect())
+        Ok(remote_file_records(files))
     })
 }
 
@@ -638,8 +976,8 @@ pub fn sftp_upload(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         sftp.upload(PathBuf::from(&local_path).as_path(), &remote_path, None)
             .await?;
         close_sftp(sftp).await?;
@@ -658,8 +996,8 @@ pub fn sftp_download(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         sftp.download(&remote_path, PathBuf::from(&local_path).as_path())
             .await?;
         close_sftp(sftp).await?;
@@ -680,8 +1018,8 @@ pub fn sftp_check_upload_conflict(
 ) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         let conflict = sftp
             .check_upload_conflict(PathBuf::from(&local_path).as_path(), &remote_path)
             .await?;
@@ -703,8 +1041,8 @@ pub fn sftp_check_download_conflict(
 ) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         let conflict = sftp
             .check_download_conflict(&remote_path, PathBuf::from(&local_path).as_path())
             .await?;
@@ -723,8 +1061,8 @@ pub fn sftp_remove_file(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         sftp.remove_file(&remote_path).await?;
         close_sftp(sftp).await?;
         Ok(())
@@ -741,8 +1079,8 @@ pub fn sftp_remove_dir(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         sftp.remove_all(&remote_path).await?;
         close_sftp(sftp).await?;
         Ok(())
@@ -759,8 +1097,8 @@ pub fn sftp_create_dir(
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         sftp.create_dir(&remote_path).await?;
         close_sftp(sftp).await?;
         Ok(())
@@ -779,8 +1117,8 @@ pub fn sftp_home_dir(
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let (_, sftp) =
-            open_sftp_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
+        let (_session, sftp) =
+            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
         let home = sftp.home_dir().await?;
         close_sftp(sftp).await?;
         Ok(home)
@@ -805,11 +1143,14 @@ pub fn shell_open(
 ) -> Result<u64, PandaError> {
     let cfg = load_host(&host_id)?;
     runtime().block_on(async {
-        let session =
-            get_or_create_session(&host_id, &cfg, password, passphrase, trust_on_first_use).await?;
-        let shell = ShellSession::open(session).await?;
+        let session = connect_session(&cfg, password, passphrase, trust_on_first_use).await?;
+        let shell = ShellSession::open(Arc::clone(&session)).await?;
+        // 只为成功打开的句柄分配连续编号，并与发布处于同一临界区。
+        // 因此已发行但不在表内的编号一定已被关闭，无需永久保存关闭集合。
+        let mut sessions = shell_sessions().lock().unwrap();
         let id = next_shell_id();
-        shell_sessions().lock().unwrap().insert(id, shell);
+        session.set_owner("终端标签", id.to_string());
+        sessions.insert(id, shell);
         Ok(id)
     })
 }
@@ -838,12 +1179,16 @@ pub fn shell_read(handle: u64, max: u64) -> Result<Vec<u8>, PandaError> {
 /// Close the shell session and disconnect the underlying SSH connection.
 #[uniffi::export]
 pub fn shell_close(handle: u64) -> Result<(), PandaError> {
-    let mut session = shell_sessions()
-        .lock()
-        .unwrap()
-        .remove(&handle)
-        .ok_or(PandaError::UnknownShellHandle(handle))?;
-    runtime().block_on(async { Ok(session.close().await?) })
+    let removed = shell_sessions().lock().unwrap().remove(&handle);
+    let Some(mut session) = removed else {
+        return if handle > 0 && handle < NEXT_SHELL_ID.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(PandaError::UnknownShellHandle(handle))
+        };
+    };
+    runtime().block_on(session.close())?;
+    Ok(())
 }
 
 /// Notify the remote PTY that the terminal window has been resized.
@@ -856,16 +1201,58 @@ pub fn shell_resize(handle: u64, cols: u64, rows: u64) -> Result<(), PandaError>
     Ok(session.resize(cols as u32, rows as u32)?)
 }
 
-/// 断开指定主机的全部 SSH 连接，从连接缓存中移除。
-/// 当用户关闭最后一个指向该主机的标签页时调用。
-/// 若有正在进行的操作持有会话引用，会话在操作完成后断开。
+/// 返回当前进程内的连接监控快照；该查询不会建立网络连接。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ConnectionLifecycleRecord {
+    pub connection_id: u64,
+    pub address: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub reason: String,
+    pub is_error: bool,
+}
+
+impl From<panda_core::telemetry::LifecycleEvent> for ConnectionLifecycleRecord {
+    fn from(event: panda_core::telemetry::LifecycleEvent) -> Self {
+        Self {
+            connection_id: event.connection_id,
+            address: event.address,
+            owner_kind: event.owner_kind,
+            owner_id: event.owner_id,
+            reason: event.kind.description().into(),
+            is_error: event.kind.is_error(),
+        }
+    }
+}
+
+/// 由应用级日志桥接器消费；监控窗口不消费队列，避免窗口关闭丢失断线日志。
 #[uniffi::export]
-pub fn disconnect_host(host_id: String) -> Result<(), PandaError> {
+pub fn connection_lifecycle_drain() -> Vec<ConnectionLifecycleRecord> {
+    panda_core::telemetry::global_registry()
+        .drain_events()
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+#[uniffi::export]
+pub fn connection_telemetry_list() -> Vec<ConnectionTelemetryRecord> {
+    panda_core::connection_registry::global_registry().prune();
+    panda_core::telemetry::global_registry()
+        .snapshot()
+        .into_iter()
+        .map(ConnectionTelemetryRecord::from)
+        .collect()
+}
+
+/// 对既有连接执行无命令的 SSH 通道探测；不会建立新连接或读取凭据。
+#[uniffi::export]
+pub fn connection_health_check(connection_id: u64) -> Result<HealthStateEnum, PandaError> {
     runtime().block_on(async {
-        panda_core::connection_pool::global_pool()
-            .disconnect_host(&host_id)
-            .await;
-        Ok(())
+        Ok(panda_core::connection_registry::global_registry()
+            .check_health(connection_id)
+            .await?
+            .into())
     })
 }
 
@@ -1109,15 +1496,14 @@ async fn run_upload(
         Err(e) => return Err(panda_core::Error::Other(e.to_string())),
     };
     let mut known_hosts = KnownHosts::new(store_path);
-    let session = panda_core::connection_pool::global_pool()
-        .get_or_create(
-            task.host_id.clone(),
-            cfg,
-            creds,
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await?;
+    let session = SshSession::connect_shared(
+        cfg,
+        creds,
+        &mut known_hosts,
+        UnknownHostKeyPolicy::AcceptAndStore,
+    )
+    .await?;
+    session.set_owner("上传任务", task.id.to_string());
     let sftp = SftpClient::new(&session).await?;
 
     let local = PathBuf::from(&task.local_path);
@@ -1152,15 +1538,14 @@ async fn run_download(
         Err(e) => return Err(panda_core::Error::Other(e.to_string())),
     };
     let mut known_hosts = KnownHosts::new(store_path);
-    let session = panda_core::connection_pool::global_pool()
-        .get_or_create(
-            task.host_id.clone(),
-            cfg,
-            creds,
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await?;
+    let session = SshSession::connect_shared(
+        cfg,
+        creds,
+        &mut known_hosts,
+        UnknownHostKeyPolicy::AcceptAndStore,
+    )
+    .await?;
+    session.set_owner("下载任务", task.id.to_string());
     let sftp = SftpClient::new(&session).await?;
 
     let local = PathBuf::from(&task.local_path);
@@ -1394,6 +1779,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normal_shell_end_has_a_structured_error() {
+        assert!(matches!(
+            PandaError::from(panda_core::Error::ShellSessionClosed),
+            PandaError::ShellSessionClosed
+        ));
+    }
+
+    #[test]
+    fn lifecycle_record_has_only_safe_identifiers_and_fixed_reason() {
+        let event = ConnectionLifecycleRecord::from(panda_core::telemetry::LifecycleEvent {
+            connection_id: 42,
+            address: "example.test:22".into(),
+            owner_kind: "终端标签".into(),
+            owner_id: "7".into(),
+            kind: panda_core::telemetry::LifecycleKind::KeepaliveFailed,
+        });
+        assert!(event.is_error);
+        assert_eq!(event.reason, "SSH keepalive 失败");
+        assert_eq!(event.connection_id, 42);
+    }
+
+    #[test]
     fn maps_missing_private_key_passphrase_to_structured_ffi_error() {
         let error = PandaError::from(panda_core::Error::MissingPassphrase);
         assert!(matches!(error, PandaError::MissingPassphrase(_)));
@@ -1419,5 +1826,72 @@ mod tests {
             PandaError::from(panda_core::Error::AuthFailed),
             PandaError::AuthFailed
         ));
+    }
+
+    #[test]
+    fn connection_snapshot_maps_all_structured_fields_without_sensitive_content() {
+        use panda_core::telemetry::{
+            ChannelKind, ChannelSnapshot, ChannelState, ConnectionSnapshot, HealthState, SshState,
+            TransportState,
+        };
+        let record = ConnectionTelemetryRecord::from(ConnectionSnapshot {
+            id: 7,
+            host_id: "host-id".into(),
+            address: "example.test:22".into(),
+            owner_kind: "终端标签".into(),
+            owner_id: "tab-7".into(),
+            created_at_ms: 10,
+            last_activity_at_ms: 20,
+            transport_state: TransportState::Idle,
+            ssh_state: SshState::Authenticated,
+            health_state: HealthState::Healthy,
+            last_health_check_at_ms: Some(19),
+            received_bytes: u64::MAX,
+            sent_bytes: u64::MAX - 1,
+            receive_bytes_per_second: 123,
+            send_bytes_per_second: 456,
+            last_error: None,
+            channels: vec![ChannelSnapshot {
+                id: 8,
+                kind: ChannelKind::Sftp,
+                state: ChannelState::Open,
+                created_at_ms: 11,
+                last_activity_at_ms: 18,
+                received_bytes: 99,
+                sent_bytes: 100,
+            }],
+        });
+
+        assert_eq!(record.transport_state, ConnectionStateEnum::Idle);
+        assert_eq!(record.ssh_state, SshConnectionStateEnum::Authenticated);
+        assert_eq!(record.health_state, HealthStateEnum::Healthy);
+        assert_eq!(record.owner_kind, "终端标签");
+        assert_eq!(record.owner_id, "tab-7");
+        assert_eq!(record.received_bytes, u64::MAX);
+        assert_eq!(record.channels.len(), 1);
+        assert_eq!(record.channels[0].kind, ChannelKindEnum::Sftp);
+        let exported = format!("{record:?}").to_lowercase();
+        for forbidden in [
+            "password",
+            "credential",
+            "command",
+            "terminal_output",
+            "file_content",
+        ] {
+            assert!(
+                !exported.contains(forbidden),
+                "导出记录包含敏感字段 {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_list_can_be_empty_and_unknown_health_id_is_structured() {
+        assert!(connection_telemetry_list().is_empty());
+        assert!(matches!(
+            connection_health_check(u64::MAX),
+            Err(PandaError::UnknownConnection(id)) if id == u64::MAX
+        ));
+        assert!(connection_telemetry_list().is_empty());
     }
 }

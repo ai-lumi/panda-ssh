@@ -55,9 +55,7 @@ struct PendingBatchClose: Equatable {
 /// 以及同主机标签标题的序号消歧。主机名通过注入的查询闭包解析,
 /// 便于测试替换、也避免模型层反向依赖 AppModel。
 ///
-/// 连接释放协调:关闭某主机的最后一个标签页时,若该主机仍存在活跃
-/// 传输任务(running/queued/paused),SSH 连接的断开被推迟到该主机
-/// 最后一个活跃传输任务进入终态后再执行;否则立即断开。
+/// 每个标签精确拥有连接；后台传输独立运行，不参与标签连接释放。
 @MainActor
 final class WorkspaceStore: ObservableObject {
     @Published private(set) var tabs: [WorkspaceTab] = []
@@ -72,8 +70,6 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var pendingCloseTabID: UUID?
     /// 批量关闭时待确认的终端标签页集合(含目标范围与已连接数);nil 表示无待确认。
     @Published private(set) var pendingBatchClose: PendingBatchClose?
-    /// 已无打开标签页、但仍有活跃传输任务、等待传输完成后断开的主机集合。
-    @Published private(set) var pendingDisconnectHosts: Set<String> = []
     /// 每个已打开标签页上报的当前连接状态。用 `@Published` 使页签栏与侧栏
     /// 能在读循环发现断开后立即重新渲染。
     @Published private var tabConnectionStatuses: [UUID: WorkspaceConnectionStatus] = [:]
@@ -84,8 +80,8 @@ final class WorkspaceStore: ObservableObject {
 
     /// 按 hostID 查询主机显示名;查不到(如主机已删除)时返回 nil,标题回退为 hostID。
     private let hostNameProvider: (String) -> String?
-    /// 关闭某主机的最后一个标签页且无活跃传输时调用,参数为 hostID。
-    private let disconnectHandler: (String) -> Void
+    /// 标签释放通知注入点，只传递正在关闭的标签，不执行主机级断开。
+    private let closeSessionHandler: (WorkspaceTab) -> Void
     /// 判断指定终端标签页是否处于「已连接」状态(.shell),用于关闭二次确认门控。
     /// 默认走 `terminalSessions` 注册表;测试可注入以隔离。
     /// 注意:这里用 `var` 并给占位默认值,是因为默认闭包需要捕获 `self`,
@@ -93,17 +89,16 @@ final class WorkspaceStore: ObservableObject {
     private var terminalConnectedChecker: (UUID) -> Bool = { _ in false }
     /// 重连终端标签页时调用,参数为 tabID。默认走注册表转发到 TerminalSessionStore.retry。
     private var reconnectHandler: (UUID) -> Void = { _ in }
-    /// 共享传输队列;非空时用于协调「SFTP 关闭后传输延续 + 完成后释放连接」。
+    /// 仅主机删除时级联取消任务；普通标签关闭不操作传输队列。
     private weak var transferStore: TransferStore?
-    /// 订阅传输任务变化,在活跃任务清空后释放推迟断开的主机连接。
-    private var transferCancellable: AnyCancellable?
     /// 终端标签页会话注册表:tabID -> 弱引用 TerminalSessionStore。
     /// 由 TerminalTabView 在 onAppear/onDisappear 维护,用于关闭确认与重连。
     private var terminalSessions: [UUID: WeakTerminalSession] = [:]
+    private var sftpSessions: [UUID: WeakSftpSession] = [:]
 
     init(
         hostNameProvider: @escaping (String) -> String?,
-        disconnectHandler: @escaping (String) -> Void = { _ in },
+        closeSessionHandler: @escaping (WorkspaceTab) -> Void = { _ in },
         transferStore: TransferStore? = nil,
         terminalConnectedChecker: ((UUID) -> Bool)? = nil,
         reconnectHandler: ((UUID) -> Void)? = nil
@@ -113,7 +108,7 @@ final class WorkspaceStore: ObservableObject {
             self.tabBarOverflowMode = mode
         }
         self.hostNameProvider = hostNameProvider
-        self.disconnectHandler = disconnectHandler
+        self.closeSessionHandler = closeSessionHandler
         self.transferStore = transferStore
         self.terminalConnectedChecker = terminalConnectedChecker ?? { [weak self] id in
             self?.connectedTerminalTabs.contains(id) ?? false
@@ -121,19 +116,15 @@ final class WorkspaceStore: ObservableObject {
         self.reconnectHandler = reconnectHandler ?? { [weak self] id in
             self?.terminalSessions[id]?.value?.retry()
         }
-        if let transferStore {
-            // 同步订阅:$tasks 在 willSet 投递新值,闭包参数即为新任务列表,
-            // 无需 receive(on:) 即可在 tick() 同步触发期间拿到最新状态。
-            transferCancellable = transferStore.$tasks
-                .sink { [weak self] newTasks in
-                    self?.evaluatePendingDisconnects(currentTasks: newTasks)
-                }
-        }
     }
 
     /// 注册终端会话(由 TerminalTabView.onAppear 调用)。
     func registerTerminal(_ session: TerminalSessionStore, for tabID: UUID) {
         terminalSessions[tabID] = WeakTerminalSession(value: session)
+    }
+
+    func registerSftp(_ session: SftpSessionStore, for tabID: UUID) {
+        sftpSessions[tabID] = WeakSftpSession(value: session)
     }
 
     /// 注销终端会话。仅在标签实际关闭时调用(非视图切换)。
@@ -167,21 +158,10 @@ final class WorkspaceStore: ObservableObject {
     }
 
     /// 终端读循环确认远端 shell 已结束后调用。结束的标签仍保留在工作区，
-    /// 但不再占用主机连接；只有没有其他活动会话和传输时才释放共享连接。
+    /// 连接已由会话自己释放，工作区只同步显示状态。
     func handleTerminalSessionEnded(tabID: UUID) {
         guard let tab = tabs.first(where: { $0.id == tabID }), tab.kind == .terminal else { return }
         reportConnectionStatus(.failed, forTabID: tabID)
-        let hostID = tab.hostID
-        guard !hasActiveTabConnection(for: hostID) else {
-            pendingDisconnectHosts.remove(hostID)
-            return
-        }
-        if hasActiveTransfers(for: hostID) {
-            pendingDisconnectHosts.insert(hostID)
-        } else {
-            disconnectHandler(hostID)
-            pendingDisconnectHosts.remove(hostID)
-        }
     }
 
     /// 返回单个标签页的状态；不存在或已关闭时为 inactive。
@@ -219,10 +199,13 @@ final class WorkspaceStore: ObservableObject {
 
     /// 关闭标签页;标签不存在时忽略。关闭活动标签后,活动标签优先落在
     /// 左侧相邻标签,越界(关闭的是第一个)则落在原索引位置,即原右侧邻居。
-    /// 连接释放走 `evaluateDisconnect`:无活跃传输时立即断开,否则推迟。
+    /// 同步释放该标签，不依赖 SwiftUI 延迟的 onDisappear。
     func close(tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        let hostID = tabs[index].hostID
+        let tab = tabs[index]
+        terminalSessions[tabID]?.value?.close()
+        sftpSessions.removeValue(forKey: tabID)?.value?.disconnect()
+        closeSessionHandler(tab)
         connectedTerminalTabs.remove(tabID)
         terminalSessions.removeValue(forKey: tabID)
         tabConnectionStatuses.removeValue(forKey: tabID)
@@ -231,7 +214,6 @@ final class WorkspaceStore: ObservableObject {
         if closingActive {
             activeTabID = tabs.isEmpty ? nil : tabs[max(index - 1, 0)].id
         }
-        evaluateDisconnect(hostID: hostID)
         retitle()
     }
 
@@ -334,61 +316,10 @@ final class WorkspaceStore: ObservableObject {
     /// 主机已被删除,其活跃传输任务无意义,先取消再立即断开连接。
     func closeTabs(forHostID hostID: String) {
         transferStore?.cancelAll(forHostID: hostID)
-        pendingDisconnectHosts.remove(hostID)
         let removedIDs = tabs.filter { $0.hostID == hostID }.map(\.id)
         for id in removedIDs {
-            connectedTerminalTabs.remove(id)
-            terminalSessions.removeValue(forKey: id)
-            tabConnectionStatuses.removeValue(forKey: id)
+            close(tabID: id)
         }
-        tabs.removeAll { $0.hostID == hostID }
-        if let active = activeTabID, !tabs.contains(where: { $0.id == active }) {
-            activeTabID = tabs.last?.id
-        }
-        disconnectHandler(hostID)
-        retitle()
-    }
-
-    // MARK: - 连接释放协调
-
-    /// 评估某主机是否应断开:仍有同主机标签页 → 不动;无标签页且有活跃传输 →
-    /// 记入 pendingDisconnectHosts 等待传输完成;无标签页且无活跃传输 → 立即断开。
-    private func evaluateDisconnect(hostID: String) {
-        if tabs.contains(where: { $0.hostID == hostID }) { return }
-        if hasActiveTransfers(for: hostID) {
-            pendingDisconnectHosts.insert(hostID)
-        } else {
-            disconnectHandler(hostID)
-            pendingDisconnectHosts.remove(hostID)
-        }
-    }
-
-    /// 传输任务变化后,重新评估所有推迟断开的主机:已无活跃任务则断开并移出 pending。
-    private func evaluatePendingDisconnects(currentTasks: [TransferTask]) {
-        let pending = pendingDisconnectHosts
-        for hostID in pending where !currentTasks.contains(where: { $0.hostID == hostID && Self.isActiveStatus($0.status) }) {
-            if !hasActiveTabConnection(for: hostID) {
-                disconnectHandler(hostID)
-            }
-            pendingDisconnectHosts.remove(hostID)
-        }
-    }
-
-    private func hasActiveTabConnection(for hostID: String) -> Bool {
-        tabs.contains { tab in
-            guard tab.hostID == hostID else { return false }
-            let status = connectionStatus(forTabID: tab.id)
-            return status == .connecting || status == .connected
-        }
-    }
-
-    private func hasActiveTransfers(for hostID: String) -> Bool {
-        guard let transfers = transferStore else { return false }
-        return transfers.tasks.contains { $0.hostID == hostID && Self.isActiveStatus($0.status) }
-    }
-
-    private static func isActiveStatus(_ status: TransferStatus) -> Bool {
-        status == .running || status == .queued || status == .paused
     }
 
     /// 重算全部标签标题:同一主机的标签按数组中的稳定顺序编号,
@@ -410,4 +341,9 @@ final class WorkspaceStore: ObservableObject {
 final class WeakTerminalSession {
     weak var value: TerminalSessionStore?
     init(value: TerminalSessionStore) { self.value = value }
+}
+
+final class WeakSftpSession {
+    weak var value: SftpSessionStore?
+    init(value: SftpSessionStore) { self.value = value }
 }

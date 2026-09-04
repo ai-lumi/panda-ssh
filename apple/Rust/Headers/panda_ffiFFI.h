@@ -248,6 +248,23 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
 void uniffi_panda_ffi_fn_func_accept_unknown_host_key(RustBuffer host, uint16_t port, RustBuffer key, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_HEALTH_CHECK
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_HEALTH_CHECK
+RustBuffer uniffi_panda_ffi_fn_func_connection_health_check(uint64_t connection_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_LIFECYCLE_DRAIN
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_LIFECYCLE_DRAIN
+RustBuffer uniffi_panda_ffi_fn_func_connection_lifecycle_drain(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_LIST
+RustBuffer uniffi_panda_ffi_fn_func_connection_telemetry_list(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CREDENTIAL_PROTECTION_ENABLED
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CREDENTIAL_PROTECTION_ENABLED
 int8_t uniffi_panda_ffi_fn_func_credential_protection_enabled(RustCallStatus *_Nonnull out_status
@@ -272,11 +289,6 @@ void uniffi_panda_ffi_fn_func_delete_host(RustBuffer id, RustCallStatus *_Nonnul
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_SNIPPET
 void uniffi_panda_ffi_fn_func_delete_snippet(RustBuffer name, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DISCONNECT_HOST
-#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DISCONNECT_HOST
-void uniffi_panda_ffi_fn_func_disconnect_host(RustBuffer host_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_HOST_KEY_STATUS
@@ -385,6 +397,46 @@ void uniffi_panda_ffi_fn_func_sftp_remove_dir(RustBuffer host_id, RustBuffer rem
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_REMOVE_FILE
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_REMOVE_FILE
 void uniffi_panda_ffi_fn_func_sftp_remove_file(RustBuffer host_id, RustBuffer remote_path, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CHECK_DOWNLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CHECK_DOWNLOAD_CONFLICT
+RustBuffer uniffi_panda_ffi_fn_func_sftp_session_check_download_conflict(uint64_t handle, RustBuffer remote_path, RustBuffer local_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CHECK_UPLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CHECK_UPLOAD_CONFLICT
+RustBuffer uniffi_panda_ffi_fn_func_sftp_session_check_upload_conflict(uint64_t handle, RustBuffer local_path, RustBuffer remote_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CLOSE
+void uniffi_panda_ffi_fn_func_sftp_session_close(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CREATE_DIR
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_CREATE_DIR
+void uniffi_panda_ffi_fn_func_sftp_session_create_dir(uint64_t handle, RustBuffer remote_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_LIST
+RustBuffer uniffi_panda_ffi_fn_func_sftp_session_list(uint64_t handle, RustBuffer path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_OPEN
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_OPEN
+RustBuffer uniffi_panda_ffi_fn_func_sftp_session_open(RustBuffer host_id, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_REMOVE_DIR
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_REMOVE_DIR
+void uniffi_panda_ffi_fn_func_sftp_session_remove_dir(uint64_t handle, RustBuffer remote_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_REMOVE_FILE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_SESSION_REMOVE_FILE
+void uniffi_panda_ffi_fn_func_sftp_session_remove_file(uint64_t handle, RustBuffer remote_path, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_UPLOAD
@@ -765,6 +817,24 @@ uint16_t uniffi_panda_ffi_checksum_func_accept_unknown_host_key(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_HEALTH_CHECK
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_HEALTH_CHECK
+uint16_t uniffi_panda_ffi_checksum_func_connection_health_check(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_LIFECYCLE_DRAIN
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_LIFECYCLE_DRAIN
+uint16_t uniffi_panda_ffi_checksum_func_connection_lifecycle_drain(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_TELEMETRY_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_TELEMETRY_LIST
+uint16_t uniffi_panda_ffi_checksum_func_connection_telemetry_list(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CREDENTIAL_PROTECTION_ENABLED
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CREDENTIAL_PROTECTION_ENABLED
 uint16_t uniffi_panda_ffi_checksum_func_credential_protection_enabled(void
@@ -792,12 +862,6 @@ uint16_t uniffi_panda_ffi_checksum_func_delete_host(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_SNIPPET
 uint16_t uniffi_panda_ffi_checksum_func_delete_snippet(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DISCONNECT_HOST
-#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DISCONNECT_HOST
-uint16_t uniffi_panda_ffi_checksum_func_disconnect_host(void
     
 );
 #endif
@@ -924,6 +988,54 @@ uint16_t uniffi_panda_ffi_checksum_func_sftp_remove_dir(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_REMOVE_FILE
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_REMOVE_FILE
 uint16_t uniffi_panda_ffi_checksum_func_sftp_remove_file(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CHECK_DOWNLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CHECK_DOWNLOAD_CONFLICT
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_check_download_conflict(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CHECK_UPLOAD_CONFLICT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CHECK_UPLOAD_CONFLICT
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_check_upload_conflict(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CLOSE
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CREATE_DIR
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_CREATE_DIR
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_create_dir(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_LIST
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_OPEN
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_OPEN
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_open(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_REMOVE_DIR
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_REMOVE_DIR
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_remove_dir(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_REMOVE_FILE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_SESSION_REMOVE_FILE
+uint16_t uniffi_panda_ffi_checksum_func_sftp_session_remove_file(void
     
 );
 #endif

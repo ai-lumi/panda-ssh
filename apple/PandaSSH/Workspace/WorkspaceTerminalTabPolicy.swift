@@ -20,3 +20,18 @@ struct WorkspaceTerminalTabPolicy {
         visibleTabID == tabID
     }
 }
+
+/// SFTP 标签也必须常驻视图树，标签切换只改变可见性；只有实际关闭标签才释放句柄。
+struct WorkspaceSftpTabPolicy {
+    let retainedTabs: [WorkspaceTab]
+    let visibleTabID: UUID?
+
+    init(tabs: [WorkspaceTab], activeTabID: UUID?) {
+        retainedTabs = tabs.filter { $0.kind == .sftp }
+        visibleTabID = retainedTabs.contains(where: { $0.id == activeTabID }) ? activeTabID : nil
+    }
+
+    var retainedTabIDs: [UUID] { retainedTabs.map(\.id) }
+
+    func isVisible(_ tabID: UUID) -> Bool { visibleTabID == tabID }
+}

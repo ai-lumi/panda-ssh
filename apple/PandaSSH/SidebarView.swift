@@ -251,6 +251,24 @@ struct SidebarView: View {
 
     private var bottomEntries: some View {
         VStack(spacing: 2) {
+            #if os(macOS)
+            SideEntryButton(
+                title: "连接监控",
+                systemImage: "network",
+                isActive: false,
+                action: {
+                    model.showConnectionMonitor()
+                    openConnectionMonitorWindow()
+                }
+            )
+            #else
+            SideEntryButton(
+                title: "连接监控",
+                systemImage: "network",
+                isActive: model.sidebarPage == .connectionMonitor,
+                action: model.showConnectionMonitor
+            )
+            #endif
             SideEntryButton(
                 title: "代码片段",
                 systemImage: "chevron.left.forwardslash.chevron.right",
@@ -285,6 +303,15 @@ struct SidebarView: View {
     }
 
     #if os(macOS)
+    private func openConnectionMonitorWindow() {
+        // 与日志入口一致：优先激活已有窗口，避免重复打开。
+        for window in NSApp.windows where window.title == ConnectionMonitorWindow.title {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        openWindow(id: ConnectionMonitorWindow.id)
+    }
+
     private func openLogWindow() {
         // 优先激活已存在的日志窗口,否则由 SwiftUI 创建新窗口
         for window in NSApp.windows where window.title == "日志" {

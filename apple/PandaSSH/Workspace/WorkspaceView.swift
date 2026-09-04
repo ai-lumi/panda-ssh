@@ -189,20 +189,24 @@ struct WorkspaceView: View {
     /// (标签栏常驻);活动标签的主机被删除时给出提示。
     @ViewBuilder
     private var content: some View {
-        switch model.sidebarPage {
-        case .snippets:
-            SnippetsView()
-        case .settings:
-            #if os(iOS)
-            SettingsView()
-            #else
-            // macOS 走原生 Settings Scene(cmd+,),侧栏无设置入口
+        // 会话视图始终位于同一结构位置；切侧栏只隐藏，不能销毁 StateObject。
+        ZStack {
             hostsContent
-            #endif
-        case .logs:
-            LogView(logger: Logger.shared)
-        case .hosts:
-            hostsContent
+                .opacity(model.sidebarPage == .hosts ? 1 : 0)
+                .allowsHitTesting(model.sidebarPage == .hosts)
+                .accessibilityHidden(model.sidebarPage != .hosts)
+            switch model.sidebarPage {
+            case .connectionMonitor: ConnectionMonitorView()
+            case .snippets: SnippetsView()
+            case .settings:
+                #if os(iOS)
+                SettingsView()
+                #else
+                Color.clear
+                #endif
+            case .logs: LogView(logger: Logger.shared)
+            case .hosts: Color.clear.allowsHitTesting(false)
+            }
         }
     }
 
@@ -212,13 +216,19 @@ struct WorkspaceView: View {
             tabs: workspace.tabs,
             activeTabID: presentedTabID
         )
+        let sftpPolicy = WorkspaceSftpTabPolicy(
+            tabs: workspace.tabs,
+            activeTabID: presentedTabID
+        )
         ZStack {
             nonTerminalHostsContent
             terminalTabs(policy: terminalPolicy)
+            sftpTabs(policy: sftpPolicy)
         }
     }
 
     private var presentedTabID: UUID? {
+        guard model.sidebarPage == .hosts else { return nil }
         guard case .tab(let tabID) = model.workspacePresentation else { return nil }
         return tabID
     }
@@ -230,13 +240,12 @@ struct WorkspaceView: View {
         switch model.workspacePresentation {
         case .tab(let tabID):
             if let active = workspace.tabs.first(where: { $0.id == tabID }) {
-            if let host = model.hosts.first(where: { $0.id == active.hostID }) {
+            if model.hosts.contains(where: { $0.id == active.hostID }) {
                 switch active.kind {
                 case .terminal:
                     Color.clear
                 case .sftp:
-                    SftpTabView(tab: active, host: host, transfers: transfers)
-                        .id(active.id)
+                    Color.clear
                 }
             } else {
                 ContentUnavailableView(
@@ -265,6 +274,20 @@ struct WorkspaceView: View {
             if let host = model.hosts.first(where: { $0.id == tab.hostID }) {
                 let isVisible = policy.isVisible(tab.id)
                 TerminalTabView(tab: tab, host: host, isActive: isVisible)
+                    .opacity(isVisible ? 1 : 0)
+                    .allowsHitTesting(isVisible)
+                    .accessibilityHidden(!isVisible)
+                    .zIndex(isVisible ? 1 : 0)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sftpTabs(policy: WorkspaceSftpTabPolicy) -> some View {
+        ForEach(policy.retainedTabs) { tab in
+            if let host = model.hosts.first(where: { $0.id == tab.hostID }) {
+                let isVisible = policy.isVisible(tab.id)
+                SftpTabView(tab: tab, host: host, transfers: transfers)
                     .opacity(isVisible ? 1 : 0)
                     .allowsHitTesting(isVisible)
                     .accessibilityHidden(!isVisible)
@@ -353,32 +376,25 @@ struct WorkspaceTabItemView: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Button(action: onSelect) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
-                    Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                    Text(tab.title)
-                        .font(.callout)
-                        .lineLimit(1)
-                        .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(tab.title)
-            .accessibilityValue(statusLabel)
-            .accessibilityHint("切换到此标签页")
-            .accessibilityAddTraits(isActive ? .isSelected : [])
+            Circle()
+                .fill(dotColor)
+                .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
+            Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(tab.title)
+                .font(.callout)
+                .lineLimit(1)
+                .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
                     .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
+                    .contentShape(
+                        RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
+                    )
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -397,7 +413,16 @@ struct WorkspaceTabItemView: View {
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .gesture(
+            TapGesture().onEnded(onSelect),
+            including: metrics.selectionGestureIncludesSubviews ? .all : .gesture
+        )
         .onHover { hovering = $0 }
+        .accessibilityLabel(tab.title)
+        .accessibilityValue(statusLabel)
+        .accessibilityHint("切换到此标签页")
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction(.default, onSelect)
         .accessibilityElement(children: .contain)
     }
 

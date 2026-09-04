@@ -8,10 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use panda_core::connection_pool;
 use panda_core::{
     execute_batch_download, execute_batch_upload, scan_local_sources, scan_remote_sources,
-    BatchTransferOptions, ConflictResolution, Credentials, KnownHosts, SftpClient,
+    BatchTransferOptions, ConflictResolution, Credentials, KnownHosts, SftpClient, SshSession,
     UnknownHostKeyPolicy,
 };
 use uuid::Uuid;
@@ -206,15 +205,14 @@ pub fn scan_remote_batch(
             .map_err(|e| PandaError::Core(e))?;
         let store_path = stores()?.known_hosts.path().to_path_buf();
         let mut known_hosts = KnownHosts::new(store_path);
-        let session = connection_pool::global_pool()
-            .get_or_create(
-                host_id.clone(),
-                &cfg,
-                creds,
-                &mut known_hosts,
-                UnknownHostKeyPolicy::AcceptAndStore,
-            )
-            .await?;
+        let session = SshSession::connect_shared(
+            &cfg,
+            creds,
+            &mut known_hosts,
+            UnknownHostKeyPolicy::AcceptAndStore,
+        )
+        .await?;
+        session.set_owner("批量扫描", host_id.clone());
         let sftp = SftpClient::new(&session).await?;
         let plan = scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
         let _ = sftp.close().await;
@@ -295,15 +293,13 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
         }
     };
     let mut known_hosts = KnownHosts::new(store_path);
-    let session = match connection_pool::global_pool()
-        .get_or_create(
-            task.host_id.clone(),
-            &cfg,
-            creds,
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
+    let session = match SshSession::connect_shared(
+        &cfg,
+        creds,
+        &mut known_hosts,
+        UnknownHostKeyPolicy::AcceptAndStore,
+    )
+    .await
     {
         Ok(s) => s,
         Err(e) => {
@@ -312,6 +308,7 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
             return;
         }
     };
+    session.set_owner("批量传输", task.id.to_string());
     let sftp = match SftpClient::new(&session).await {
         Ok(s) => s,
         Err(e) => {

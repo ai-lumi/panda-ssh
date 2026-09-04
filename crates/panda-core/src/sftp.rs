@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 use tokio::time::sleep;
 
 use crate::ssh::SshSession;
+use crate::telemetry::{global_registry, ChannelKind, ChannelState};
 use crate::{Error, Result};
 
 const COPY_BUF_SIZE: usize = 64 * 1024;
@@ -128,6 +129,8 @@ pub struct RemoteFile {
 /// High-level SFTP operations over one SSH connection.
 pub struct SftpClient {
     session: SftpSession,
+    telemetry_id: u64,
+    channel_telemetry_id: u64,
 }
 
 impl SftpClient {
@@ -135,9 +138,24 @@ impl SftpClient {
     pub async fn new(session: &SshSession) -> Result<Self> {
         let channel = session.open_channel().await?;
         channel.request_subsystem(true, "sftp").await?;
+        let sftp_session = SftpSession::new(channel.into_stream()).await?;
+        let telemetry_id = session.telemetry_id();
+        let channel_telemetry_id = global_registry().open_channel(telemetry_id, ChannelKind::Sftp);
         Ok(Self {
-            session: SftpSession::new(channel.into_stream()).await?,
+            session: sftp_session,
+            telemetry_id,
+            channel_telemetry_id,
         })
+    }
+
+    fn record_io(&self, received: u64, sent: u64) {
+        global_registry().update_channel(
+            self.telemetry_id,
+            self.channel_telemetry_id,
+            received,
+            sent,
+            None,
+        );
     }
 
     /// Get metadata of a remote file or directory.
@@ -195,6 +213,7 @@ impl SftpClient {
             }
             dst.write_all(&buf[..n]).await?;
             sent += n as u64;
+            self.record_io(0, n as u64);
             if let Some(cb) = progress {
                 cb(sent, total);
             }
@@ -256,6 +275,7 @@ impl SftpClient {
             }
             dst.write_all(&buf[..n]).await?;
             sent += n as u64;
+            self.record_io(0, n as u64);
             if let Some(ref cb) = progress {
                 cb(sent, total);
             }
@@ -268,7 +288,15 @@ impl SftpClient {
     pub async fn download(&self, remote: &str, local: &Path) -> Result<()> {
         let mut src = self.session.open(remote).await?;
         let mut dst = tokio::fs::File::create(local).await?;
-        tokio::io::copy(&mut src, &mut dst).await?;
+        let mut buf = vec![0u8; COPY_BUF_SIZE];
+        loop {
+            let n = src.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n]).await?;
+            self.record_io(n as u64, 0);
+        }
         dst.flush().await?;
         Ok(())
     }
@@ -324,6 +352,7 @@ impl SftpClient {
             }
             dst.write_all(&buf[..n]).await?;
             received += n as u64;
+            self.record_io(n as u64, 0);
             if let Some(ref cb) = progress {
                 cb(received, total);
             }
@@ -485,7 +514,28 @@ impl SftpClient {
 
     /// Close the SFTP session and its channel.
     pub async fn close(&self) -> Result<()> {
-        Ok(self.session.close().await?)
+        match self.session.close().await {
+            Ok(()) => {
+                global_registry().update_channel(
+                    self.telemetry_id,
+                    self.channel_telemetry_id,
+                    0,
+                    0,
+                    Some(ChannelState::Closed),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                global_registry().update_channel(
+                    self.telemetry_id,
+                    self.channel_telemetry_id,
+                    0,
+                    0,
+                    Some(ChannelState::Failed),
+                );
+                Err(error.into())
+            }
+        }
     }
 }
 

@@ -47,6 +47,8 @@ targets:
           CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-macOS-Dev.entitlements
         Release:
           CODE_SIGN_ENTITLEMENTS: PandaSSH/PandaSSH-macOS.entitlements
+          CODE_SIGNING_ALLOWED: NO
+          ARCHS: "arm64 x86_64"
 
   # 单元测试 target:双端共享 apple/PandaSSHTests 下的同一套测试源码
   PandaSSH-macOSTests:

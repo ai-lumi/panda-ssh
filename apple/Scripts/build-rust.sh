@@ -8,10 +8,16 @@ RUST_OUT="$ROOT/apple/Rust"
 GEN_DIR="$RUST_OUT/Generated"
 HEADER_DIR="$RUST_OUT/Headers"
 XCFW="$RUST_OUT/PandaCoreFFI.xcframework"
+MACOS_UNIVERSAL_LIB="$RUST_OUT/libpanda_ffi-macos-universal.a"
 
 cd "$ROOT"
 
-TARGETS=(aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim)
+TARGETS=(
+  aarch64-apple-darwin
+  x86_64-apple-darwin
+  aarch64-apple-ios
+  aarch64-apple-ios-sim
+)
 for t in "${TARGETS[@]}"; do
   cargo build -p panda-ffi --release --target "$t"
 done
@@ -29,12 +35,19 @@ cargo run -p panda-ffi --release --features bindgen-cli --bin uniffi-bindgen -- 
 cp "$GEN_DIR"/*.h "$HEADER_DIR"/
 cp "$GEN_DIR"/*.modulemap "$HEADER_DIR"/module.modulemap
 
+lipo -create \
+  "target/aarch64-apple-darwin/release/libpanda_ffi.a" \
+  "target/x86_64-apple-darwin/release/libpanda_ffi.a" \
+  -output "$MACOS_UNIVERSAL_LIB"
+
 rm -rf "$XCFW"
 xcodebuild -create-xcframework \
-  -library "target/aarch64-apple-darwin/release/libpanda_ffi.a" -headers "$HEADER_DIR" \
+  -library "$MACOS_UNIVERSAL_LIB" -headers "$HEADER_DIR" \
   -library "target/aarch64-apple-ios/release/libpanda_ffi.a" -headers "$HEADER_DIR" \
   -library "target/aarch64-apple-ios-sim/release/libpanda_ffi.a" -headers "$HEADER_DIR" \
   -output "$XCFW"
+
+rm -f "$MACOS_UNIVERSAL_LIB"
 
 echo "==> xcframework: $XCFW"
 echo "==> Swift bindings: $GEN_DIR"

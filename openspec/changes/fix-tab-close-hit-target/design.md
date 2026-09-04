@@ -4,7 +4,7 @@
 
 ## Decision
 
-以 `WorkspaceTabPresentationMetrics` 统一提供关闭控件的最小尺寸与圆角半径。最小尺寸 SHALL 施加在 `Button` 本体，而非其 X 图标标签；视图以该圆角矩形同时作为背景和 `contentShape`，使视觉与命中范围一致。
+以 `WorkspaceTabPresentationMetrics` 统一提供关闭控件的最小尺寸与圆角半径。最小尺寸与 `contentShape` SHALL 施加在 `Button` 的 label 内部，而非仅施加在 `Button` 外层：macOS 的 `.plain` 按钮据此以 label 建立命中区域。视图以同一圆角矩形同时作为背景和 label 的命中形状，使视觉与命中范围一致。
 
 ## Alternatives
 

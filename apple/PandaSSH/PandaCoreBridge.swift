@@ -126,6 +126,49 @@ final class PandaCoreBridge {
         try sftpHomeDir(hostId: hostID, password: password, passphrase: passphrase, trustOnFirstUse: trustOnFirstUse)
     }
 
+    /// 为一个 SFTP 标签建立独立长连接；后续文件操作必须使用返回的句柄。
+    func openSftpSession(
+        hostID: String,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false
+    ) throws -> SftpSessionRecord {
+        try sftpSessionOpen(
+            hostId: hostID,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse
+        )
+    }
+
+    func listSftpSession(handle: UInt64, path: String) throws -> [RemoteFileRecord] {
+        try sftpSessionList(handle: handle, path: path)
+    }
+
+    func closeSftpSession(handle: UInt64) throws {
+        try sftpSessionClose(handle: handle)
+    }
+
+    func checkUploadConflict(handle: UInt64, localPath: String, remotePath: String) throws -> RemoteFileConflictRecord? {
+        try sftpSessionCheckUploadConflict(handle: handle, localPath: localPath, remotePath: remotePath)
+    }
+
+    func checkDownloadConflict(handle: UInt64, remotePath: String, localPath: String) throws -> RemoteFileConflictRecord? {
+        try sftpSessionCheckDownloadConflict(handle: handle, remotePath: remotePath, localPath: localPath)
+    }
+
+    func removeRemoteFile(handle: UInt64, remotePath: String, isDirectory: Bool) throws {
+        if isDirectory {
+            try sftpSessionRemoveDir(handle: handle, remotePath: remotePath)
+        } else {
+            try sftpSessionRemoveFile(handle: handle, remotePath: remotePath)
+        }
+    }
+
+    func createRemoteDir(handle: UInt64, remotePath: String) throws {
+        try sftpSessionCreateDir(handle: handle, remotePath: remotePath)
+    }
+
     /// 上传前预检查远端目标是否已存在。
     func checkUploadConflict(
         hostID: String,
@@ -230,6 +273,16 @@ final class PandaCoreBridge {
 
     func removeSnippet(name: String) throws {
         try deleteSnippet(name: name)
+    }
+
+    // MARK: - 连接监控
+
+    func connectionTelemetry() -> [ConnectionTelemetryRecord] {
+        connectionTelemetryList()
+    }
+
+    func checkConnectionHealth(id: UInt64) throws -> HealthStateEnum {
+        try connectionHealthCheck(connectionId: id)
     }
 }
 

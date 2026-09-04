@@ -79,30 +79,27 @@ final class LocalFilePaneSource: FilePaneSource {
     }
 }
 
-/// 远程真实数据源:通过 FFI `sftpList` 拉取远端目录。
+/// 远程数据源只携带标签句柄，不保存密码也不隐式建连。
 final class RemoteFilePaneSource: FilePaneSource {
     let root: String
     let rootTitle: String
-    let hostID: String
-    let password: String?
-    let passphrase: String?
+    let sessionHandle: UInt64?
 
-    init(root: String, rootTitle: String, hostID: String, password: String?, passphrase: String?) {
+    init(
+        root: String,
+        rootTitle: String,
+        sessionHandle: UInt64? = nil
+    ) {
         self.root = root
         self.rootTitle = rootTitle
-        self.hostID = hostID
-        self.password = password
-        self.passphrase = passphrase
+        self.sessionHandle = sessionHandle
     }
 
     func list(path: String) async throws -> [FileEntry] {
-        let records = try sftpList(
-            hostId: hostID,
-            path: path,
-            password: password,
-            passphrase: passphrase,
-            trustOnFirstUse: false
-        )
+        guard let sessionHandle else { throw PandaError.UnknownSftpHandle(0) }
+        let records = try await FFIBackground.run {
+            try PandaCoreBridge.shared.listSftpSession(handle: sessionHandle, path: path)
+        }
         return records.map { record in
             FileEntry(
                 name: record.name,
@@ -326,6 +323,16 @@ final class SftpSessionStore: ObservableObject {
 
     /// 真实连接参数;mock 模式为 nil。
     private var connectionSecrets: (password: String?, passphrase: String?)?
+    /// 真实 SFTP 标签独占的稳定 FFI 句柄；mock/注入测试为 nil。
+    private var sftpHandle: UInt64?
+    private var connectionGeneration = 0
+    private var connectingTask: Task<(root: String, handle: UInt64?), Error>?
+    var sessionOpener: @Sendable (String, String?, String?) throws -> SftpSessionRecord = {
+        try PandaCoreBridge.shared.openSftpSession(hostID: $0, password: $1, passphrase: $2, trustOnFirstUse: false)
+    }
+    var sessionCloser: @Sendable (UInt64) throws -> Void = {
+        try PandaCoreBridge.shared.closeSftpSession(handle: $0)
+    }
     /// 冲突弹窗选择后需要继续的传输上下文。
     private var conflictContext: (
         direction: TransferDirection,
@@ -440,42 +447,56 @@ final class SftpSessionStore: ObservableObject {
     /// 在非标准 home 路径的服务器上失效。
     /// 返回连接初始化错误；调用方必须据此区分超时、认证失败和缺凭据。
     func connect(password: String?, passphrase: String?) async -> Error? {
+        if sftpHandle != nil { return nil }
+        let generation = connectionGeneration
         connectionSecrets = (password, passphrase)
-        let root: String
+        let task: Task<(root: String, handle: UInt64?), Error>
+        if let pending = connectingTask {
+            task = pending
+        } else {
+            task = Task { try await self.openSession(password: password, passphrase: passphrase) }
+            connectingTask = task
+        }
+        let connection: (root: String, handle: UInt64?)
         do {
-            root = try await resolveHomeDir(password: password, passphrase: passphrase)
+            connection = try await task.value
         } catch {
-            Logger.shared.error("SFTP 连接失败 host=\(host.address):\(host.port); 原因=\(error.localizedDescription)", module: LogModule.sftp)
+            guard generation == connectionGeneration else { return PandaError.Cancelled }
+            connectingTask = nil
+            connectionSecrets = nil
+            Logger.shared.error("SFTP 连接失败 host=\(host.address):\(host.port)", module: LogModule.sftp)
             return error
         }
+        guard generation == connectionGeneration else {
+            if let handle = connection.handle { closeHandle(handle) }
+            return PandaError.Cancelled
+        }
+        connectingTask = nil
+        if sftpHandle != nil { return nil }
         remotePane = FilePaneNavigator(
             source: RemoteFilePaneSource(
-                root: root,
+                root: connection.root,
                 rootTitle: "远程 — \(host.name)",
-                hostID: host.id,
-                password: password,
-                passphrase: passphrase
+                sessionHandle: connection.handle
             )
         )
+        sftpHandle = connection.handle
         Logger.shared.info("SFTP 已连接 host=\(host.address):\(host.port)", module: LogModule.sftp)
         return nil
     }
 
-    private func resolveHomeDir(password: String?, passphrase: String?) async throws -> String {
+    private func openSession(password: String?, passphrase: String?) async throws -> (root: String, handle: UInt64?) {
         let hostID = host.id
         let resolver = homeDirResolver
+        let opener = sessionOpener
         // 完整握手（SSH + SFTP + home 解析）在后台线程执行，不阻塞主线程；
         // 多标签连接并行握手（tokio 多线程 runtime 并发 block_on）。
-        return try await FFIBackground.run { () -> String in
+        return try await FFIBackground.run { () -> (String, UInt64?) in
             if let resolver {
-                return try resolver(hostID, password, passphrase)
+                return (try resolver(hostID, password, passphrase), nil)
             }
-            return try PandaCoreBridge.shared.resolveSftpHomeDir(
-                of: hostID,
-                password: password,
-                passphrase: passphrase,
-                trustOnFirstUse: false
-            )
+            let session = try opener(hostID, password, passphrase)
+            return (session.homeDir, session.handle)
         }
     }
 
@@ -1001,9 +1022,7 @@ final class SftpSessionStore: ObservableObject {
             return "条目不存在"
         }
         let path = joinPath(remotePane.path, name)
-        let hostID = host.id
-        let password = connectionSecrets?.password
-        let passphrase = connectionSecrets?.passphrase
+        let sessionHandle = sftpHandle
         let isDir = entry.isDirectory
         let handler = deleteRemoteHandler
         do {
@@ -1011,13 +1030,9 @@ final class SftpSessionStore: ObservableObject {
                 if let handler {
                     return handler(name, isDir)
                 }
+                guard let sessionHandle else { throw PandaError.UnknownSftpHandle(0) }
                 try PandaCoreBridge.shared.removeRemoteFile(
-                    hostID: hostID,
-                    remotePath: path,
-                    isDirectory: isDir,
-                    password: password,
-                    passphrase: passphrase,
-                    trustOnFirstUse: false
+                    handle: sessionHandle, remotePath: path, isDirectory: isDir
                 )
                 return nil
             }
@@ -1076,18 +1091,12 @@ final class SftpSessionStore: ObservableObject {
     }
 
     private func checkUploadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {
-        let hostID = host.id
-        let password = connectionSecrets?.password
-        let passphrase = connectionSecrets?.passphrase
         // 网络往返（开 SFTP channel + stat）在后台执行。
+        let sessionHandle = sftpHandle
         let record = try await FFIBackground.run {
-            try PandaCoreBridge.shared.checkUploadConflict(
-                hostID: hostID,
-                localPath: source,
-                remotePath: destination,
-                password: password,
-                passphrase: passphrase,
-                trustOnFirstUse: false
+            guard let sessionHandle else { throw PandaError.UnknownSftpHandle(0) }
+            return try PandaCoreBridge.shared.checkUploadConflict(
+                handle: sessionHandle, localPath: source, remotePath: destination
             )
         }
         return record.map {
@@ -1102,18 +1111,12 @@ final class SftpSessionStore: ObservableObject {
     }
 
     private func checkDownloadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {
-        let hostID = host.id
-        let password = connectionSecrets?.password
-        let passphrase = connectionSecrets?.passphrase
         // 网络往返（开 SFTP channel + stat）在后台执行。
+        let sessionHandle = sftpHandle
         let record = try await FFIBackground.run {
-            try PandaCoreBridge.shared.checkDownloadConflict(
-                hostID: hostID,
-                remotePath: source,
-                localPath: destination,
-                password: password,
-                passphrase: passphrase,
-                trustOnFirstUse: false
+            guard let sessionHandle else { throw PandaError.UnknownSftpHandle(0) }
+            return try PandaCoreBridge.shared.checkDownloadConflict(
+                handle: sessionHandle, remotePath: source, localPath: destination
             )
         }
         return record.map {
@@ -1129,9 +1132,28 @@ final class SftpSessionStore: ObservableObject {
 
     // MARK: - 会话释放
 
-    /// 关闭 SFTP 会话并清理敏感参数。
-    /// 当前 FFI 的 SFTP 调用为无状态短连接,此处主要为后续持久会话预留生命周期钩子。
+    /// 精确关闭本标签拥有的 SFTP 会话并清理敏感参数。
     func disconnect() {
+        connectionGeneration += 1
+        connectingTask = nil
+        let handle = sftpHandle
+        sftpHandle = nil
         connectionSecrets = nil
+        guard let handle else { return }
+        closeHandle(handle)
+    }
+
+    private func closeHandle(_ handle: UInt64) {
+        let closer = sessionCloser
+        Task {
+            do {
+                try await FFIBackground.run {
+                    try closer(handle)
+                }
+                Logger.shared.info("SFTP 已断开 host=\(host.address):\(host.port); handle=\(handle)", module: LogModule.sftp)
+            } catch {
+                Logger.shared.error("SFTP 断开失败 host=\(host.address):\(host.port); handle=\(handle)", module: LogModule.sftp)
+            }
+        }
     }
 }

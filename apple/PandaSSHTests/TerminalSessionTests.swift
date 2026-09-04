@@ -21,6 +21,123 @@ final class TerminalSessionTests: XCTestCase {
 
     // MARK: - 连接阶段
 
+    private var record: HostConfigRecord {
+        HostConfigRecord(id: "h1", name: "web-prod", host: "203.0.113.10", port: 22,
+                         username: "test", auth: .password(passwordRef: nil), notes: nil, groupId: nil)
+    }
+
+    func testRepeatedConnectInSameAttemptOpensOnlyOnce() async throws {
+        let store = TerminalSessionStore(host: makeHost())
+        let opened = LockedCounter()
+        store.connectionOpener = { _, _, _, _ in
+            opened.increment()
+            Thread.sleep(forTimeInterval: 0.1)
+            return 123
+        }
+        store.connect(record: record, password: nil, passphrase: nil)
+        store.connect(record: record, password: nil, passphrase: nil)
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(opened.value, 1)
+        XCTAssertEqual(store.phase, .shell)
+        store.close()
+    }
+
+    func testCloseDuringHandshakeCannotResurrectSession() async throws {
+        let store = TerminalSessionStore(host: makeHost())
+        store.connectionOpener = { _, _, _, _ in
+            Thread.sleep(forTimeInterval: 0.1)
+            return 123
+        }
+        store.connect(record: record, password: nil, passphrase: nil)
+        store.close()
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(store.phase, .failed)
+        XCTAssertNil(store.connection, "关闭后的迟到握手结果必须释放，不能重新装入标签")
+    }
+
+    func testOldHandshakeFailureCannotFailNewAttempt() async throws {
+        let store = TerminalSessionStore(host: makeHost())
+        let started = expectation(description: "旧握手已开始")
+        let release = DispatchSemaphore(value: 0)
+        store.connectionOpener = { _, _, _, _ in
+            started.fulfill()
+            _ = release.wait(timeout: .now() + 2)
+            throw NSError(domain: "旧握手失败", code: 1)
+        }
+        store.connect(record: record, password: nil, passphrase: nil)
+        await fulfillment(of: [started], timeout: 2)
+        store.retry()
+        store.connectionOpener = { _, _, _, _ in 124 }
+        store.connect(record: record, password: nil, passphrase: nil)
+        try await Task.sleep(for: .milliseconds(100))
+        release.signal()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.phase, .shell)
+        XCTAssertEqual((store.connection as? PandaShellConnection)?.handleForTesting, 124)
+        store.close()
+    }
+
+    func testLateSuccessIsClosedAndCannotReplaceNewConnection() async throws {
+        let store = TerminalSessionStore(host: makeHost())
+        let started = expectation(description: "旧握手已开始")
+        let released = expectation(description: "迟到的句柄已释放")
+        let gate = DispatchSemaphore(value: 0)
+        store.connectionOpener = { _, _, _, _ in
+            started.fulfill()
+            _ = gate.wait(timeout: .now() + 2)
+            return 123
+        }
+        store.staleConnectionCloser = { handle in
+            XCTAssertEqual(handle, 123)
+            released.fulfill()
+        }
+        store.connect(record: record, password: nil, passphrase: nil)
+        await fulfillment(of: [started], timeout: 2)
+        store.retry()
+        store.retry()
+        store.connectionOpener = { _, _, _, _ in 124 }
+        store.connect(record: record, password: nil, passphrase: nil)
+        gate.signal()
+        await fulfillment(of: [released], timeout: 2)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual((store.connection as? PandaShellConnection)?.handleForTesting, 124)
+        store.close()
+    }
+
+    func testOldReadFailureCannotCloseRetriedSession() {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
+        let oldAttempt = store.attempt
+        store.retry()
+        store.finishConnecting()
+        XCTAssertFalse(store.handleSessionEnd(PandaError.ShellSessionClosed, attempt: oldAttempt))
+        XCTAssertEqual(store.phase, .shell)
+        XCTAssertNotNil(store.connection)
+    }
+
+    func testReadFailureDistinguishesNormalExitFromTransportError() {
+        let store = TerminalSessionStore(host: makeHost())
+        store.finishConnecting()
+        XCTAssertTrue(store.handleSessionEnd(PandaError.ShellSessionClosed, attempt: store.attempt))
+        XCTAssertEqual(store.failure, .other("SSH 会话已结束。"))
+        store.retry()
+        store.finishConnecting()
+        XCTAssertTrue(store.handleSessionEnd(NSError(domain: "read", code: 1), attempt: store.attempt))
+        XCTAssertEqual(store.failure, .other("SSH 连接异常，无法继续通信。"))
+    }
+
+    func testConnectFailureDoesNotLogRawErrorContents() async throws {
+        let store = TerminalSessionStore(host: makeHost())
+        let privateDetail = "fixture-private-key-path-should-not-be-logged"
+        store.connectionOpener = { _, _, _, _ in
+            throw NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: privateDetail])
+        }
+        store.connect(record: record, password: nil, passphrase: nil)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(store.phase, .failed)
+        XCTAssertFalse(Logger.shared.entries.contains { $0.message.contains(privateDetail) })
+    }
+
     func testInitialPhaseIsConnectingWithoutConnection() {
         let store = TerminalSessionStore(host: makeHost())
 
@@ -64,6 +181,32 @@ final class TerminalSessionTests: XCTestCase {
         store.retry()
 
         XCTAssertEqual(store.attempt, 1)
+    }
+
+    func testRetryOnlyAdvancesAttemptAndDoesNotOpenConnectionDirectly() async throws {
+        let store = TerminalSessionStore(host: makeHost())
+        let opened = LockedCounter()
+        store.connectionOpener = { _, _, _, _ in
+            opened.increment()
+            return 123
+        }
+        let record = HostConfigRecord(
+            id: "h1", name: "web-prod", host: "203.0.113.10", port: 22,
+            username: "luowenqiang",
+            auth: .password(passwordRef: nil), notes: nil, groupId: nil
+        )
+        store.connect(record: record, password: nil, passphrase: nil)
+        let deadline = Date().addingTimeInterval(2)
+        while store.phase != .shell && Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        store.markFailed()
+
+        store.retry()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(opened.value, 1, "重试按钮只应推进代次，建连由视图任务唯一触发")
+        XCTAssertEqual(store.phase, .connecting)
     }
 
     func testMissingCredentialRetryWaitsForNewInputInsteadOfReusingOldPassword() {
@@ -250,5 +393,22 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(storeA.phase, .shell)
         XCTAssertEqual(storeB.phase, .shell)
         XCTAssertLessThan(elapsed, 1.8, "两个 1s 连接应并行完成（实测 \(elapsed)s，串行需 ~2s）")
+    }
+}
+
+final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }

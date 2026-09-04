@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use panda_core::config::AuthMethod;
-use panda_core::connection_pool::ConnectionPool;
+use panda_core::telemetry::{global_registry, ChannelKind, ChannelState, HealthState};
 use panda_core::{
     execute_batch_download, execute_batch_upload, scan_remote_sources, BatchTransferOptions,
     ConflictResolution, Credentials, Error, HostConfig, KnownHostStatus, KnownHosts, ScanOptions,
@@ -150,6 +150,10 @@ impl russh::server::Handler for TestHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if self.shell_channels.contains(&channel) {
+            if data.trim_ascii() == b"disconnect" {
+                session.disconnect(russh::Disconnect::ByApplication, "fixture disconnect", "")?;
+                return Ok(());
+            }
             if data.trim_ascii() == b"exit" {
                 session.data(channel, b"logout\n".to_vec())?;
                 session.exit_status_request(channel, 0)?;
@@ -590,11 +594,27 @@ async fn exec_collects_stdout_stderr_and_exit_status() {
 async fn wrong_password_is_auth_failed() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
-    let result = connect(port, dir.path(), "wrong").await;
+    let mut config = host_cfg(port);
+    config.id = "wrong-password-telemetry-cleanup".into();
+    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
+    let result = SshSession::connect(
+        &config,
+        Credentials::Password("wrong".into()),
+        &mut known_hosts,
+        UnknownHostKeyPolicy::AcceptAndStore,
+    )
+    .await;
     match result {
         Err(Error::AuthFailed) => {}
         other => panic!("expected AuthFailed, got {:?}", other.map(|_| "session")),
     }
+    assert!(
+        global_registry()
+            .snapshot()
+            .iter()
+            .all(|record| record.host_id != config.id),
+        "认证失败后不得遗留无所有者的遥测记录"
+    );
 }
 
 #[tokio::test]
@@ -1447,6 +1467,125 @@ async fn shell_session_reports_remote_exit_after_draining_final_output() {
     assert_eq!(shell.read(1024).unwrap(), b"logout\n");
     assert!(matches!(shell.read(1024), Err(Error::ShellSessionClosed)));
     assert!(matches!(shell.write(b"x"), Err(Error::ShellSessionClosed)));
+}
+
+#[tokio::test]
+async fn releasing_transport_owner_closes_channels_even_if_client_survives() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+    sftp.list_dir("/").await.unwrap();
+    drop(session);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), sftp.list_dir("/")).await;
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "Transport 所有者释放后不能由孤儿通道继续保活"
+    );
+}
+
+#[tokio::test]
+async fn shell_close_does_not_wait_for_space_in_full_input_queue() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let mut shell = ShellSession::open(Arc::new(session)).await.unwrap();
+    // 当前线程不让出执行权，确定性填满 64 条输入队列。
+    for _ in 0..64 {
+        shell.write(b"x").unwrap();
+    }
+    let result = tokio::time::timeout(Duration::from_secs(1), shell.close()).await;
+    assert!(result.is_ok(), "关闭不能依赖已满输入队列中的空消息");
+    result.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn empty_shell_input_is_not_a_close_signal() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let mut shell = ShellSession::open(Arc::new(session)).await.unwrap();
+    shell.write(b"").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    shell.write(b"still-alive\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(String::from_utf8_lossy(&shell.read(4096).unwrap()).contains("still-alive"));
+    shell.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn shell_full_queues_report_failure_without_hanging() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let mut shell = ShellSession::open(Arc::new(session)).await.unwrap();
+    assert!(shell.read(0).unwrap().is_empty());
+    for _ in 0..64 {
+        shell.write(b"x").unwrap();
+    }
+    assert!(shell.write(b"overflow").is_err());
+    for _ in 0..8 {
+        shell.resize(80, 24).unwrap();
+    }
+    assert!(shell.resize(80, 24).is_err());
+    shell.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_disconnect_is_not_a_normal_shell_exit() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let shell = ShellSession::open(Arc::new(session)).await.unwrap();
+    shell.write(b"disconnect\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = shell.read(4096);
+    assert!(
+        matches!(shell.read(4096), Err(Error::Other(_))),
+        "Socket 断开不能伪装成 exit"
+    );
+    assert!(matches!(shell.write(b"x"), Err(Error::Other(_))));
+    assert!(matches!(shell.resize(80, 24), Err(Error::Other(_))));
+}
+
+#[tokio::test]
+async fn independent_shells_survive_exit_retry_and_idle_past_thirty_seconds() {
+    let port = start_server().await;
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let (first, second) = tokio::join!(
+        connect(port, first_dir.path(), PASSWORD),
+        connect(port, second_dir.path(), PASSWORD)
+    );
+    let first = Arc::new(first.unwrap());
+    let second = Arc::new(second.unwrap());
+    assert_ne!(first.telemetry_id(), second.telemetry_id());
+    let mut a = ShellSession::open(first.clone()).await.unwrap();
+    let mut b = ShellSession::open(second.clone()).await.unwrap();
+    a.write(b"exit\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = a.read(4096);
+    assert!(matches!(a.read(4096), Err(Error::ShellSessionClosed)));
+    a.close().await.unwrap();
+    drop(a);
+    let retry = Arc::new(connect(port, first_dir.path(), PASSWORD).await.unwrap());
+    assert_ne!(retry.telemetry_id(), first.telemetry_id());
+    let mut c = ShellSession::open(retry.clone()).await.unwrap();
+    // 使用真实计时跨过旧 30 秒 inactivity timeout，不能仅验证配置值。
+    tokio::time::sleep(Duration::from_secs(32)).await;
+    b.write(b"second-alive\n").unwrap();
+    c.write(b"retry-alive\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(String::from_utf8_lossy(&b.read(4096).unwrap()).contains("second-alive"));
+    assert!(String::from_utf8_lossy(&c.read(4096).unwrap()).contains("retry-alive"));
+    let snapshots = global_registry().snapshot();
+    for id in [second.telemetry_id(), retry.telemetry_id()] {
+        let record = snapshots.iter().find(|record| record.id == id).unwrap();
+        assert_eq!(record.health_state, HealthState::Healthy);
+    }
+    b.close().await.unwrap();
+    c.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -2312,316 +2451,105 @@ async fn batch_download_dir_creation_error_includes_paths() {
     session.disconnect().await.unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// Connection pool tests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn connection_pool_reuses_session_for_same_key() {
+async fn telemetry_tracks_real_socket_exec_shell_and_sftp_traffic() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
+    let session = Arc::new(connect(port, dir.path(), PASSWORD).await.unwrap());
+    let telemetry_id = session.telemetry_id();
 
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let session1 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
-    let session2 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts2,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    // 同一个 Arc 引用。
-    assert!(
-        Arc::ptr_eq(&session1, &session2),
-        "pool should reuse the same session"
-    );
-
-    session1.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn connection_pool_creates_new_session_for_different_creds() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let session1 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
-    let session2 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password("wrong".to_string()),
-            &mut known_hosts2,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await;
-
-    assert!(session2.is_err());
-
-    session1.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn connection_pool_creates_new_when_pool_empty() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
-    assert_eq!(pool.len().await, 0);
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let session = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(pool.len().await, 1);
-
-    session.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn connection_pool_rebuilds_after_disconnect() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let session1 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    session1.disconnect().await.unwrap();
+    session.exec("hello").await.unwrap();
+    let mut shell = ShellSession::open(Arc::clone(&session)).await.unwrap();
+    let sftp = SftpClient::new(&session).await.unwrap();
+    let local = dir.path().join("telemetry.txt");
+    std::fs::write(&local, b"telemetry payload").unwrap();
+    sftp.upload(&local, "/telemetry.txt", None).await.unwrap();
+    shell.write(b"hello\n").unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
-    let session2 = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts2,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
+    let snapshot = global_registry()
+        .snapshot()
+        .into_iter()
+        .find(|record| record.id == telemetry_id)
         .unwrap();
+    assert!(snapshot.received_bytes > 0);
+    assert!(snapshot.sent_bytes > 0);
+    assert!(snapshot.channels.iter().any(|channel| {
+        channel.kind == ChannelKind::Exec
+            && channel.state == ChannelState::Closed
+            && channel.received_bytes > 0
+    }));
+    assert!(snapshot.channels.iter().any(|channel| {
+        channel.kind == ChannelKind::Shell
+            && channel.state == ChannelState::Open
+            && channel.sent_bytes >= 6
+    }));
+    assert!(snapshot.channels.iter().any(|channel| {
+        channel.kind == ChannelKind::Sftp
+            && channel.state == ChannelState::Open
+            && channel.sent_bytes == 17
+    }));
 
-    assert!(
-        !Arc::ptr_eq(&session1, &session2),
-        "pool should create a new session after disconnect"
-    );
-
-    session2.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn connection_pool_session_persists_without_timeout() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let _session = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    // 等待一段时间，验证无空闲超时回收
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(
-        pool.len().await,
-        1,
-        "session should persist without idle timeout"
-    );
-
-    _session.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn connection_pool_concurrent_access_is_safe() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = Arc::new(ConnectionPool::new());
-
-    let mut handles = Vec::new();
-    for i in 0..4 {
-        let pool = Arc::clone(&pool);
-        let dir_path = dir.path().to_path_buf();
-        let cfg = host_cfg(port);
-        let handle = tokio::spawn(async move {
-            let mut known_hosts = KnownHosts::new(dir_path.join(format!("kh_{}", i)));
-            pool.get_or_create(
-                "test".to_string(),
-                &cfg,
-                Credentials::Password(PASSWORD.to_string()),
-                &mut known_hosts,
-                UnknownHostKeyPolicy::AcceptAndStore,
-            )
-            .await
-            .unwrap()
-        });
-        handles.push(handle);
-    }
-
-    let mut sessions = Vec::new();
-    for handle in handles {
-        sessions.push(handle.await.unwrap());
-    }
-
-    // 并发获取应全部成功，且至少有一个复用。
-    let first_ptr = Arc::as_ptr(&sessions[0]);
-    let any_reused = sessions.iter().any(|s| Arc::as_ptr(s) == first_ptr);
-    assert!(
-        any_reused,
-        "concurrent access should result in session reuse"
-    );
-
-    for s in sessions {
-        s.disconnect().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn connection_pool_remove_deletes_entry() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let _session = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(pool.len().await, 1);
-    pool.remove("test", &Credentials::Password(PASSWORD.to_string()))
-        .await;
-    assert_eq!(pool.len().await, 0, "remove should delete the entry");
-
-    _session.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn connection_pool_disconnect_host_removes_entry() {
-    let port = start_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
-    let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let session = pool
-        .get_or_create(
-            "test".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(pool.len().await, 1);
-
-    // disconnect_host 移除池条目
-    pool.disconnect_host("test").await;
-    assert_eq!(
-        pool.len().await,
-        0,
-        "disconnect_host should remove the entry"
-    );
-
-    // session 仍持有 Arc，不会 panic
+    shell.close().await.unwrap();
+    sftp.close().await.unwrap();
     session.disconnect().await.unwrap();
 }
 
 #[tokio::test]
-async fn connection_pool_disconnect_host_does_not_affect_other_hosts() {
+async fn health_check_uses_existing_connection_is_throttled_and_never_reconnects() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
-    let pool = ConnectionPool::new();
-
     let mut known_hosts = KnownHosts::new(dir.path().join("known_hosts"));
-    let session_a = pool
-        .get_or_create(
-            "host_a".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
+    let session = SshSession::connect_shared(
+        &host_cfg(port),
+        Credentials::Password(PASSWORD.to_string()),
+        &mut known_hosts,
+        UnknownHostKeyPolicy::AcceptAndStore,
+    )
+    .await
+    .unwrap();
+    let telemetry_id = session.telemetry_id();
 
-    let mut known_hosts2 = KnownHosts::new(dir.path().join("known_hosts2"));
-    let session_b = pool
-        .get_or_create(
-            "host_b".to_string(),
-            &host_cfg(port),
-            Credentials::Password(PASSWORD.to_string()),
-            &mut known_hosts2,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(pool.len().await, 2);
-
-    // 只断开 host_a，host_b 不受影响
-    pool.disconnect_host("host_a").await;
-    assert_eq!(pool.len().await, 1, "only host_a should be removed");
-
-    session_a.disconnect().await.unwrap();
-    session_b.disconnect().await.unwrap();
+    assert_eq!(
+        panda_core::connection_registry::global_registry()
+            .check_health(telemetry_id)
+            .await
+            .unwrap(),
+        HealthState::Healthy
+    );
+    let first_checked_at = global_registry()
+        .snapshot()
+        .into_iter()
+        .find(|record| record.id == telemetry_id)
+        .unwrap()
+        .last_health_check_at_ms;
+    assert_eq!(
+        panda_core::connection_registry::global_registry()
+            .check_health(telemetry_id)
+            .await
+            .unwrap(),
+        HealthState::Healthy
+    );
+    let second_checked_at = global_registry()
+        .snapshot()
+        .into_iter()
+        .find(|record| record.id == telemetry_id)
+        .unwrap()
+        .last_health_check_at_ms;
+    assert_eq!(first_checked_at, second_checked_at);
+    let (concurrent_a, concurrent_b) = tokio::join!(
+        panda_core::connection_registry::global_registry().check_health(telemetry_id),
+        panda_core::connection_registry::global_registry().check_health(telemetry_id)
+    );
+    assert_eq!(concurrent_a.unwrap(), HealthState::Healthy);
+    assert_eq!(concurrent_b.unwrap(), HealthState::Healthy);
+    session.disconnect().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        panda_core::connection_registry::global_registry()
+            .check_health(telemetry_id)
+            .await
+            .unwrap(),
+        HealthState::Unavailable
+    );
 }

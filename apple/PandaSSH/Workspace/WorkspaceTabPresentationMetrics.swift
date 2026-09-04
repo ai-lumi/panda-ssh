@@ -7,27 +7,26 @@ struct WorkspaceTabPresentationMetrics: Equatable {
     }
 
     static let maximumTitleWidth = 180.0
-    private static let estimatedCharacterWidth = 8.0
 
     let showsCloseButton: Bool
     let minimumHitTarget: Double
     let closeButtonCornerRadius: Double
     let minimumTabHeight: Double
     let maximumTitleWidth: Double
+    /// 父容器的选择手势不能接收关闭按钮等子控件的点击。
+    let selectionGestureIncludesSubviews: Bool
 
     static func resolve(
         platform: Platform,
         isActive: Bool,
         isHovered: Bool,
         availableWidth: Double,
-        titleCharacterCount: Int
+        titleCharacterCount _: Int
     ) -> WorkspaceTabPresentationMetrics {
         let safeAvailableWidth = availableWidth.isFinite && availableWidth > 0 ? availableWidth : 0
-        let safeCharacterCount = max(0, titleCharacterCount)
         let titleWidth = min(
             maximumTitleWidth,
-            safeAvailableWidth,
-            Double(safeCharacterCount) * estimatedCharacterWidth
+            safeAvailableWidth
         )
 
         switch platform {
@@ -37,7 +36,8 @@ struct WorkspaceTabPresentationMetrics: Equatable {
                 minimumHitTarget: 24,
                 closeButtonCornerRadius: 4,
                 minimumTabHeight: 28,
-                maximumTitleWidth: titleWidth
+                maximumTitleWidth: titleWidth,
+                selectionGestureIncludesSubviews: false
             )
         case .iPadOS:
             return WorkspaceTabPresentationMetrics(
@@ -45,7 +45,8 @@ struct WorkspaceTabPresentationMetrics: Equatable {
                 minimumHitTarget: 44,
                 closeButtonCornerRadius: 6,
                 minimumTabHeight: 44,
-                maximumTitleWidth: titleWidth
+                maximumTitleWidth: titleWidth,
+                selectionGestureIncludesSubviews: false
             )
         }
     }
