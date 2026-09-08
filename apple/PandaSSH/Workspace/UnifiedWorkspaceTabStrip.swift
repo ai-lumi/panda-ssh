@@ -108,9 +108,19 @@ struct UnifiedWorkspaceTabStrip: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.caption.weight(.semibold))
-                        .frame(width: 24, height: 24)
+                        .frame(width: 20, height: 20)
+                        .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .background(
+                    Color.primary.opacity(0.04),
+                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                )
                 .accessibilityLabel("关闭 \(tab.title)")
             }
             .font(.callout)
