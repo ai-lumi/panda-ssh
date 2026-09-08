@@ -118,3 +118,19 @@ final class PandaTerminalViewMouseTests: XCTestCase {
     }
 }
 #endif
+
+#if os(macOS)
+@MainActor
+final class TerminalNativeVisibilityTests: XCTestCase {
+    func test隐藏终端退出原生命中区域并可恢复() {
+        let view = PandaTerminalView(frame: NSRect(x: 0, y: 0, width: 300, height: 200), font: nil)
+        view.updatePresentationVisibility(false)
+        XCTAssertTrue(view.isHidden)
+        XCTAssertNil(view.hitTest(NSPoint(x: 10, y: 10)))
+        view.updatePresentationVisibility(false)
+        XCTAssertTrue(view.isHidden)
+        view.updatePresentationVisibility(true)
+        XCTAssertFalse(view.isHidden)
+    }
+}
+#endif

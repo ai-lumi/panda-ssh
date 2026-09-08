@@ -23,6 +23,16 @@ protocol PandaTerminalViewDelegate: AnyObject {
 ///   点击通过 `@objc handleMenuItem(_:)` 转发到 `menuActionPerformer.perform(_:hitLink:)`。
 /// - 测试钩子（`simulate*`）只复用既有事件处理路径，生产代码不调用。
 class PandaTerminalView: TerminalView {
+    /// SwiftUI opacity 不会移除 AppKit 光标区域，后台终端必须同步隐藏原生视图。
+    func updatePresentationVisibility(_ visible: Bool) {
+        guard isHidden == visible else { return }
+        isHidden = !visible
+        if !visible {
+            discardCursorRects()
+            if window?.firstResponder === self { window?.makeFirstResponder(nil) }
+        }
+        window?.invalidateCursorRects(for: self)
+    }
 
     /// PRIMARY selection 回调对象；生产中是 `TerminalCoordinator`，测试中可注入 spy。
     weak var pandaDelegate: (any PandaTerminalViewDelegate)?

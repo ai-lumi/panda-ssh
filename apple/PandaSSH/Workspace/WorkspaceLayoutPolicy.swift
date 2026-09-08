@@ -23,17 +23,10 @@ struct WorkspaceLayoutPolicy: Equatable {
         case singlePane
     }
 
-    enum TransferPresentation: Equatable {
-        case drawer
-        case inspector
-        case sheet
-    }
-
     static let regularWidthThreshold = 700.0
 
     let sidebarPresentation: SidebarPresentation
     let sftpPresentation: SFTPPresentation
-    let transferPresentation: TransferPresentation
     let minimumInteractiveLength: Double
 
     static func resolve(
@@ -45,7 +38,6 @@ struct WorkspaceLayoutPolicy: Equatable {
             return WorkspaceLayoutPolicy(
                 sidebarPresentation: .sideBySide,
                 sftpPresentation: .dualPane,
-                transferPresentation: .drawer,
                 minimumInteractiveLength: 24
             )
         }
@@ -59,7 +51,6 @@ struct WorkspaceLayoutPolicy: Equatable {
             return WorkspaceLayoutPolicy(
                 sidebarPresentation: .systemCollapsed,
                 sftpPresentation: .singlePane,
-                transferPresentation: .sheet,
                 minimumInteractiveLength: 44
             )
         }
@@ -67,7 +58,6 @@ struct WorkspaceLayoutPolicy: Equatable {
         return WorkspaceLayoutPolicy(
             sidebarPresentation: .sideBySide,
             sftpPresentation: .dualPane,
-            transferPresentation: .inspector,
             minimumInteractiveLength: 44
         )
     }

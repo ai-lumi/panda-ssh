@@ -240,6 +240,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
             .environmentObject(store)
             .environmentObject(TransferStore())
             .environmentObject(ToastCenter())
+            .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
         let window = makeWindow()
         window.contentView = hosting
@@ -284,6 +285,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
             .environmentObject(store)
             .environmentObject(TransferStore())
             .environmentObject(ToastCenter())
+            .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
         let window = makeWindow()
         window.contentView = hosting
@@ -312,11 +314,13 @@ final class TabBarLayoutProbeTests: XCTestCase {
         }
         model.presentTab(try XCTUnwrap(store.tabs.last?.id))
 
-        let root = WorkspaceView()
+        // 内容区页签行属于保留的旧版布局，统一顶部栏另有专门测试。
+        let root = WorkspaceView(chromeStrategy: .legacy)
             .environmentObject(model)
             .environmentObject(store)
             .environmentObject(TransferStore())
             .environmentObject(ToastCenter())
+            .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
         let window = makeWindow(width: 700)
         window.contentView = hosting
@@ -348,6 +352,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
             .environmentObject(store)
             .environmentObject(TransferStore())
             .environmentObject(ToastCenter())
+            .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
         let window = makeWindow()
         window.contentView = hosting

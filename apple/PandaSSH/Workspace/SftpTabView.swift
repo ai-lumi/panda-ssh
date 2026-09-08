@@ -1,12 +1,11 @@
 import SwiftUI
 
-/// SFTP 标签页:本地/远程双栏文件浏览器 + 右侧可开合的传输任务面板。
+/// SFTP 标签页:本地/远程文件浏览器，传输任务由全局页面统一管理。
 /// 打开时先过连接门控(与终端一致),再经约 800ms 连接动画进入双栏;
 /// 连接失败展示重试/关闭,与原型 errbox 一致。
 struct SftpTabView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var transfers: TransferStore
     @EnvironmentObject private var toast: ToastCenter
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -28,7 +27,6 @@ struct SftpTabView: View {
     /// 连接尝试序号:重试时 +1,驱动 .task 重跑连接动画。
     @State private var attempt = 0
     @State private var presentationState = SFTPPresentationState(layout: .dualPane)
-    @State private var transferPresentationState = TransferPanelPresentationState()
     /// 待确认删除的条目名称列表;nil 表示未触发删除确认。
     /// 多选右键删除时含多个名称,单选/未选中右键时仅 1 个。
     @State private var deleteCandidate: (names: [String], local: Bool)? = nil
@@ -148,16 +146,12 @@ struct SftpTabView: View {
     private var browser: some View {
         GeometryReader { geometry in
             let policy = layoutPolicy(availableWidth: geometry.size.width)
-            browserSurface(policy: policy)
+            browserColumns(policy: policy)
                 .onAppear {
                     presentationState.updateLayout(policy.sftpPresentation)
-                    transferPresentationState.updatePresentation(policy.transferPresentation)
                 }
                 .onChange(of: policy.sftpPresentation) { _, presentation in
                     presentationState.updateLayout(presentation)
-                }
-                .onChange(of: policy.transferPresentation) { _, presentation in
-                    transferPresentationState.updatePresentation(presentation)
                 }
         }
         .alert("确认删除", isPresented: .init(
@@ -196,54 +190,8 @@ struct SftpTabView: View {
         })
     }
 
-    @ViewBuilder
-    private func browserSurface(policy: WorkspaceLayoutPolicy) -> some View {
-        #if os(macOS)
-        ZStack {
-            browserColumns(policy: policy)
-
-            if transferPresentationState.isPresented {
-                Color.black.opacity(0.15)
-                    .ignoresSafeArea()
-                    .onTapGesture { transferPresentationState.dismiss() }
-                    .transition(.opacity)
-
-                HStack(spacing: 0) {
-                    Spacer()
-                    TransferPanelView(store: transfers)
-                        .frame(width: 340)
-                        .background(.regularMaterial)
-                        .shadow(color: .black.opacity(0.2), radius: 16, x: -4, y: 0)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-                .ignoresSafeArea()
-            }
-        }
-        .animation(.easeInOut(duration: 0.25), value: transferPresentationState.isPresented)
-        #else
-        browserColumns(policy: policy)
-            .inspector(isPresented: panelBinding(for: .inspector, policy: policy)) {
-                TransferPanelView(store: transfers)
-                    .inspectorColumnWidth(min: 300, ideal: 340, max: 420)
-            }
-            .sheet(isPresented: panelBinding(for: .sheet, policy: policy)) {
-                NavigationStack {
-                    TransferPanelView(store: transfers)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("完成") { transferPresentationState.dismiss() }
-                            }
-                        }
-                }
-                .presentationDetents([.medium, .large])
-            }
-        #endif
-    }
-
     private func browserColumns(policy: WorkspaceLayoutPolicy) -> some View {
         VStack(spacing: 0) {
-            toolbar(policy: policy)
-            Divider()
             if policy.sftpPresentation == .dualPane {
                 HStack(spacing: 0) {
                     pane(local: true)
@@ -291,50 +239,6 @@ struct SftpTabView: View {
         #endif
     }
 
-    #if os(iOS)
-    private func panelBinding(
-        for presentation: WorkspaceLayoutPolicy.TransferPresentation,
-        policy: WorkspaceLayoutPolicy
-    ) -> Binding<Bool> {
-        Binding(
-            get: {
-                transferPresentationState.isPresented
-                    && transferPresentationState.presentation == presentation
-                    && policy.transferPresentation == presentation
-            },
-            set: { if !$0 { transferPresentationState.dismiss() } }
-        )
-    }
-    #endif
-
-    private func toolbar(policy: WorkspaceLayoutPolicy) -> some View {
-        HStack(spacing: 8) {
-            Label("SFTP · \(host.username)@\(host.address)", systemImage: "folder")
-                .font(.callout.bold())
-            Spacer()
-            Button {
-                transferPresentationState.toggle(using: policy.transferPresentation)
-            } label: {
-                HStack(spacing: 4) {
-                    Text("传输")
-                    if transfers.activeCount > 0 {
-                        Text("\(transfers.activeCount)")
-                            .font(.caption2)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor, in: Capsule())
-                    }
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .frame(minHeight: minimumInteractiveLength)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-    }
-
     // MARK: - 单栏(本地 / 远程)
 
     private func pane(local: Bool) -> some View {
@@ -361,6 +265,7 @@ struct SftpTabView: View {
                     .font(.caption.bold())
             }
             .buttonStyle(.plain)
+            .sftpNavigationPointer()
             .accessibilityLabel("返回顶级目录")
             Button {
                 Task {
@@ -371,6 +276,7 @@ struct SftpTabView: View {
                     .font(.caption)
             }
             .buttonStyle(.plain)
+            .sftpNavigationPointer()
             .foregroundStyle(nav.canGoUp ? Color.primary : Color.secondary.opacity(0.4))
             .disabled(!nav.canGoUp)
             .accessibilityLabel("返回上级")
@@ -383,8 +289,20 @@ struct SftpTabView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)
+                    .frame(width: 24, height: 20)
+                    .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
+            .sftpNavigationPointer()
+            .foregroundStyle(.secondary)
+            .background(
+                Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
             .accessibilityLabel("刷新当前目录")
 
             paneHeadActions(local: local)
@@ -398,51 +316,91 @@ struct SftpTabView: View {
     private func pathEditor(nav: FilePaneNavigator, local: Bool) -> some View {
         let editing = local ? localPathEditing : remotePathEditing
         if editing {
-            TextField("输入路径", text: local ? $localPathInput : $remotePathInput)
-                .font(.caption)
-                .textFieldStyle(.plain)
-                .focused(local ? $localPathFocused : $remotePathFocused)
-                .onSubmit {
-                    let target = local ? localPathInput : remotePathInput
-                    Task {
-                        let ok = local ? await session.navigateLocal(to: target) : await session.navigateRemote(to: target)
-                        if !ok { toast.show("无法访问路径：\(target)") }
-                        endPathEditing(local: local)
+            HStack(spacing: 4) {
+                TextField("输入绝对路径，例如 /var/log", text: local ? $localPathInput : $remotePathInput)
+                    .font(.caption)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .accessibilityLabel(local ? "本地目录路径" : "远程目录路径")
+                    .focused(local ? $localPathFocused : $remotePathFocused)
+                    .onSubmit {
+                        submitPath(local: local)
                     }
-                }
-                #if os(macOS)
-                .onExitCommand { endPathEditing(local: local) }
-                #endif
-                .onChange(of: local ? localPathFocused : remotePathFocused) { _, focused in
-                    // 失焦时退出编辑态、回到面包屑(不跳转)。
-                    if !focused { endPathEditing(local: local) }
-                }
-                .onAppear {
-                    if local { localPathFocused = true } else { remotePathFocused = true }
-                }
-        } else {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    // 栏头左侧已经显示「本地」或「远程 — host.name」，
-                    // 面包屑跳过 rootTitle，避免重复显示。
-                    ForEach(Array(nav.breadcrumbs.dropFirst().enumerated()), id: \.element.path) { index, crumb in
-                        if index > 0 {
-                            Text("›")
-                                .foregroundStyle(.secondary)
-                        }
-                        Button(crumb.title) {
-                            Task {
-                                local ? await session.navigateLocal(to: crumb.path) : await session.navigateRemote(to: crumb.path)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption)
-                        .fontWeight(.semibold)
+                    #if os(macOS)
+                    .onExitCommand { endPathEditing(local: local) }
+                    #endif
+                    .onChange(of: local ? localPathFocused : remotePathFocused) { _, focused in
+                        // 失焦时退出编辑态、回到面包屑(不跳转)。
+                        if !focused { endPathEditing(local: local) }
                     }
+                    .onAppear {
+                        if local { localPathFocused = true } else { remotePathFocused = true }
+                    }
+                Button {
+                    submitPath(local: local)
+                } label: {
+                    Image(systemName: "arrow.right.circle")
                 }
+                .buttonStyle(.plain)
+                .sftpNavigationPointer()
+                .accessibilityLabel("前往目录")
             }
-            .contentShape(Rectangle())
-            .onTapGesture { startPathEditing(nav: nav, local: local) }
+        } else {
+            HStack(spacing: 4) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        if nav.breadcrumbs.count == 1 {
+                            Text(nav.path)
+                                .font(.caption)
+                        }
+                        // 栏头左侧已经显示「本地」或「远程 — host.name」，
+                        // 面包屑跳过 rootTitle，避免重复显示。
+                        ForEach(Array(nav.breadcrumbs.dropFirst().enumerated()), id: \.element.path) { index, crumb in
+                            if index > 0 {
+                                Text("›")
+                                    .foregroundStyle(.secondary)
+                            }
+                            Button(crumb.title) {
+                                Task {
+                                    local ? await session.navigateLocal(to: crumb.path) : await session.navigateRemote(to: crumb.path)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .sftpNavigationPointer()
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        }
+                    }
+                }
+                .contentShape(Rectangle())
+                .sftpNavigationPointer()
+                .onTapGesture { startPathEditing(nav: nav, local: local) }
+                Button {
+                    startPathEditing(nav: nav, local: local)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .sftpNavigationPointer()
+                .accessibilityLabel(local ? "编辑本地路径" : "编辑远程路径")
+                .help(nav.path)
+            }
+        }
+    }
+
+    private func submitPath(local: Bool) {
+        let target = local ? localPathInput : remotePathInput
+        endPathEditing(local: local)
+        Task {
+            let ok = local ? await session.navigateLocal(to: target) : await session.navigateRemote(to: target)
+            let nav = local ? session.localPane : session.remotePane
+            if !ok, let error = nav.lastError {
+                toast.show("无法访问路径：\(target)。\(error.localizedDescription)")
+            }
         }
     }
 
@@ -468,35 +426,45 @@ struct SftpTabView: View {
             } label: {
                 Text(session.isLocalMultiSelect ? "完成" : "选择")
                     .font(.caption)
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
+            .sftpNavigationPointer()
+            .foregroundStyle(.secondary)
+            .background(
+                Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
             .accessibilityLabel(session.isLocalMultiSelect ? "完成选择" : "进入本地多选模式")
-            Button {
-                Task { await pickAndUploadLocalFiles() }
-            } label: {
-                Label("上传", systemImage: "arrow.up")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("选择本地文件或目录上传")
+
         } else {
             Button {
                 session.toggleRemoteMultiSelect()
             } label: {
                 Text(session.isRemoteMultiSelect ? "完成" : "选择")
                     .font(.caption)
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
+            .sftpNavigationPointer()
+            .foregroundStyle(.secondary)
+            .background(
+                Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
             .accessibilityLabel(session.isRemoteMultiSelect ? "完成选择" : "进入多选模式")
-        }
-    }
-
-    private func pickAndUploadLocalFiles() async {
-        guard let picked = await SystemLocalFilePicker.shared.pickFiles() else { return }
-        let tasks = await session.upload(localPaths: picked.paths)
-        if let first = tasks.first {
-            toast.show("已加入批量上传队列：\(first.name) 等 \(tasks.count) 项")
-            transferPresentationState.present(using: transferPresentationState.presentation)
         }
     }
 
@@ -792,7 +760,6 @@ struct SftpTabView: View {
                         let tasks = local ? await session.uploadSelected() : await session.downloadSelected()
                         if let first = tasks {
                             toast.show("已加入批量\(local ? "上传" : "下载")队列：\(first.name) 等 \(count) 项")
-                            transferPresentationState.present(using: transferPresentationState.presentation)
                             local ? session.toggleLocalMultiSelect() : session.toggleRemoteMultiSelect()
                         }
                     }
@@ -811,7 +778,6 @@ struct SftpTabView: View {
                         let task = local ? await session.uploadSelected() : await session.downloadSelected()
                         if let task {
                             toast.show((local ? "已加入上传队列：" : "已加入下载队列：") + task.name)
-                            transferPresentationState.present(using: transferPresentationState.presentation)
                         }
                     }
                 }
@@ -930,6 +896,18 @@ struct FileRowFrameKey: PreferenceKey {
 }
 
 extension View {
+    /// 连续悬停时纠正从文本区域遗留的光标，不覆盖路径 TextField。
+    @ViewBuilder
+    func sftpNavigationPointer() -> some View {
+        #if os(macOS)
+        self.onContinuousHover { phase in
+            if case .active = phase { NSCursor.arrow.set() }
+        }
+        #else
+        self
+        #endif
+    }
+
     /// 按条件应用修饰符,避免为 if/else 生成不同的返回类型。
     @ViewBuilder
     func applyIf<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {

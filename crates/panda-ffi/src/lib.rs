@@ -19,6 +19,18 @@ use uuid::Uuid;
 
 uniffi::setup_scaffolding!();
 
+/// 共享地址栏规则；纯同步调用，不执行文件系统或网络操作。
+#[uniffi::export]
+pub fn sftp_directory_path(input: String) -> Result<String, PandaError> {
+    Ok(panda_core::sftp_path::directory_path(&input)?)
+}
+
+/// 浏览和传输共用跨平台的目录与条目名拼接。
+#[uniffi::export]
+pub fn sftp_child_path(directory: String, name: String) -> String {
+    panda_core::sftp_path::join_path(&directory, &name)
+}
+
 mod batch_transfer;
 pub use batch_transfer::{
     batch_transfer_cancel, batch_transfer_list, batch_transfer_resolve_conflict,

@@ -7,6 +7,14 @@ struct WorkspaceView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var transfers: TransferStore
+    #if os(macOS)
+    @EnvironmentObject private var chromeMetrics: MacOSWorkspaceChromeMetrics
+    #endif
+    private let chromeStrategy: WorkspaceChromeStrategy
+
+    init(chromeStrategy: WorkspaceChromeStrategy = .unified) {
+        self.chromeStrategy = chromeStrategy
+    }
 
     var body: some View {
         Group {
@@ -44,12 +52,35 @@ struct WorkspaceView: View {
 
     #if os(macOS)
     private var macOSBody: some View {
+        Group {
+            switch chromeStrategy {
+            case .unified:
+                VStack(spacing: 0) {
+                    UnifiedWorkspaceChrome(
+                        leadingReservedWidth: chromeMetrics.trafficLightSafeWidth,
+                        sidebarWidth: chromeMetrics.sidebarWidth
+                    )
+                        // AppKit 宿主只负责窗口拖拽；页签与会话规则保持在共享 SwiftUI 层。
+                        .background(WindowDragView())
+                    Divider()
+                    macOSUnifiedSplitView
+                }
+                // 顶部 chrome 与原生红绿灯处于同一标题栏行；其左侧由实测安全矩形避让。
+                .ignoresSafeArea(.container, edges: .top)
+            case .legacy:
+                macOSSplitView(drawsLegacyTabBar: true)
+            }
+        }
+        .modifier(macOSCloseAlerts)
+    }
+
+    private func macOSSplitView(drawsLegacyTabBar: Bool) -> some View {
         NavigationSplitView(columnVisibility: $model.columnVisibility) {
-            SidebarView()
+            SidebarView(showsWorkspaceActions: drawsLegacyTabBar)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
         } detail: {
             VStack(spacing: 0) {
-                if !workspace.tabs.isEmpty {
+                if drawsLegacyTabBar && !workspace.tabs.isEmpty {
                     macOSTabBar
                     Divider()
                 }
@@ -57,9 +88,31 @@ struct WorkspaceView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // 「添加主机 / 新建分组」入口在侧栏顶部工具条(见 SidebarView.sidebarTopBar);
-        // 弹层状态在 AppModel.sidebarSheet,sheet 由 HostListView 统一挂载。
-        // 批量关闭含已连接终端时，使用系统警告框明确呈现断开后果。
+    }
+
+    private var macOSUnifiedSplitView: some View {
+        MacOSUnifiedSplitHost(
+            sidebar: SidebarView(showsWorkspaceActions: false),
+            detail: content.frame(maxWidth: .infinity, maxHeight: .infinity),
+            policy: .resolve(
+                requestedSidebarWidth: chromeMetrics.sidebarWidth,
+                isSidebarVisible: model.columnVisibility != .detailOnly
+            )
+        )
+    }
+
+    private var macOSCloseAlerts: some ViewModifier {
+        MacOSCloseAlerts(workspace: workspace, pendingCloseTabTitle: pendingCloseTabTitle)
+    }
+    #endif
+
+    #if os(macOS)
+    private struct MacOSCloseAlerts: ViewModifier {
+        @ObservedObject var workspace: WorkspaceStore
+        let pendingCloseTabTitle: String
+
+        func body(content: Content) -> some View {
+            content
         .alert(
             "关闭已连接终端？",
             isPresented: Binding(
@@ -85,6 +138,7 @@ struct WorkspaceView: View {
         } message: {
             Text("关闭后将断开与「\(pendingCloseTabTitle)」的 SSH 连接。")
         }
+        }
     }
 
     private var macOSTabBar: some View {
@@ -96,7 +150,60 @@ struct WorkspaceView: View {
     #endif
 
     #if os(iOS)
+    @ViewBuilder
     private var iOSBody: some View {
+        switch chromeStrategy {
+        case .unified:
+            unifiedIOSBody
+        case .legacy:
+            legacyIOSBody
+        }
+    }
+
+    /// iPadOS 页签复用系统导航栏，内容区不再叠加第二行顶部栏。
+    private var unifiedIOSBody: some View {
+        GeometryReader { geometry in
+            content
+                .alert(
+                    "关闭终端？",
+                    isPresented: Binding(
+                        get: { workspace.pendingCloseTabID != nil },
+                        set: { if !$0 { workspace.cancelClose() } }
+                    )
+                ) {
+                    Button("关闭并断开", role: .destructive) { workspace.confirmClose() }
+                    Button("取消", role: .cancel) { workspace.cancelClose() }
+                } message: {
+                    Text("关闭后将断开与「\(pendingCloseTabTitle)」的 SSH 连接。")
+                }
+                .alert(
+                    "关闭已连接终端？",
+                    isPresented: Binding(
+                        get: { workspace.pendingBatchClose != nil },
+                        set: { if !$0 { workspace.cancelBatchClose() } }
+                    )
+                ) {
+                    Button("关闭并断开", role: .destructive) { workspace.confirmBatchClose() }
+                    Button("取消", role: .cancel) { workspace.cancelBatchClose() }
+                } message: {
+                    Text("将关闭并断开 \(workspace.pendingBatchClose?.connectedTerminalCount ?? 0) 个已连接终端会话。")
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        UnifiedWorkspaceTabStrip()
+                            .frame(
+                                width: IPadWorkspaceChromeHostPolicy.navigationTabStripWidth(
+                                    availableWidth: geometry.size.width),
+                                height: 40
+                            )
+                    }
+                }
+        }
+    }
+
+    /// 旧内容区页签栏仅作回退使用，不参与新路径的顶部 chrome。
+    private var legacyIOSBody: some View {
         VStack(spacing: 0) {
             // 批量关闭含已连接终端的聚合确认挂在标签栏上。
             iosTabBar
@@ -197,6 +304,7 @@ struct WorkspaceView: View {
                 .accessibilityHidden(model.sidebarPage != .hosts)
             switch model.sidebarPage {
             case .connectionMonitor: ConnectionMonitorView()
+            case .transfers: TransferPageView(store: transfers)
             case .snippets: SnippetsView()
             case .settings:
                 #if os(iOS)
@@ -272,7 +380,7 @@ struct WorkspaceView: View {
     private func terminalTabs(policy: WorkspaceTerminalTabPolicy) -> some View {
         ForEach(policy.retainedTabs) { tab in
             if let host = model.hosts.first(where: { $0.id == tab.hostID }) {
-                let isVisible = policy.isVisible(tab.id)
+                let isVisible = policy.isVisible(tab.id) && model.sidebarPage == .hosts
                 TerminalTabView(tab: tab, host: host, isActive: isVisible)
                     .opacity(isVisible ? 1 : 0)
                     .allowsHitTesting(isVisible)

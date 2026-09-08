@@ -369,9 +369,19 @@ RustBuffer uniffi_panda_ffi_fn_func_sftp_check_download_conflict(RustBuffer host
 RustBuffer uniffi_panda_ffi_fn_func_sftp_check_upload_conflict(RustBuffer host_id, RustBuffer local_path, RustBuffer remote_path, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHILD_PATH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHILD_PATH
+RustBuffer uniffi_panda_ffi_fn_func_sftp_child_path(RustBuffer directory, RustBuffer name, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CREATE_DIR
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CREATE_DIR
 void uniffi_panda_ffi_fn_func_sftp_create_dir(RustBuffer host_id, RustBuffer remote_path, RustBuffer password, RustBuffer passphrase, int8_t trust_on_first_use, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_DIRECTORY_PATH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_DIRECTORY_PATH
+RustBuffer uniffi_panda_ffi_fn_func_sftp_directory_path(RustBuffer input, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_DOWNLOAD
@@ -955,9 +965,21 @@ uint16_t uniffi_panda_ffi_checksum_func_sftp_check_upload_conflict(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CHILD_PATH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CHILD_PATH
+uint16_t uniffi_panda_ffi_checksum_func_sftp_child_path(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CREATE_DIR
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_CREATE_DIR
 uint16_t uniffi_panda_ffi_checksum_func_sftp_create_dir(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_DIRECTORY_PATH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SFTP_DIRECTORY_PATH
+uint16_t uniffi_panda_ffi_checksum_func_sftp_directory_path(void
     
 );
 #endif

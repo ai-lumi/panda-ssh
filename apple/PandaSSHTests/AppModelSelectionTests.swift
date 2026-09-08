@@ -137,3 +137,48 @@ final class AppModelSelectionTests: XCTestCase {
         XCTAssertEqual(model.workspacePresentation, .empty)
     }
 }
+
+@MainActor
+final class GlobalTransferNavigationTests: XCTestCase {
+    func test重复打开传输保留工作区选择() {
+        let model = AppModel(backend: MockBackend.demo())
+        model.selectHost("h-webprod")
+        let selection = model.workspacePresentation
+        model.showTransfers()
+        model.showTransfers()
+        #if os(macOS)
+        XCTAssertEqual(model.sidebarPage, .hosts)
+        #else
+        XCTAssertEqual(model.sidebarPage, .transfers)
+        #endif
+        XCTAssertEqual(model.workspacePresentation, selection)
+        XCTAssertEqual(model.selectedHostID, "h-webprod")
+    }
+
+    func test空工作区允许打开并返回主机页() {
+        let model = AppModel(backend: MockBackend.demo())
+        model.showTransfers()
+        XCTAssertEqual(model.workspacePresentation, .empty)
+        model.selectHost("h-webprod")
+        XCTAssertEqual(model.sidebarPage, .hosts)
+    }
+
+    func test离开全局页面不取消跨主机任务() {
+        let store = TransferStore(failRule: { _ in false }, random: { 0 })
+        let model = AppModel(backend: MockBackend.demo())
+        for host in ["a", "b"] {
+            store.add(direction: .upload, name: "f", size: 1_000_000,
+                      source: "/local/f", destination: "/remote/f", hostID: host)
+        }
+        let ids = store.tasks.map(\.id)
+        model.showTransfers()
+        var page: TransferPageView? = TransferPageView(store: store)
+        XCTAssertTrue(page?.store === store)
+        page = nil
+        model.selectHost("h-webprod")
+        store.tick()
+        XCTAssertEqual(store.tasks.map(\.id), ids)
+        XCTAssertEqual(Set(store.tasks.map(\.hostID)), ["a", "b"])
+        XCTAssertTrue(store.tasks.allSatisfy { $0.status == .running && $0.transferred > 0 })
+    }
+}

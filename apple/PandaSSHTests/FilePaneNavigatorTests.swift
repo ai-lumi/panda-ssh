@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 
 #if os(macOS)
 @testable import PandaSSH_macOS
@@ -11,6 +12,237 @@ import XCTest
 /// 空目录)三类用例;另含会话选择联动与传输任务挂载。
 @MainActor
 final class FilePaneNavigatorTests: XCTestCase {
+
+    @MainActor
+    private final class DeferredSource: FilePaneSource {
+        let root = "/home/deploy"
+        let rootTitle = "远程"
+        var pending: [String: CheckedContinuation<[FileEntry], Error>] = [:]
+        var requested: ((String) -> Void)?
+
+        func list(path: String) async throws -> [FileEntry] {
+            if path == root {
+                return [FileEntry(name: "blocked", isDirectory: true, size: 0, modified: "")]
+            }
+            return try await withCheckedThrowingContinuation { continuation in
+                pending[path] = continuation
+                requested?(path)
+            }
+        }
+    }
+
+    func testPathRegressionCommitsOnlyLatestSuccessfulDirectory() async {
+        let source = DeferredSource()
+        let pane = FilePaneNavigator(source: source)
+        _ = await pane.reload()
+        let originalEntries = pane.entries
+        let firstRequested = expectation(description: "旧请求已开始")
+        source.requested = { _ in firstRequested.fulfill() }
+        let first = Task { await pane.navigate(to: "/a") }
+        await fulfillment(of: [firstRequested], timeout: 2)
+        let secondRequested = expectation(description: "新请求已开始")
+        source.requested = { _ in secondRequested.fulfill() }
+        let second = Task { await pane.navigate(to: "/b") }
+        await fulfillment(of: [secondRequested], timeout: 2)
+        XCTAssertEqual(pane.path, source.root)
+        XCTAssertEqual(pane.entries, originalEntries)
+        XCTAssertTrue(pane.isLoading)
+        let latest = [FileEntry(name: "最新.txt", isDirectory: false, size: 7, modified: "")]
+        source.pending.removeValue(forKey: "/b")?.resume(returning: latest)
+        let secondOK = await second.value
+        XCTAssertTrue(secondOK)
+        source.pending.removeValue(forKey: "/a")?.resume(returning: [])
+        let firstOK = await first.value
+        XCTAssertFalse(firstOK)
+        XCTAssertEqual(pane.path, "/b")
+        XCTAssertEqual(pane.entries, latest)
+        XCTAssertFalse(pane.isLoading)
+    }
+
+    func testPathRegressionFailedEnterKeepsDirectoryAndEntries() async {
+        let source = DeferredSource()
+        let pane = FilePaneNavigator(source: source)
+        _ = await pane.reload()
+        let entries = pane.entries
+        let requested = expectation(description: "开始进入子目录")
+        source.requested = { _ in requested.fulfill() }
+        let task = Task { await pane.enter("blocked") }
+        await fulfillment(of: [requested], timeout: 2)
+        source.pending.removeValue(forKey: source.root + "/blocked")?.resume(throwing: NSError(domain: "test", code: 1))
+        let ok = await task.value
+        XCTAssertFalse(ok)
+        XCTAssertEqual(pane.path, source.root)
+        XCTAssertEqual(pane.entries, entries)
+        XCTAssertNotNil(pane.lastError)
+    }
+
+    func testPathRegressionRejectsInvalidInputAndNormalizesTrailingSlash() async {
+        let source = ThrowingOnDemandSource(root: "/home/deploy", rootTitle: "远程", badPaths: [])
+        let pane = FilePaneNavigator(source: source)
+        _ = await pane.reload()
+        for input in ["", "relative", "~/logs", "/bad\0path"] {
+            let ok = await pane.navigate(to: input)
+            XCTAssertFalse(ok)
+            XCTAssertEqual(pane.path, source.root)
+        }
+        let ok = await pane.navigate(to: "/var/中文 目录///")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(pane.path, "/var/中文 目录")
+        XCTAssertEqual(pane.breadcrumbs.map(\.path), ["/", "/var", "/var/中文 目录"])
+        _ = await pane.navigate(to: "/")
+        XCTAssertFalse(pane.canGoUp)
+        await pane.goUp()
+        XCTAssertEqual(pane.path, "/")
+    }
+
+    func testPathRegressionSessionForwardsPaneChangesAfterSourceReplacement() async {
+        let (session, _) = makeSession()
+        session.useDemoSource()
+        var notifications = 0
+        let subscription = session.objectWillChange.sink { notifications += 1 }
+        _ = await session.remotePane.reload()
+        XCTAssertGreaterThan(notifications, 0)
+        withExtendedLifetime(subscription) {}
+    }
+
+    func testPathRegressionTransferPathsAfterTypedNavigation() async {
+        let (session, _) = makeSession()
+        let local = DemoFileSystem.localRoot + "/Downloads"
+        _ = await session.navigateLocal(to: local + "///")
+        _ = await session.navigateRemote(to: "/home/deploy/logs///")
+        session.selectLocal("wallpaper.heic")
+        let upload = await session.uploadSelected()
+        XCTAssertEqual(upload?.source, local + "/wallpaper.heic")
+        XCTAssertEqual(upload?.destination, "/home/deploy/logs/wallpaper.heic")
+        session.selectRemote("app.log")
+        let download = await session.downloadSelected()
+        XCTAssertEqual(download?.source, "/home/deploy/logs/app.log")
+        XCTAssertEqual(download?.destination, local + "/app.log")
+    }
+
+    func testPathRegressionUploadKeepsDestinationDuringAsyncScan() async {
+        let (session, _) = makeSession()
+        let started = expectation(description: "上传扫描已开始")
+        let release = DispatchSemaphore(value: 0)
+        var firstScan = true
+        session.scanLocalHandler = { paths, destination in
+            if firstScan {
+                firstScan = false
+                started.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+            }
+            return paths.map {
+                BatchItemRecord(source: $0, destination: destination + "/" + ($0 as NSString).lastPathComponent,
+                                size: 5, isDir: false)
+            }
+        }
+        let upload = Task { await session.upload(localPaths: ["/fake/a.txt", "/fake/b.txt"]) }
+        await fulfillment(of: [started], timeout: 2)
+        _ = await session.navigateRemote(to: "/home/deploy/logs")
+        release.signal()
+        let tasks = await upload.value
+        XCTAssertEqual(tasks.map(\.destination), ["/home/deploy/a.txt", "/home/deploy/b.txt"])
+    }
+
+    func testPathRegressionStaleFailureDoesNotEndNewerLoading() async {
+        let source = DeferredSource()
+        let pane = FilePaneNavigator(source: source)
+        _ = await pane.reload()
+        let firstRequested = expectation(description: "旧请求已开始")
+        source.requested = { _ in firstRequested.fulfill() }
+        let first = Task { await pane.navigate(to: "/a") }
+        await fulfillment(of: [firstRequested], timeout: 2)
+        let secondRequested = expectation(description: "新请求已开始")
+        source.requested = { _ in secondRequested.fulfill() }
+        let second = Task { await pane.navigate(to: "/b") }
+        await fulfillment(of: [secondRequested], timeout: 2)
+        source.pending.removeValue(forKey: "/a")?.resume(throwing: NSError(domain: "test", code: 1))
+        let firstOK = await first.value
+        XCTAssertFalse(firstOK)
+        XCTAssertTrue(pane.isLoading)
+        XCTAssertNil(pane.lastError)
+        XCTAssertEqual(pane.path, source.root)
+        source.pending.removeValue(forKey: "/b")?.resume(returning: [])
+        let secondOK = await second.value
+        XCTAssertTrue(secondOK)
+        XCTAssertFalse(pane.isLoading)
+        XCTAssertEqual(pane.path, "/b")
+        XCTAssertTrue(pane.entries.isEmpty)
+    }
+
+    func testPathRegressionCancelledNavigationDoesNotCommit() async {
+        for fails in [false, true] {
+            let source = DeferredSource()
+            let pane = FilePaneNavigator(source: source)
+            _ = await pane.reload()
+            let originalEntries = pane.entries
+            let requested = expectation(description: "请求已开始")
+            source.requested = { _ in requested.fulfill() }
+            let task = Task { await pane.navigate(to: "/cancelled") }
+            await fulfillment(of: [requested], timeout: 2)
+            task.cancel()
+            let continuation = source.pending.removeValue(forKey: "/cancelled")
+            if fails {
+                continuation?.resume(throwing: CancellationError())
+            } else {
+                continuation?.resume(returning: [])
+            }
+            let ok = await task.value
+            XCTAssertFalse(ok)
+            XCTAssertEqual(pane.path, source.root)
+            XCTAssertEqual(pane.entries, originalEntries)
+            XCTAssertFalse(pane.isLoading)
+            XCTAssertNil(pane.lastError)
+        }
+    }
+
+    func testPathRegressionAutomaticRefreshDoesNotSupersedeNavigation() async {
+        let source = DeferredSource()
+        let pane = FilePaneNavigator(source: source)
+        _ = await pane.reload()
+        let requested = expectation(description: "目录跳转已开始")
+        source.requested = { _ in requested.fulfill() }
+        let navigation = Task { await pane.navigate(to: "/next") }
+        await fulfillment(of: [requested], timeout: 2)
+        let refreshed = await pane.reload()
+        XCTAssertFalse(refreshed, "自动刷新不能用旧目录替换正在执行的跳转")
+        source.pending.removeValue(forKey: "/next")?.resume(returning: [])
+        let navigated = await navigation.value
+        XCTAssertTrue(navigated)
+        XCTAssertEqual(pane.path, "/next")
+    }
+
+    func testPathRegressionRootEntryAndTrailingSlashUseSingleSeparator() async {
+        let directory = FileEntry(name: "中文 目录 ", isDirectory: true, size: 0, modified: "")
+        let file = FileEntry(name: "中文 文件.txt ", isDirectory: false, size: 5, modified: "")
+        let pane = FilePaneNavigator(root: "/", fs: ["/": [directory], "/中文 目录 ": [file]], rootTitle: "远程")
+        _ = await pane.reload()
+        let ok = await pane.enter(directory.name)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(pane.path, "/中文 目录 ")
+        XCTAssertEqual(pane.entries, [file])
+        XCTAssertEqual(pane.breadcrumbs.map(\.path), ["/", "/中文 目录 "])
+        XCTAssertEqual(sftpChildPath(directory: pane.path, name: file.name), "/中文 目录 /中文 文件.txt ")
+    }
+
+    func testPathRegressionFailedNavigationPreservesSelectionAndRootUploadPath() async {
+        let (session, _) = makeSession()
+        _ = await session.localPane.reload()
+        _ = await session.remotePane.reload()
+        session.selectLocal("notes.md")
+        session.selectRemote(".bashrc")
+        let localOK = await session.navigateLocal(to: "relative")
+        let remoteOK = await session.navigateRemote(to: "")
+        XCTAssertFalse(localOK)
+        XCTAssertFalse(remoteOK)
+        XCTAssertEqual(session.selectedLocalSet, ["notes.md"])
+        XCTAssertEqual(session.selectedRemoteSet, [".bashrc"])
+        XCTAssertEqual(session.localAnchor, "notes.md")
+        XCTAssertEqual(session.remoteAnchor, ".bashrc")
+        _ = await session.navigateRemote(to: "///")
+        let task = await session.uploadSelected()
+        XCTAssertEqual(task?.destination, "/notes.md")
+    }
 
     private func makeLocalPane() async -> FilePaneNavigator {
         let pane = FilePaneNavigator(root: DemoFileSystem.localRoot, fs: DemoFileSystem.local, rootTitle: "本地")

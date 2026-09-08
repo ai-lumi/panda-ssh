@@ -45,6 +45,16 @@ struct SettingsView: View {
     @State private var credentialProtectionError: String?
     @State private var credentialProtectionEnabled = false
     @State private var selectedTab: SettingsTab = .general
+    /// 默认仍读取真实桥接；测试可注入确定值以覆盖两种展示状态。
+    private let credentialProtectionEnabledLoader: () -> Bool
+
+    init(
+        credentialProtectionEnabledLoader: @escaping () -> Bool = {
+            (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false
+        }
+    ) {
+        self.credentialProtectionEnabledLoader = credentialProtectionEnabledLoader
+    }
 
     var body: some View {
         #if os(macOS)
@@ -96,7 +106,7 @@ struct SettingsView: View {
                 Text(credentialProtectionError ?? "")
             }
             .onAppear {
-                credentialProtectionEnabled = (try? PandaCoreBridge.shared.isCredentialProtectionEnabled()) ?? false
+                credentialProtectionEnabled = credentialProtectionEnabledLoader()
             }
     }
 

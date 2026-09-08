@@ -1,15 +1,14 @@
 import SwiftUI
 
-/// 传输任务面板(SFTP 标签右侧可开合):方向图标、文件名、源→目标、
-/// 进度条 + 百分比 + 字节数、六态徽标与操作按钮;最新任务在最上(与原型一致)。
-/// 任务组可展开/折叠,展示组级进度与批量控制;组内文件任务支持单独控制。
-struct TransferPanelView: View {
+/// 全局传输页面只观察应用共享队列；关闭页面不会影响任务生命周期。
+struct TransferPageView: View {
     @ObservedObject var store: TransferStore
     @State private var expandedGroups: Set<UUID> = []
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            Divider()
             if store.tasks.isEmpty {
                 ContentUnavailableView(
                     "暂无传输任务",
@@ -36,24 +35,27 @@ struct TransferPanelView: View {
                         TransferRow(task: task, store: store)
                     }
                 }
-                .listStyle(.sidebar)
+                .listStyle(.plain)
             }
         }
-        .frame(width: 340)
-        .background(.regularMaterial)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
     }
 
     private var header: some View {
         HStack {
-            Text("传输任务")
-                .font(.callout.bold())
+            VStack(alignment: .leading, spacing: 4) {
+                Text("传输任务")
+                    .font(.title2.bold())
+                Text("\(store.activeCount) 个活动任务 · 共 \(store.tasks.count) 项")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             Button("清除已完成") { store.clearFinished() }
-                .buttonStyle(.borderless)
-                .font(.caption)
+                .buttonStyle(.bordered)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(16)
     }
 }
 
@@ -151,6 +153,8 @@ private struct GroupRow: View {
 
 /// 单个传输任务行。
 private struct TransferRow: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var showsPaths = false
     let task: TransferTask
     @ObservedObject var store: TransferStore
     var indented: Bool = false
@@ -167,11 +171,21 @@ private struct TransferRow: View {
                 Spacer(minLength: 4)
                 StatusBadge(status: task.status)
             }
-            Text(subtitle)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 24) {
+                    endpoint(title: "源", name: presentation.sourceEndpoint, path: presentation.sourcePath)
+                        .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
+                    endpoint(title: "目标", name: presentation.destinationEndpoint, path: presentation.destinationPath)
+                        .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    endpoint(title: "源", name: presentation.sourceEndpoint, path: presentation.sourcePath)
+                    endpoint(title: "目标", name: presentation.destinationEndpoint, path: presentation.destinationPath)
+                }
+            }
+            Button(showsPaths ? "收起完整路径" : "查看完整路径") { showsPaths.toggle() }
+                .buttonStyle(.borderless)
+                .font(.caption)
             if let error = task.error, task.status == .failed {
                 Text(error)
                     .font(.caption2)
@@ -181,16 +195,14 @@ private struct TransferRow: View {
             conflictNotice
             progressBar
             HStack(spacing: 8) {
-                Text("\(task.percent)%")
+                Text(presentation.progress.map { "\(Int($0 * 100))%" } ?? "—")
                 Text("\(formatBytes(task.transferred)) / \(formatBytes(task.size))")
                 Spacer()
                 operations
             }
             .font(.system(.caption, design: .monospaced))
             .foregroundStyle(.secondary)
-            if task.status == .running {
-                speedInfo
-            }
+            speedInfo
         }
         .padding(.horizontal, indented ? 8 : 10)
         .padding(.vertical, indented ? 5 : 8)
@@ -215,7 +227,7 @@ private struct TransferRow: View {
 
     /// 原生线性进度条:完成绿色、失败红色,其余强调色。
     private var progressBar: some View {
-        ProgressView(value: task.progress)
+        ProgressView(value: presentation.progress)
             .progressViewStyle(.linear)
             .tint(barColor)
             .animation(.linear(duration: 0.12), value: task.transferred)
@@ -224,9 +236,9 @@ private struct TransferRow: View {
     /// 实时速度、总速度与剩余时间。
     private var speedInfo: some View {
         HStack(spacing: 8) {
-            Text("\(formatSpeed(task.liveSpeed))")
+            Text("速度 \(formatSpeed(presentation.liveSpeed))")
             Text("(") + Text("均速 \(formatSpeed(task.totalSpeed))") + Text(")")
-            if let remaining = task.estimatedTimeRemaining {
+            if task.status == .running, let remaining = task.estimatedTimeRemaining {
                 Spacer()
                 Text("剩余 \(formatDuration(remaining))")
             }
@@ -235,13 +247,27 @@ private struct TransferRow: View {
         .foregroundStyle(.secondary)
     }
 
-    private var subtitle: String {
-        if task.isBatch {
-            let count = task.batchSources.count
-            let label = count > 0 ? "\(count) 项" : "批量任务"
-            return "\(label) → \(task.batchDestDir)"
+    private var presentation: TransferTaskPresentation {
+        TransferTaskPresentation(
+            task: task,
+            hostName: model.hosts.first(where: { $0.id == task.hostID })?.name
+        )
+    }
+
+    private func endpoint(title: String, name: String, path: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("\(title)：\(name)")
+                .font(.caption.weight(.semibold))
+            Text(path)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(showsPaths ? nil : 1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(path)
+                .accessibilityLabel("\(title)路径：\(path)")
         }
-        return "\(task.source) → \(task.destination)"
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var barColor: Color {
@@ -330,13 +356,37 @@ private struct StatusBadge: View {
 }
 
 #if DEBUG
-#Preview("传输面板") {
-    let store = TransferStore()
+#Preview("全局传输任务") {
+    let store = TransferStore(failRule: { _ in false })
     store.add(direction: .upload, name: "deploy.tar.gz", size: 18_432_000,
               source: "/Users/luowenqiang/deploy.tar.gz", destination: "/home/deploy/deploy.tar.gz")
     store.add(direction: .download, name: "app.log", size: 10_485_760,
               source: "/home/deploy/logs/app.log", destination: "/Users/luowenqiang/app.log")
     store.tick(seconds: 2)
-    return TransferPanelView(store: store)
+    return TransferPageView(store: store)
+        .environmentObject(AppModel.previewModel())
 }
 #endif
+
+/// 仅负责端点标签和未知进度的展示，不改变任务记录或传输规则。
+struct TransferTaskPresentation {
+    let sourceEndpoint: String
+    let destinationEndpoint: String
+    let sourcePath: String
+    let destinationPath: String
+    let progress: Double?
+    let liveSpeed: Int64
+
+    init(task: TransferTask, hostName: String?) {
+        let name = hostName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = name.flatMap { $0.isEmpty ? nil : $0 }
+            ?? (task.hostID.isEmpty ? "未知主机" : task.hostID)
+        sourceEndpoint = task.direction == .upload ? "本地" : remote
+        destinationEndpoint = task.direction == .upload ? remote : "本地"
+        sourcePath = task.isBatch && !task.batchSources.isEmpty
+            ? task.batchSources.joined(separator: "\n") : task.source
+        destinationPath = task.isBatch ? task.batchDestDir : task.destination
+        progress = task.size == 0 && task.status != .done ? nil : task.progress
+        liveSpeed = task.status == .running ? max(0, task.liveSpeed) : 0
+    }
+}

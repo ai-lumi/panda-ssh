@@ -848,3 +848,60 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
         )
     }
 }
+
+@MainActor
+final class TransferTaskPresentationTests: XCTestCase {
+    private func task(direction: TransferDirection = .upload, size: UInt64 = 100,
+                      status: TransferStatus = .running, batch: Bool = false) -> TransferTask {
+        TransferTask(record: TransferRecord(
+            id: UUID(), direction: direction, name: "中文 文件", size: size,
+            transferred: 0, status: status, source: "/源/中文 文件", destination: "/目标/中文 文件",
+            hostID: "host-id", error: nil, version: 0, failAt: nil, isBatch: batch,
+            batchSources: ["/源/a", "/源/b"], batchDestDir: "/目标",
+            groupID: nil, groupName: nil, pendingConflict: nil))
+    }
+
+    func test上传下载端点与路径完整保留() {
+        for direction in [TransferDirection.upload, .download] {
+            let value = task(direction: direction)
+            let display = TransferTaskPresentation(task: value, hostName: "服务器")
+            XCTAssertEqual(display.sourceEndpoint, direction == .upload ? "本地" : "服务器")
+            XCTAssertEqual(display.destinationEndpoint, direction == .upload ? "服务器" : "本地")
+            XCTAssertEqual(display.sourcePath, value.source)
+            XCTAssertEqual(display.destinationPath, value.destination)
+        }
+    }
+
+    func test缺失主机和批量路径() {
+        for hostName: String? in [nil, "", "  "] {
+            let display = TransferTaskPresentation(task: task(batch: true), hostName: hostName)
+            XCTAssertEqual(display.destinationEndpoint, "host-id")
+            XCTAssertEqual(display.sourcePath, "/源/a\n/源/b")
+            XCTAssertEqual(display.destinationPath, "/目标")
+        }
+    }
+
+    func test零字节仅完成状态展示完成进度() {
+        for status in [TransferStatus.queued, .running, .paused, .failed, .cancelled, .done] {
+            let display = TransferTaskPresentation(task: task(size: 0, status: status), hostName: nil)
+            XCTAssertEqual(display.progress, status == .done ? 1 : nil)
+        }
+    }
+
+    func test停止任务不显示陈旧速度() {
+        for status in [TransferStatus.queued, .running, .paused, .failed, .cancelled, .done] {
+            var value = task(status: status)
+            value.liveSpeed = 512
+            let display = TransferTaskPresentation(task: value, hostName: nil)
+            XCTAssertEqual(display.liveSpeed, status == .running ? 512 : 0)
+        }
+    }
+
+    func test长路径不丢失且进度不越界() {
+        var value = task(size: 1)
+        value.transferred = UInt64.max
+        XCTAssertEqual(TransferTaskPresentation(task: value, hostName: nil).progress, 1)
+        let longName = String(repeating: "中文", count: 2000)
+        XCTAssertEqual(TransferTaskPresentation(task: value, hostName: longName).destinationEndpoint, longName)
+    }
+}

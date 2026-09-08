@@ -7,16 +7,27 @@ struct HostListView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var workspace: WorkspaceStore
     @StateObject private var toast = ToastCenter()
+    #if os(macOS)
+    @StateObject private var chromeMetrics = MacOSWorkspaceChromeMetrics()
+    #endif
+    private let chromeStrategy: WorkspaceChromeStrategy
+
+    init(chromeStrategy: WorkspaceChromeStrategy? = nil) {
+        self.chromeStrategy = chromeStrategy ?? .resolve(
+            isUnifiedChromeAvailable: AppConfig.isUnifiedWorkspaceChromeAvailable,
+            isExplicitlyDisabled: AppConfig.isUnifiedWorkspaceChromeExplicitlyDisabled
+        )
+    }
 
     var body: some View {
         #if os(macOS)
-        WorkspaceView()
+        WorkspaceView(chromeStrategy: chromeStrategy)
+            .environmentObject(chromeMetrics)
             .environmentObject(toast)
             .toastOverlay(toast)
-            // 移除系统工具栏(空白带/自带侧栏切换按钮),窗口顶部区域完全自绘。
-            .background(MainWindowChrome())
-            // 侧栏弹层统一挂根视图:入口按钮在侧栏顶部工具条,
-            // 右键菜单等入口在侧栏隐藏时也要能弹出。
+            // AppKit 宿主负责标题栏安全区、红绿灯与唯一顶行的窗口属性。
+            .background(MainWindowChrome(metrics: chromeMetrics))
+            // 侧栏弹层统一挂根视图，右键菜单等入口在侧栏隐藏时仍可弹出。
             .sheet(item: $model.sidebarSheet) { kind in
                 kind.sheetContent(model: model, workspace: workspace, toast: toast)
             }
@@ -25,7 +36,7 @@ struct HostListView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
         } detail: {
-            WorkspaceView()
+            WorkspaceView(chromeStrategy: chromeStrategy)
         }
         .environmentObject(toast)
         .toastOverlay(toast)

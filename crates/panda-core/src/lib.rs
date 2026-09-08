@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod groups;
 pub mod hostkey;
 pub mod sftp;
+pub mod sftp_path;
 pub mod snippets;
 pub mod ssh;
 pub mod telemetry;

@@ -46,8 +46,12 @@ struct WorkspaceTabButton: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .background(
-                hovering ? Color.primary.opacity(0.12) : Color.clear,
+                hovering ? Color.primary.opacity(0.12) : Color.primary.opacity(0.04),
                 in: RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(hovering ? 0.2 : 0.1), lineWidth: 0.5)
             )
             .opacity(metrics.showsCloseButton ? 1 : 0)
             .allowsHitTesting(metrics.showsCloseButton)

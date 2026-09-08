@@ -195,90 +195,92 @@ struct Crumb: Equatable {
     let path: String
 }
 
-/// 单栏(本地或远程)目录导航模型:当前路径、进入/返回上级/面包屑跳转。
-/// 根路径不可再向上;进入非目录或未知名称会被拒绝。
+/// 单栏导航展示状态：目录与列表作为同一快照提交，过期请求不影响当前展示。
+@MainActor
 final class FilePaneNavigator: ObservableObject {
     let source: any FilePaneSource
-    private(set) var path: String
 
-    @Published private(set) var entries: [FileEntry] = []
+    private struct DirectorySnapshot {
+        let path: String
+        let entries: [FileEntry]
+    }
+
+    @Published private var directory: DirectorySnapshot
     @Published private(set) var lastError: Error? = nil
-    @Published private(set) var isLoading: Bool = false
+    @Published private(set) var isLoading = false
+    private var requestGeneration: UInt64 = 0
+
+    var path: String { directory.path }
+    var entries: [FileEntry] { directory.entries }
 
     init(source: any FilePaneSource) {
         self.source = source
-        self.path = source.root
+        let initialPath = (try? sftpDirectoryPath(input: source.root)) ?? source.root
+        directory = DirectorySnapshot(path: initialPath, entries: [])
     }
 
-    /// 兼容旧初始化器:基于静态假文件系统构造导航器。
     convenience init(root: String, fs: [String: [FileEntry]], rootTitle: String) {
         self.init(source: DemoFilePaneSource(root: root, fs: fs, rootTitle: rootTitle))
     }
 
-    var root: String { source.root }
+    var root: String { (try? sftpDirectoryPath(input: source.root)) ?? source.root }
     var rootTitle: String { source.rootTitle }
+    var canGoUp: Bool { path != root && path != "/" }
 
-    var canGoUp: Bool { path != source.root }
-
-    /// 面包屑:根段显示 rootTitle(「本地」/「远程」),其后逐级目录名。
+    /// home 内保持原面包屑，home 外从文件系统根展示当前位置。
     var breadcrumbs: [Crumb] {
-        let root = source.root
-        var crumbs = [Crumb(title: source.rootTitle, path: root)]
-        guard path != root, path.hasPrefix(root + "/") else { return crumbs }
-        var acc = root
-        for segment in path.dropFirst(root.count + 1).split(separator: "/") {
-            acc += "/" + segment
+        if path == root { return [Crumb(title: rootTitle, path: root)] }
+        let withinRoot = root != "/" && path.hasPrefix(root + "/")
+        let base = withinRoot ? root : "/"
+        var crumbs = [Crumb(title: withinRoot ? rootTitle : "/", path: base)]
+        var acc = base
+        for segment in path.dropFirst(base.count).split(separator: "/") {
+            acc = sftpChildPath(directory: acc, name: String(segment))
             crumbs.append(Crumb(title: String(segment), path: acc))
         }
         return crumbs
     }
 
-    /// 刷新当前目录内容;失败时写入 `lastError` 并返回 false。
     @discardableResult
     func reload() async -> Bool {
+        // 传输完成的自动刷新不得用旧目录取代正在加载的用户跳转。
+        guard !isLoading else { return false }
+        return await navigate(to: path)
+    }
+
+    @discardableResult
+    func enter(_ name: String) async -> Bool {
+        guard entries.contains(where: { $0.name == name && $0.isDirectory }) else { return false }
+        return await navigate(to: sftpChildPath(directory: path, name: name))
+    }
+
+    @discardableResult
+    func goUp() async -> Bool {
+        guard canGoUp else { return false }
+        return await navigate(to: (path as NSString).deletingLastPathComponent)
+    }
+
+    /// 读取期间保留成功快照，只有最新且未取消的请求能够提交结果或错误。
+    @discardableResult
+    func navigate(to target: String) async -> Bool {
+        requestGeneration &+= 1
+        let generation = requestGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if generation == requestGeneration { isLoading = false }
+        }
         do {
-            entries = try await source.list(path: path)
+            let resolved = try sftpDirectoryPath(input: target)
+            let loaded = try await source.list(path: resolved)
+            guard generation == requestGeneration, !Task.isCancelled else { return false }
             lastError = nil
+            directory = DirectorySnapshot(path: resolved, entries: loaded)
             return true
         } catch {
+            guard generation == requestGeneration, !Task.isCancelled else { return false }
             lastError = error
             return false
         }
-    }
-
-    /// 进入子目录;目标是文件或不存在时拒绝并返回 false。
-    /// 进入成功后自动刷新新目录内容。
-    @discardableResult
-    func enter(_ name: String) async -> Bool {
-        guard let entry = entries.first(where: { $0.name == name }), entry.isDirectory else { return false }
-        path = path + "/" + name
-        _ = await reload()
-        return true
-    }
-
-    /// 返回上级;根目录下为 no-op。
-    /// 返回成功后自动刷新目录内容。
-    func goUp() async {
-        guard canGoUp else { return }
-        if let slash = path.lastIndex(of: "/") {
-            path = slash == path.startIndex ? "/" : String(path[..<slash])
-            _ = await reload()
-        }
-    }
-
-    /// 跳转到任意绝对路径:reload 成功则跳转并返回 true;
-    /// reload 失败则回滚 `path` 到原值、`lastError` 置位、返回 false(item 7)。
-    @discardableResult
-    func navigate(to target: String) async -> Bool {
-        let original = path
-        path = target
-        if await reload() {
-            return true
-        }
-        path = original
-        return false
     }
 }
 
@@ -299,8 +301,12 @@ final class SftpSessionStore: ObservableObject {
     let host: HostEntry
     let transfers: TransferStore
 
-    @Published private(set) var localPane: FilePaneNavigator
-    @Published private(set) var remotePane: FilePaneNavigator
+    @Published private(set) var localPane: FilePaneNavigator {
+        didSet { observePaneChanges() }
+    }
+    @Published private(set) var remotePane: FilePaneNavigator {
+        didSet { observePaneChanges() }
+    }
     /// 本地栏选中集合;单选模式下大小为 0 或 1,多选模式下可包含多个条目。
     @Published var selectedLocalSet: Set<String> = []
     /// 远程栏选中集合;单选模式下大小为 0 或 1,多选模式下可包含多个条目。
@@ -356,6 +362,7 @@ final class SftpSessionStore: ObservableObject {
     private var pendingReload: (local: Bool, remote: Bool) = (false, false)
     private var reloadWorkItem: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
+    private var paneSubscriptions = Set<AnyCancellable>()
 
     init(host: HostEntry, transfers: TransferStore) {
         self.host = host
@@ -368,7 +375,18 @@ final class SftpSessionStore: ObservableObject {
                 rootTitle: "远程"
             )
         )
+        observePaneChanges()
         observeCompletedTransfers()
+    }
+
+    /// 外层视图观察会话；将子面板刷新通知转发，替换数据源时释放旧订阅。
+    private func observePaneChanges() {
+        paneSubscriptions.removeAll()
+        for pane in [localPane, remotePane] {
+            pane.objectWillChange.sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }.store(in: &paneSubscriptions)
+        }
     }
 
     /// 监听传输任务完成,自动刷新受影响的面板。
@@ -548,9 +566,10 @@ final class SftpSessionStore: ObservableObject {
         }
     }
     func goUpLocal() async {
-        await localPane.goUp()
-        selectedLocalSet.removeAll()
-        localAnchor = nil
+        if await localPane.goUp() {
+            selectedLocalSet.removeAll()
+            localAnchor = nil
+        }
     }
     /// 跳转到任意绝对路径;成功时清空选中并返回 true,失败返回 false(item 7)。
     @discardableResult
@@ -638,9 +657,10 @@ final class SftpSessionStore: ObservableObject {
         }
     }
     func goUpRemote() async {
-        await remotePane.goUp()
-        selectedRemoteSet.removeAll()
-        remoteAnchor = nil
+        if await remotePane.goUp() {
+            selectedRemoteSet.removeAll()
+            remoteAnchor = nil
+        }
     }
     /// 跳转到任意绝对路径;成功时清空选中并返回 true,失败返回 false(item 7)。
     @discardableResult
@@ -761,9 +781,10 @@ final class SftpSessionStore: ObservableObject {
     @discardableResult
     func upload(localPaths: [String]) async -> [TransferTask] {
         guard !localPaths.isEmpty else { return [] }
+        let destinationDirectory = remotePane.path
         // 先用 Rust 扫描结果识别目录(测试 handler 也走这里),
         // 回退到 FileManager 判断真实本地路径。
-        let scannedDirPaths = Set((await scanLocalItems(paths: localPaths, destDir: remotePane.path)).filter { $0.isDir }.map { $0.source })
+        let scannedDirPaths = Set((await scanLocalItems(paths: localPaths, destDir: destinationDirectory)).filter { $0.isDir }.map { $0.source })
         let dirs = localPaths.filter { scannedDirPaths.contains($0) || isDirectory(at: $0) }
         let files = localPaths.filter { !dirs.contains($0) }
 
@@ -773,7 +794,7 @@ final class SftpSessionStore: ObservableObject {
         if dirs.isEmpty, files.count == 1, let file = files.first {
             let name = (file as NSString).lastPathComponent
             if let size = fileSize(at: file),
-               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(remotePane.path, name)) {
+               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(destinationDirectory, name)) {
                 tasks.append(task)
             }
             return tasks
@@ -782,9 +803,9 @@ final class SftpSessionStore: ObservableObject {
         // 多个文件:每个文件独立任务,不组成任务组;扫描结果可提供大小回退(便于测试)。
         for file in files {
             let name = (file as NSString).lastPathComponent
-            let scannedSize = (await scanLocalItems(paths: [file], destDir: remotePane.path)).first { $0.source == file }?.size
+            let scannedSize = (await scanLocalItems(paths: [file], destDir: destinationDirectory)).first { $0.source == file }?.size
             if let size = fileSize(at: file) ?? scannedSize,
-               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(remotePane.path, name)) {
+               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(destinationDirectory, name)) {
                 tasks.append(task)
             }
         }
@@ -792,7 +813,7 @@ final class SftpSessionStore: ObservableObject {
         // 每个目录生成一个任务组,组内每个文件为独立任务。
         for dir in dirs {
             let name = (dir as NSString).lastPathComponent
-            let destDir = joinPath(remotePane.path, name)
+            let destDir = joinPath(destinationDirectory, name)
             let items = await scanLocalItems(paths: [dir], destDir: destDir)
             tasks += enqueueGroup(direction: .upload, groupName: name, items: items)
         }
@@ -979,11 +1000,7 @@ final class SftpSessionStore: ObservableObject {
 
     /// 安全拼接文件路径，避免双斜杠（如根目录 `/` 拼接后变成 `//name`）。
     private func joinPath(_ dir: String, _ name: String) -> String {
-        if dir.hasSuffix("/") {
-            return dir + name
-        } else {
-            return dir + "/" + name
-        }
+        sftpChildPath(directory: dir, name: name)
     }
 
     /// 删除本地文件或目录;删除成功后刷新本地面板。

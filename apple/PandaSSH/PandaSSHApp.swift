@@ -42,12 +42,6 @@ struct PandaSSHApp: App {
                 }
         }
         #if os(macOS)
-        // 保留原生工具栏、红绿灯、拖拽和全屏行为，只隐藏应用名称标题。
-        // 工作区页签通过 principal toolbar item 占用原标题位置。
-        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
-        #endif
-
-        #if os(macOS)
         Settings {
             SettingsView()
                 .environmentObject(model)
@@ -61,8 +55,18 @@ struct PandaSSHApp: App {
             ConnectionMonitorView()
         }
         .defaultSize(width: 920, height: 680)
+        Window(TransferWindow.title, id: TransferWindow.id) {
+            TransferPageView(store: transfers)
+                .environmentObject(model)
+        }
+        .defaultSize(width: 1000, height: 680)
         #endif
     }
+}
+
+enum TransferWindow {
+    static let title = "传输任务"
+    static let id = "panda-transfers"
 }
 
 enum ConnectionMonitorWindow {
@@ -73,12 +77,16 @@ enum ConnectionMonitorWindow {
 /// 全局开关:DEBUG 构建默认走真实后端,只有 Preview 与单元测试显式使用 Mock。
 enum AppConfig {
     static var useMockBackend: Bool = false
+    /// 统一 workspace chrome 已验证时默认启用；测试或宿主降级可显式回退旧路径。
+    static var isUnifiedWorkspaceChromeAvailable: Bool = true
+    static var isUnifiedWorkspaceChromeExplicitlyDisabled: Bool = false
 }
 
 /// 侧栏底部入口决定主区页面:主机(工作区)/代码片段/设置。
 enum SidebarPage: Equatable {
     case hosts
     case connectionMonitor
+    case transfers
     case snippets
     case settings
     case logs
@@ -169,6 +177,12 @@ final class AppModel: ObservableObject {
         if let selectedGroupID { return selectedGroupID }
         guard let selectedHostID else { return nil }
         return hosts.first(where: { $0.id == selectedHostID })?.groupID ?? nil
+    }
+
+    func showTransfers() {
+        #if os(iOS)
+        sidebarPage = .transfers
+        #endif
     }
 
     func showSnippets() { sidebarPage = .snippets }

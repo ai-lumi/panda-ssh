@@ -219,13 +219,7 @@ pub async fn scan_local_sources(
 }
 
 fn join_path(dir: &str, name: &str) -> String {
-    if name.is_empty() {
-        dir.to_string()
-    } else if dir.ends_with('/') {
-        format!("{}{}", dir, name)
-    } else {
-        format!("{}/{}", dir, name)
-    }
+    crate::sftp_path::join_path(dir, name)
 }
 
 /// 扫描多个远程源路径，生成本地下载计划。

@@ -16,7 +16,6 @@ final class WorkspaceLayoutPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.sidebarPresentation, .sideBySide)
         XCTAssertEqual(policy.sftpPresentation, .dualPane)
-        XCTAssertEqual(policy.transferPresentation, .drawer)
         XCTAssertEqual(policy.minimumInteractiveLength, 24)
     }
 
@@ -29,7 +28,6 @@ final class WorkspaceLayoutPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.sidebarPresentation, .sideBySide)
         XCTAssertEqual(policy.sftpPresentation, .dualPane)
-        XCTAssertEqual(policy.transferPresentation, .inspector)
         XCTAssertEqual(policy.minimumInteractiveLength, 44)
     }
 
@@ -42,7 +40,6 @@ final class WorkspaceLayoutPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.sidebarPresentation, .systemCollapsed)
         XCTAssertEqual(policy.sftpPresentation, .singlePane)
-        XCTAssertEqual(policy.transferPresentation, .sheet)
     }
 
     func testIPadRegularSizeClass在实际宽度不足时安全降级() {
@@ -54,7 +51,6 @@ final class WorkspaceLayoutPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.sidebarPresentation, .systemCollapsed)
         XCTAssertEqual(policy.sftpPresentation, .singlePane)
-        XCTAssertEqual(policy.transferPresentation, .sheet)
     }
 
     func test无效宽度采用保守紧凑回退() {
@@ -67,7 +63,6 @@ final class WorkspaceLayoutPolicyTests: XCTestCase {
 
             XCTAssertEqual(policy.sidebarPresentation, .systemCollapsed)
             XCTAssertEqual(policy.sftpPresentation, .singlePane)
-            XCTAssertEqual(policy.transferPresentation, .sheet)
         }
     }
 

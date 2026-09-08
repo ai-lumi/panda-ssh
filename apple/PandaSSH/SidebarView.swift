@@ -50,20 +50,28 @@ extension SidebarSheetKind {
     }
 }
 
-/// 侧栏:搜索框 + 分组树 + 底部固定入口(代码片段/设置)。
+/// 侧栏:搜索框 + 分组树 + 底部全局功能入口。
 /// 布局与交互参照 prototype/index.html;右键菜单 macOS/iPadOS 统一走 contextMenu
 /// (macOS 右键、iPadOS 长按)。
 struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var transfers: TransferStore
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var toast: ToastCenter
     #if os(macOS)
     @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var chromeMetrics: MacOSWorkspaceChromeMetrics
     #endif
 
     @State private var searchText = ""
     @State private var hostPendingDelete: HostEntry?
     @State private var groupPendingDelete: HostGroup?
+    /// 新统一顶行已提供这些操作时为 false；旧页签栏回退路径在侧栏内部保留入口。
+    private let showsWorkspaceActions: Bool
+
+    init(showsWorkspaceActions: Bool = false) {
+        self.showsWorkspaceActions = showsWorkspaceActions
+    }
 
     private var callbacks: SidebarCallbacks {
         SidebarCallbacks(
@@ -90,6 +98,12 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             #if os(macOS)
+            if showsWorkspaceActions {
+                workspaceActions
+                Divider()
+            }
+            #endif
+            #if os(macOS)
             searchField
             #endif
             treeView
@@ -97,26 +111,10 @@ struct SidebarView: View {
             bottomEntries
         }
         #if os(macOS)
-        // 让侧栏表面延伸进统一系统工具栏，与 macOS 26 浮动侧栏保持连续。
+        // 侧栏实际宽度仅作为 AppKit 标题栏宿主的布局测量，不承载业务状态。
+        .background(sidebarWidthReporter)
+        // 顶部安全区由分栏宿主统一结算；子视图不能以负偏移抵消，否则会裁掉搜索框。
         .ignoresSafeArea(.container, edges: .top)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.sidebarSheet = .addHost(defaultGroupID: nil)
-                } label: {
-                    Label("添加主机", systemImage: "plus")
-                }
-                .help("添加主机")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.sidebarSheet = .newGroup(parent: nil)
-                } label: {
-                    Label("新建分组", systemImage: "folder.badge.plus")
-                }
-                .help("新建分组")
-            }
-        }
         #endif
         #if os(iOS)
         .searchable(text: $searchText, placement: .sidebar, prompt: "搜索主机")
@@ -168,6 +166,42 @@ struct SidebarView: View {
     }
 
     #if os(macOS)
+    private var workspaceActions: some View {
+        HStack(spacing: 4) {
+            Button {
+                model.sidebarSheet = .addHost(defaultGroupID: nil)
+            } label: {
+                Label("添加主机", systemImage: "plus")
+            }
+            Button {
+                model.sidebarSheet = .newGroup(parent: nil)
+            } label: {
+                Label("新建分组", systemImage: "folder.badge.plus")
+            }
+            Button {
+                withAnimation { model.columnVisibility = .detailOnly }
+            } label: {
+                Label("隐藏侧栏", systemImage: "sidebar.left")
+            }
+            Spacer(minLength: 0)
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var sidebarWidthReporter: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear { chromeMetrics.updateSidebarWidth(proxy.size.width) }
+                .onChange(of: proxy.size.width) { _, width in
+                    chromeMetrics.updateSidebarWidth(width)
+                }
+        }
+    }
+
     private var searchField: some View {
         HStack {
             Image(systemName: "magnifyingglass")
@@ -270,10 +304,16 @@ struct SidebarView: View {
             )
             #endif
             SideEntryButton(
-                title: "代码片段",
-                systemImage: "chevron.left.forwardslash.chevron.right",
-                isActive: model.sidebarPage == .snippets,
-                action: model.showSnippets
+                title: "传输任务",
+                systemImage: "arrow.up.arrow.down",
+                isActive: model.sidebarPage == .transfers,
+                badgeCount: transfers.activeCount,
+                action: {
+                    model.showTransfers()
+                    #if os(macOS)
+                    openWindow(id: TransferWindow.id)
+                    #endif
+                }
             )
             #if os(iOS)
             SideEntryButton(
@@ -466,6 +506,7 @@ private struct SideEntryButton: View {
     let title: String
     let systemImage: String
     let isActive: Bool
+    var badgeCount: Int = 0
     let action: () -> Void
     @State private var hovering = false
 
@@ -477,6 +518,13 @@ private struct SideEntryButton: View {
                 Text(title)
                     .font(.callout)
                 Spacer()
+                if badgeCount > 0 {
+                    Text("\(badgeCount)")
+                        .font(.caption.monospacedDigit())
+                        .padding(.horizontal, 6)
+                        .background(Color.accentColor.opacity(0.15), in: Capsule())
+                        .accessibilityLabel("\(badgeCount) 个活动任务")
+                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -500,6 +548,7 @@ private struct SideEntryButton: View {
     }
     .environmentObject(AppModel.previewModel())
     .environmentObject(WorkspaceStore.previewStore())
+    .environmentObject(TransferStore(failRule: { _ in false }))
     .environmentObject(ToastCenter())
 }
 #endif

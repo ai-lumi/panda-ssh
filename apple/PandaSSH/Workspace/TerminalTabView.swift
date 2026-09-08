@@ -1,6 +1,27 @@
 import SwiftUI
 import SwiftTerm
 
+/// SSH 内容页的共享几何与交互所有权；不承载连接状态机。
+enum TerminalContentPhase: Equatable { case connecting, shell, failed }
+
+struct TerminalContentPresentation: Equatable {
+    enum Overlay: Equatable { case none, centered }
+    let fillsCanvas: Bool
+    let overlay: Overlay
+    let requestsTerminalResize: Bool
+    let canvasWidth: Double
+    let canvasHeight: Double
+    var panelWidth: Double { min(420, max(0, canvasWidth - 32)) }
+
+    static func resolve(phase: TerminalContentPhase, width: Double, height: Double) -> Self {
+        let w = width.isFinite ? max(0, width) : 0
+        let h = height.isFinite ? max(0, height) : 0
+        return Self(fillsCanvas: true, overlay: phase == .shell ? .none : .centered,
+                    requestsTerminalResize: phase == .shell && w > 0 && h > 0,
+                    canvasWidth: w, canvasHeight: h)
+    }
+}
+
 /// 终端标签页：使用 SwiftTerm TerminalView 提供真终端体验
 /// （ANSI 色彩、光标、滚动、选中文本、复制粘贴）。
 /// 打开时先过连接门控（TOFU/密钥变更/密码），再进入约 800ms 的连接动画。
@@ -24,8 +45,12 @@ struct TerminalTabView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            content
+        GeometryReader { geometry in
+            let presentation = TerminalContentPresentation.resolve(
+                phase: contentPhase, width: geometry.size.width, height: geometry.size.height)
+            content(presentation: presentation)
+                .frame(width: presentation.canvasWidth, height: presentation.canvasHeight)
+                .clipped()
         }
         .background(Color.black)
         .onAppear {
@@ -73,22 +98,27 @@ struct TerminalTabView: View {
     // MARK: - 内容区
 
     @ViewBuilder
-    private var content: some View {
+    private func content(presentation: TerminalContentPresentation) -> some View {
         if !gate.unlocked {
             // 门控对话框展示期间内容留空（取消即关标签）。
             Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             switch session.phase {
             case .connecting:
-                connectingBody
+                terminalCanvas(presentation: presentation) { connectingBody }
             case .failed:
-                ConnectFailureView(
-                    host: host,
-                    failure: session.failure,
-                    onRetry: { session.retry() },
-                    onClose: { workspace.close(tabID: tab.id) }
-                )
-                .padding(24)
+                terminalCanvas(presentation: presentation) {
+                    VStack(spacing: 16) {
+                        Image(systemName: "exclamationmark.circle").font(.largeTitle)
+                        Text(session.failure.title).font(.headline)
+                        Text("\(host.address):\(host.port)").font(.caption.monospaced())
+                        Text(session.failure.detail).multilineTextAlignment(.center)
+                        ViewThatFits {
+                            HStack { failureActions }
+                            VStack { failureActions }
+                        }
+                    }
+                }
             case .shell:
                 let readingAttempt = session.attempt
                 SwiftTermWrapper(
@@ -104,20 +134,44 @@ struct TerminalTabView: View {
         }
     }
 
-    /// 连接动画：进度指示器 + 「正在连接」文案。
-    private var connectingBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("正在连接 \(host.address):\(host.port) …")
-                    .foregroundStyle(.secondary)
+    private var contentPhase: TerminalContentPhase {
+        switch session.phase {
+        case .connecting: .connecting
+        case .shell: .shell
+        case .failed: .failed
+        }
+    }
+
+    @ViewBuilder private var failureActions: some View {
+        Button("重试") { session.retry() }.buttonStyle(.borderedProminent)
+        Button("关闭标签") { workspace.close(tabID: tab.id) }
+    }
+
+    private func terminalCanvas<Overlay: View>(presentation: TerminalContentPresentation, @ViewBuilder overlay: () -> Overlay) -> some View {
+        ZStack {
+            Color.black
+            ScrollView {
+                overlay()
+                    .frame(width: presentation.panelWidth)
+                    .padding(.vertical, 16)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: presentation.canvasHeight)
             }
-            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .environment(\.colorScheme, .dark)
+    }
+
+    /// 连接状态是终端画布的居中 overlay，不模拟第二条工作区工具栏。
+    private var connectingBody: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.small)
+            Text("正在连接 \(host.address):\(host.port) …")
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
         .font(.system(.caption, design: .monospaced))
     }
 
@@ -582,6 +636,7 @@ private struct MacTerminalRepresentable: NSViewRepresentable {
         let tv = PandaTerminalView(frame: .zero, font: nil)
         tv.terminalDelegate = context.coordinator
         tv.configureNativeColors()
+        tv.updatePresentationVisibility(isActive)
         context.coordinator.setup(terminalView: tv, connection: connection)
         if context.coordinator.updateInputFocusEligibility(isVisible: isActive) {
             context.coordinator.requestInputFocus(for: tv)
@@ -590,6 +645,7 @@ private struct MacTerminalRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {
+        (nsView as? PandaTerminalView)?.updatePresentationVisibility(isActive)
         context.coordinator.update(connection: connection)
         if context.coordinator.updateInputFocusEligibility(isVisible: isActive) {
             context.coordinator.requestInputFocus(for: nsView)
