@@ -61,7 +61,7 @@ enum ConfigImporter {
             ("config/known_hosts", "known_hosts"),
         ]
 
-        for (entryName, destName) in filesToRestore {
+        for (_, destName) in filesToRestore {
             let destURL = configDir.appendingPathComponent(destName)
             if fm.fileExists(atPath: destURL.path) {
                 let backupName = "\(destName).backup.\(timestamp)"

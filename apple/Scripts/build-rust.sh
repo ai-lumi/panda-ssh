@@ -12,14 +12,20 @@ MACOS_UNIVERSAL_LIB="$RUST_OUT/libpanda_ffi-macos-universal.a"
 
 cd "$ROOT"
 
-TARGETS=(
+MACOS_TARGETS=(
   aarch64-apple-darwin
   x86_64-apple-darwin
+)
+for t in "${MACOS_TARGETS[@]}"; do
+  MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p panda-ffi --release --target "$t"
+done
+
+IOS_TARGETS=(
   aarch64-apple-ios
   aarch64-apple-ios-sim
 )
-for t in "${TARGETS[@]}"; do
-  cargo build -p panda-ffi --release --target "$t"
+for t in "${IOS_TARGETS[@]}"; do
+  IPHONEOS_DEPLOYMENT_TARGET=17.0 cargo build -p panda-ffi --release --target "$t"
 done
 
 # Generate Swift bindings + C header + module map from the macOS dylib artifact.

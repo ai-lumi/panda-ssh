@@ -248,5 +248,127 @@ final class ConfigExportImportTests: XCTestCase {
         let hostsText = try String(contentsOf: freshDir.appendingPathComponent("hosts.toml"), encoding: .utf8)
         XCTAssertTrue(hostsText.contains("password_ref"))
     }
+
+    // MARK: - 1.4 ZIP Local File Header 字节序回归测试
+
+    /// 辅助：从 Data 中读取 little-endian UInt16
+    private func readLE16(_ data: Data, at offset: Int) -> UInt16 {
+        let sub = data.subdata(in: offset..<offset + 2)
+        return sub.withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
+    }
+
+    /// 辅助：从 Data 中读取 little-endian UInt32
+    private func readLE32(_ data: Data, at offset: Int) -> UInt32 {
+        let sub = data.subdata(in: offset..<offset + 4)
+        return sub.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+    }
+
+    /// 正常非空条目：验证 local file header 中各字段的原始 little-endian 字节。
+    func testZipLocalHeaderByteOrderNonEmptyEntry() throws {
+        let content = "Hello, ZIP!".data(using: .utf8)!
+        let fileName = "test/hello.txt"
+        let fileURL = tempDir.appendingPathComponent("hello.txt")
+        try content.write(to: fileURL)
+
+        let zipData = try ConfigArchiveUtility.createZip(from: [
+            (url: fileURL, archiveName: fileName),
+        ])
+
+        // Local file header 起始签名
+        XCTAssertEqual(readLE32(zipData, at: 0), 0x04034b50, "local header signature")
+        // 偏移 26: file name length
+        let nameLen = readLE16(zipData, at: 26)
+        XCTAssertEqual(Int(nameLen), fileName.utf8.count, "name length matches")
+        // 偏移 28: extra field length（应为 0）
+        let extraLen = readLE16(zipData, at: 28)
+        XCTAssertEqual(extraLen, 0, "extra field length is zero")
+        // 偏移 18: compressed size
+        let compressedSize = readLE32(zipData, at: 18)
+        XCTAssertEqual(Int(compressedSize), content.count, "compressed size matches content")
+        // 偏移 22: uncompressed size
+        let uncompressedSize = readLE32(zipData, at: 22)
+        XCTAssertEqual(Int(uncompressedSize), content.count, "uncompressed size matches content")
+        // 偏移 30 开始是文件名，紧接着是文件数据
+        let nameStart = 30
+        let nameData = zipData.subdata(in: nameStart..<nameStart + Int(nameLen))
+        XCTAssertEqual(String(data: nameData, encoding: .utf8), fileName)
+        let dataStart = nameStart + Int(nameLen) + Int(extraLen)
+        let extractedData = zipData.subdata(in: dataStart..<dataStart + Int(compressedSize))
+        XCTAssertEqual(extractedData, content, "file data matches")
+    }
+
+    /// 零长度条目：验证 local file header 中 compressed_size 和 uncompressed_size 均为 0。
+    func testZipLocalHeaderByteOrderZeroLengthEntry() throws {
+        let emptyContent = Data()
+        let fileName = "empty.dat"
+        let fileURL = tempDir.appendingPathComponent("empty.dat")
+        try emptyContent.write(to: fileURL)
+
+        let zipData = try ConfigArchiveUtility.createZip(from: [
+            (url: fileURL, archiveName: fileName),
+        ])
+
+        XCTAssertEqual(readLE32(zipData, at: 0), 0x04034b50, "local header signature")
+        let nameLen = readLE16(zipData, at: 26)
+        XCTAssertEqual(Int(nameLen), fileName.utf8.count)
+        let compressedSize = readLE32(zipData, at: 18)
+        XCTAssertEqual(compressedSize, 0, "zero-length entry compressed size")
+        let uncompressedSize = readLE32(zipData, at: 22)
+        XCTAssertEqual(uncompressedSize, 0, "zero-length entry uncompressed size")
+        // 验证 roundtrip：extractEntry 能正确返回空 Data
+        let extracted = ConfigArchiveUtility.extractEntry(named: fileName, from: zipData)
+        XCTAssertNotNil(extracted, "zero-length entry extractable")
+        XCTAssertEqual(extracted?.count, 0, "zero-length entry data is empty")
+    }
+
+    /// 多条目场景：验证每个条目的 local header 偏移量正确衔接。
+    func testZipLocalHeaderMultipleEntriesOffsetChain() throws {
+        let content1 = "first".data(using: .utf8)!
+        let content2 = "second-longer".data(using: .utf8)!
+        let name1 = "a.txt"
+        let name2 = "b.txt"
+        let url1 = tempDir.appendingPathComponent("a.txt")
+        let url2 = tempDir.appendingPathComponent("b.txt")
+        try content1.write(to: url1)
+        try content2.write(to: url2)
+
+        let zipData = try ConfigArchiveUtility.createZip(from: [
+            (url: url1, archiveName: name1),
+            (url: url2, archiveName: name2),
+        ])
+
+        // 第一个条目从偏移 0 开始
+        XCTAssertEqual(readLE32(zipData, at: 0), 0x04034b50, "first entry signature")
+        let name1Len = Int(readLE16(zipData, at: 26))
+        let extra1Len = Int(readLE16(zipData, at: 28))
+        let size1 = Int(readLE32(zipData, at: 18))
+        let secondEntryOffset = 30 + name1Len + extra1Len + size1
+
+        // 第二个条目的签名紧跟第一个条目
+        XCTAssertEqual(readLE32(zipData, at: secondEntryOffset), 0x04034b50, "second entry signature")
+        let name2Len = Int(readLE16(zipData, at: secondEntryOffset + 26))
+        let size2 = Int(readLE32(zipData, at: secondEntryOffset + 18))
+        XCTAssertEqual(name2Len, name2.utf8.count)
+        XCTAssertEqual(size2, content2.count)
+    }
+
+    /// 损坏归档：签名被篡改时 extractEntry 返回 nil。
+    func testZipCorruptedLocalHeaderSignatureReturnsNil() throws {
+        let content = "data".data(using: .utf8)!
+        let fileURL = tempDir.appendingPathComponent("corrupt.txt")
+        try content.write(to: fileURL)
+
+        var zipData = try ConfigArchiveUtility.createZip(from: [
+            (url: fileURL, archiveName: "corrupt.txt"),
+        ])
+
+        // 篡改 local file header 签名（前 4 字节）
+        var corrupted = Data(repeating: 0xFF, count: 4)
+        corrupted.append(zipData.subdata(in: 4..<zipData.count))
+        zipData = corrupted
+
+        let extracted = ConfigArchiveUtility.extractEntry(named: "corrupt.txt", from: zipData)
+        XCTAssertNil(extracted, "corrupted local header signature yields nil extraction")
+    }
 }
 #endif

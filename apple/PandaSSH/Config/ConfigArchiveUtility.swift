@@ -202,12 +202,12 @@ enum ConfigArchiveUtility {
 private extension Data {
     mutating func append(u16 value: UInt16) {
         var v = value.littleEndian
-        append(UnsafeBufferPointer(start: &v, count: 1))
+        Swift.withUnsafeBytes(of: &v) { append($0.bindMemory(to: UInt8.self)) }
     }
 
     mutating func append(u32 value: UInt32) {
         var v = value.littleEndian
-        append(UnsafeBufferPointer(start: &v, count: 1))
+        Swift.withUnsafeBytes(of: &v) { append($0.bindMemory(to: UInt8.self)) }
     }
 
     func scanUInt16(at offset: Int) -> UInt16 {
