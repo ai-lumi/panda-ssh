@@ -15,6 +15,7 @@ struct UnifiedWorkspaceTabStrip: View {
     @State private var viewportOffset = 0.0
 
     private static let documentCoordinateSpace = "unified-workspace-tab-document"
+    private static let documentHorizontalPadding = TabStripViewportState.revealPadding
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -43,7 +44,7 @@ struct UnifiedWorkspaceTabStrip: View {
                                         .background(tabFrameReporter(for: tab.id))
                                 }
                             }
-                            .padding(.horizontal, 8)
+                            .padding(.horizontal, Self.documentHorizontalPadding)
                             .padding(.vertical, 5)
                             .coordinateSpace(name: Self.documentCoordinateSpace)
                         }
@@ -171,7 +172,7 @@ struct UnifiedWorkspaceTabStrip: View {
 
     private var currentViewport: TabStripViewportState {
         TabStripViewportState.resolve(
-            contentWidth: Double(tabFrames.values.map(\.maxX).max() ?? 0),
+            contentWidth: TabStripViewportState.contentWidth(from: tabFrames),
             viewportWidth: viewportWidth,
             offset: viewportOffset
         )
@@ -190,18 +191,19 @@ struct UnifiedWorkspaceTabStrip: View {
     private func scroll(to targetOffset: Double, using proxy: ScrollViewProxy, animated: Bool = true) {
         // 几何更新可能重复到达；没有实际位移时不触发 scrollTo 或新的动画。
         guard abs(targetOffset - viewportOffset) > 0.5 else { return }
-        guard let targetID = workspace.tabs.first(where: { tab in
-            guard let frame = tabFrames[tab.id] else { return false }
-            return frame.maxX > targetOffset
-        })?.id ?? workspace.tabs.last?.id else { return }
+        guard let target = currentViewport.scrollTarget(
+            for: targetOffset,
+            among: tabFrames
+        ) else { return }
         viewportOffset = targetOffset
-        browseAnchorID = targetID
+        browseAnchorID = target.tabID
+        let anchor = UnitPoint(x: target.anchorX, y: 0)
         if animated {
-            withAnimation { proxy.scrollTo(targetID, anchor: .leading) }
+            withAnimation { proxy.scrollTo(target.tabID, anchor: anchor) }
         } else {
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true
-            withTransaction(transaction) { proxy.scrollTo(targetID, anchor: .leading) }
+            withTransaction(transaction) { proxy.scrollTo(target.tabID, anchor: anchor) }
         }
     }
 

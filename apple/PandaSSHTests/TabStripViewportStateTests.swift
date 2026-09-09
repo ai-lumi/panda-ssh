@@ -156,4 +156,38 @@ final class TabStripViewportStateTests: XCTestCase {
         )
     }
     #endif
+
+    func test内容宽度计算包含尾部填充且空页签返回零() {
+        let tab = UUID()
+        let frames = [tab: CGRect(x: 8, y: 0, width: 100, height: 30)]
+        XCTAssertEqual(TabStripViewportState.contentWidth(from: frames), 116)
+        XCTAssertEqual(TabStripViewportState.contentWidth(from: [:]), 0)
+    }
+
+    func test最右侧页签宽于视口时滚动目标使用TrailingAnchor显露完整页签() {
+        let tab = UUID()
+        let frames = [tab: CGRect(x: 300, y: 0, width: 500, height: 30)]
+        let viewport = TabStripViewportState.resolve(contentWidth: 808, viewportWidth: 400, offset: 0)
+        let target = viewport.scrollTarget(for: 408, among: frames)
+        XCTAssertEqual(target?.tabID, tab)
+        XCTAssertEqual(target?.anchorX ?? -1, 1.0, accuracy: 0.001)
+    }
+
+    func test宽页签目标偏移在可视范围内时使用线性插值Anchor() {
+        let tab = UUID()
+        let frames = [tab: CGRect(x: 100, y: 0, width: 500, height: 30)]
+        let viewport = TabStripViewportState.resolve(contentWidth: 608, viewportWidth: 200, offset: 0)
+        let target = viewport.scrollTarget(for: 250, among: frames)
+        XCTAssertEqual(target?.tabID, tab)
+        XCTAssertEqual(target?.anchorX ?? -1, (250 - 100) / (500 - 200), accuracy: 0.001)
+    }
+
+    func test窄于视口的页签使用LeadingAnchor() {
+        let tab = UUID()
+        let frames = [tab: CGRect(x: 500, y: 0, width: 100, height: 30)]
+        let viewport = TabStripViewportState.resolve(contentWidth: 608, viewportWidth: 300, offset: 0)
+        let target = viewport.scrollTarget(for: 308, among: frames)
+        XCTAssertEqual(target?.tabID, tab)
+        XCTAssertEqual(target?.anchorX ?? -1, 0, accuracy: 0.001)
+    }
 }

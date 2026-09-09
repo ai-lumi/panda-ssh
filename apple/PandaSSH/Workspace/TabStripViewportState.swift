@@ -45,6 +45,38 @@ struct TabStripViewportState: Equatable {
         )
     }
 
+    /// 根据页签帧计算内容总宽度，包含尾部填充以便与 ScrollView 实际内容边界对齐。
+    static func contentWidth(
+        from tabFrames: [UUID: CGRect],
+        trailingPadding: Double = revealPadding
+    ) -> Double {
+        let maxTabMaxX = tabFrames.values.map(\.maxX).max() ?? 0
+        guard maxTabMaxX > 0 else { return 0 }
+        return maxTabMaxX + trailingPadding
+    }
+
+    /// 根据目标偏移在页签中选出最适合 scrollTo 的目标页签与归一化 anchorX。
+    /// 当选中页签宽度大于视口时，anchorX 在 [0,1] 之间线性插值；否则回退到前缘（0）。
+    func scrollTarget(
+        for targetOffset: Double,
+        among tabFrames: [UUID: CGRect]
+    ) -> (tabID: UUID, anchorX: Double)? {
+        guard viewportWidth > 0 else { return nil }
+        let sorted = tabFrames.sorted { $0.value.minX < $1.value.minX }
+        guard let candidate = sorted.first(where: { $0.value.maxX > targetOffset })
+              ?? sorted.last else { return nil }
+
+        let frame = candidate.value
+        let tabWidth = Double(frame.width)
+        let tabMinX = Double(frame.minX)
+        if tabWidth > viewportWidth {
+            let denominator = tabWidth - viewportWidth
+            let raw = (targetOffset - tabMinX) / denominator
+            return (candidate.key, min(max(raw, 0), 1))
+        }
+        return (candidate.key, 0)
+    }
+
     /// 返回让目标页签显露所需的最小偏移；目标宽于视口时保留其前缘。
     func revealedOffset(itemMinX: Double, itemMaxX: Double) -> Double {
         guard itemMinX.isFinite, itemMaxX.isFinite, viewportWidth > 0 else { return offset }
