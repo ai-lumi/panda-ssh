@@ -813,8 +813,7 @@ final class SftpSessionStore: ObservableObject {
         // 每个目录生成一个任务组,组内每个文件为独立任务。
         for dir in dirs {
             let name = (dir as NSString).lastPathComponent
-            let destDir = joinPath(destinationDirectory, name)
-            let items = await scanLocalItems(paths: [dir], destDir: destDir)
+            let items = await scanLocalItems(paths: [dir], destDir: destinationDirectory)
             tasks += enqueueGroup(direction: .upload, groupName: name, items: items)
         }
 

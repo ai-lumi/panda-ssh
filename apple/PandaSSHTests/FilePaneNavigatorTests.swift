@@ -675,6 +675,76 @@ final class FilePaneNavigatorTests: XCTestCase {
         XCTAssertEqual(downloadGroup?.tasks.first?.source, "/home/deploy/logs/a.log")
     }
 
+    func testDirectoryUploadAppendsChineseTopLevelNameOnce() async {
+        let (session, transfers) = makeSession()
+        let localDirectory = "/tmp/报销-20260706"
+        let fileName = "上海到广州机票-20260706-发票-保险.pdf"
+        let remoteDirectory = "/share/CACHEDEV1_DATA/homes/lwq"
+        _ = await session.navigateRemote(to: remoteDirectory)
+        session.scanLocalHandler = { paths, destDir in
+            paths.flatMap { path in
+                let topLevelDirectory = (path as NSString).lastPathComponent
+                let directoryDestination = sftpChildPath(directory: destDir, name: topLevelDirectory)
+                return [
+                    BatchItemRecord(source: path, destination: directoryDestination, size: 0, isDir: true),
+                    BatchItemRecord(
+                        source: sftpChildPath(directory: path, name: fileName),
+                        destination: sftpChildPath(directory: directoryDestination, name: fileName),
+                        size: 100,
+                        isDir: false
+                    ),
+                ]
+            }
+        }
+
+        let tasks = await session.upload(localPaths: [localDirectory])
+
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(transfers.taskGroups.first?.name, "报销-20260706")
+        XCTAssertEqual(
+            tasks.first?.destination,
+            "/share/CACHEDEV1_DATA/homes/lwq/报销-20260706/上海到广州机票-20260706-发票-保险.pdf"
+        )
+    }
+
+    func testDirectoryUploadWithEmptyScanDoesNotCreateTransferTasks() async {
+        let (session, transfers) = makeSession()
+        session.scanLocalHandler = { _, _ in [] }
+
+        let tasks = await session.upload(localPaths: ["/nonexistent/empty-directory"])
+
+        XCTAssertTrue(tasks.isEmpty)
+        XCTAssertTrue(transfers.tasks.isEmpty)
+        XCTAssertTrue(transfers.taskGroups.isEmpty)
+    }
+
+    func testDirectoryUploadToRootUsesOneTopLevelDirectoryAndSingleSeparator() async {
+        let (session, _) = makeSession()
+        let localDirectory = "/tmp/project"
+        let fileName = "README.md"
+        _ = await session.navigateRemote(to: "/")
+        session.scanLocalHandler = { paths, destDir in
+            paths.flatMap { path in
+                let topLevelDirectory = (path as NSString).lastPathComponent
+                let directoryDestination = sftpChildPath(directory: destDir, name: topLevelDirectory)
+                return [
+                    BatchItemRecord(source: path, destination: directoryDestination, size: 0, isDir: true),
+                    BatchItemRecord(
+                        source: sftpChildPath(directory: path, name: fileName),
+                        destination: sftpChildPath(directory: directoryDestination, name: fileName),
+                        size: 100,
+                        isDir: false
+                    ),
+                ]
+            }
+        }
+
+        let tasks = await session.upload(localPaths: [localDirectory])
+
+        XCTAssertEqual(tasks.map(\.destination), ["/project/README.md"])
+        XCTAssertFalse(tasks.contains { $0.destination.contains("//") })
+    }
+
     func testUploadWithoutSelectionReturnsNil() async {
         let (session, transfers) = makeSession()
 
