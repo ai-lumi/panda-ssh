@@ -52,6 +52,16 @@ struct MacOSUnifiedSplitHostPolicy: Equatable {
             sidebarWidth: min(max(safeWidth, 220), 400)
         )
     }
+
+    /// 分栏位置设置判定：仅当无上次应用值（首次）或候选值与上次
+    /// 应用值差超过 0.5pt 时才需要调用 `splitView.setPosition`。
+    /// 高频 SwiftUI 更新重复携带同值（或亚像素抖动）时不重设分栏位置，
+    /// 避免强制 NSSplitView 反复布局。
+    static func shouldApplyDividerPosition(candidate: Double, appliedWidth: Double?) -> Bool {
+        guard candidate.isFinite else { return false }
+        guard let appliedWidth else { return true }
+        return abs(candidate - appliedWidth) > 0.5
+    }
 }
 
 /// macOS unified 路径的原生分栏容器。
@@ -73,6 +83,9 @@ struct MacOSUnifiedSplitHost<Sidebar: View, Detail: View>: NSViewControllerRepre
         private let sidebarHost: NSHostingController<AnyView>
         private let detailHost: NSHostingController<AnyView>
         private let sidebarItem: NSSplitViewItem
+        /// 上次真正下发到 `splitView.setPosition` 的侧栏宽度。
+        /// 高频 SwiftUI 更新重复携带同值时据此跳过重设，避免强制布局。
+        private var appliedSidebarWidth: Double?
 
         init(sidebar: AnyView, detail: AnyView, policy: MacOSUnifiedSplitHostPolicy) {
             sidebarHost = NSHostingController(rootView: sidebar)
@@ -103,9 +116,13 @@ struct MacOSUnifiedSplitHost<Sidebar: View, Detail: View>: NSViewControllerRepre
             sidebarItem.minimumThickness = 220
             sidebarItem.maximumThickness = 400
             sidebarItem.isCollapsed = policy.isSidebarCollapsed
-            if !policy.isSidebarCollapsed, splitView.subviews.count > 1 {
-                splitView.setPosition(CGFloat(policy.sidebarWidth), ofDividerAt: 0)
-            }
+            guard !policy.isSidebarCollapsed, splitView.subviews.count > 1 else { return }
+            guard MacOSUnifiedSplitHostPolicy.shouldApplyDividerPosition(
+                candidate: policy.sidebarWidth,
+                appliedWidth: appliedSidebarWidth
+            ) else { return }
+            splitView.setPosition(CGFloat(policy.sidebarWidth), ofDividerAt: 0)
+            appliedSidebarWidth = policy.sidebarWidth
         }
     }
 }
@@ -119,18 +136,23 @@ final class MacOSWorkspaceChromeMetrics: ObservableObject {
         let fallback = min(76, max(0, window.frame.width))
         guard let contentView = window.contentView,
               let zoomButton = window.standardWindowButton(.zoomButton) else {
+            // 值不变不赋值：@Published 无条件赋值会形成「发布 → 重渲染 → 再发布」自激环
+            guard trafficLightSafeWidth != fallback else { return }
             trafficLightSafeWidth = fallback
             return
         }
         let frame = zoomButton.convert(zoomButton.bounds, to: contentView)
-        trafficLightSafeWidth = min(
+        let width = min(
             max(0, Double(frame.maxX) + 12),
             max(0, Double(window.frame.width))
         )
+        guard trafficLightSafeWidth != width else { return }
+        trafficLightSafeWidth = width
     }
 
     func updateSidebarWidth(_ width: Double) {
         guard width.isFinite, width > 0 else { return }
+        guard sidebarWidth != width else { return }
         sidebarWidth = width
     }
 }
@@ -152,6 +174,10 @@ struct MainWindowChrome: NSViewRepresentable {
         DispatchQueue.main.async { context.coordinator.attach(to: nsView.window) }
     }
 
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.attach(to: nil)
+    }
+
     final class Coordinator {
         private let metrics: MacOSWorkspaceChromeMetrics
         private weak var observedWindow: NSWindow?
@@ -166,20 +192,27 @@ struct MainWindowChrome: NSViewRepresentable {
         }
 
         func attach(to window: NSWindow?) {
-            guard let window else { return }
             if observedWindow !== window {
                 observations.forEach(NotificationCenter.default.removeObserver)
+                observations = []
+            }
+            defer { observedWindow = window }
+            guard let window else { return }
+            if observedWindow !== window {
                 observations = [
                     NSWindow.didResizeNotification,
                     NSWindow.didEnterFullScreenNotification,
-                    NSWindow.didExitFullScreenNotification
+                    NSWindow.didExitFullScreenNotification,
+                    NSWindow.didBecomeKeyNotification,
+                    NSWindow.didResignKeyNotification
                 ].map { notification in
                     NotificationCenter.default.addObserver(
                         forName: notification,
                         object: window,
                         queue: .main
-                    ) { [weak self] _ in
-                        self?.configure(window)
+                    ) { [weak self, weak window] _ in
+                        guard let self, let window, self.observedWindow === window else { return }
+                        self.configure(window)
                     }
                 }
                 observedWindow = window
@@ -194,12 +227,18 @@ struct MainWindowChrome: NSViewRepresentable {
                 isSidebarVisible: true,
                 trafficLightSafeWidth: metrics.trafficLightSafeWidth
             )
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = policy.usesTransparentTitlebar
-            if policy.usesFullSizeContent {
+            // SwiftUI 状态更新和焦点变化都会到达这里。重复调用窗口 setter
+            // 仍可能触发 AppKit 重建标题栏，因此以实际属性逐项校正。
+            if window.titleVisibility != .hidden {
+                window.titleVisibility = .hidden
+            }
+            if window.titlebarAppearsTransparent != policy.usesTransparentTitlebar {
+                window.titlebarAppearsTransparent = policy.usesTransparentTitlebar
+            }
+            if policy.usesFullSizeContent && !window.styleMask.contains(.fullSizeContentView) {
                 window.styleMask.insert(.fullSizeContentView)
             }
-            if !policy.usesSystemToolbar {
+            if !policy.usesSystemToolbar && window.toolbar != nil {
                 window.toolbar = nil
             }
             if policy.keepsStandardWindowButtonsVisible {
@@ -207,7 +246,7 @@ struct MainWindowChrome: NSViewRepresentable {
             }
             metrics.update(window: window)
             DispatchQueue.main.async { [weak self, weak window] in
-                guard let self, let window else { return }
+                guard let self, let window, self.observedWindow === window else { return }
                 self.restoreStandardWindowButtons(in: window)
                 self.metrics.update(window: window)
             }
@@ -216,10 +255,12 @@ struct MainWindowChrome: NSViewRepresentable {
         private func restoreStandardWindowButtons(in window: NSWindow) {
             for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
                 guard let button = window.standardWindowButton(type) else { continue }
-                button.isHidden = false
-                button.alphaValue = 1
-                button.isEnabled = true
-                button.superview?.isHidden = false
+                if button.isHidden { button.isHidden = false }
+                if button.alphaValue != 1 { button.alphaValue = 1 }
+                if !button.isEnabled { button.isEnabled = true }
+                if let container = button.superview, container.isHidden {
+                    container.isHidden = false
+                }
             }
         }
 

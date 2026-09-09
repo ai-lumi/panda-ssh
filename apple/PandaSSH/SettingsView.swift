@@ -36,7 +36,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 /// 两端共享同一组标签和设置内容；仅导航容器与平台服务有所不同。
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var workspace: WorkspaceStore
     @State private var importError: String?
     @State private var importSuccess: String?
     @State private var showImportPicker = false
@@ -135,26 +134,7 @@ struct SettingsView: View {
     // MARK: - 外观标签
 
     private var appearanceTab: some View {
-        Form {
-            Section {
-                Picker("页签栏溢出模式", selection: $workspace.tabBarOverflowMode) {
-                    ForEach(TabBarOverflowMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                // radioGroup 仅 macOS 可用；iPadOS 用分段控件（纯 UI 差异）。
-                #if os(macOS)
-                .pickerStyle(.radioGroup)
-                #else
-                .pickerStyle(.segmented)
-                #endif
-            } header: {
-                Text("页签栏")
-            } footer: {
-                Text("滚动模式支持鼠标滚轮横向翻页；多行显示模式下页签会自动换行。")
-            }
-        }
-        .formStyle(.grouped)
+        placeholderTab(title: "外观", systemImage: "paintpalette", message: "外观设置即将上线")
     }
 
     private func placeholderTab(title: String, systemImage: String, message: String) -> some View {

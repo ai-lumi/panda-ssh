@@ -4,75 +4,11 @@ import SwiftUI
 #if os(macOS)
 @testable import PandaSSH_macOS
 
-/// 页签栏布局探针：在真实 AppKit/NSHostingView 布局中观测 WorkspaceTabBar 的实际高度，
+/// 页签栏布局探针：在真实 AppKit/NSHostingView 布局中观测统一页签栏的实际高度，
 /// 用于定位「页签按钮区高度异常」与「终端沉底」的根因。
 /// 探针输出打印到测试日志（dump 行），断言只作宽松护栏。
 @MainActor
 final class TabBarLayoutProbeTests: XCTestCase {
-
-    // MARK: - 纯值滚动策略
-
-    func test滚动指标覆盖溢出翻页与首尾状态() {
-        let metrics = TabBarScrollMetrics.resolve(
-            contentWidth: 1_200,
-            viewportWidth: 400,
-            offset: 350
-        )
-
-        XCTAssertTrue(metrics.needsScroll)
-        XCTAssertTrue(metrics.canScrollBackward)
-        XCTAssertTrue(metrics.canScrollForward)
-        XCTAssertEqual(metrics.maximumOffset, 800)
-        XCTAssertEqual(metrics.pageTarget(direction: .backward), 0)
-        XCTAssertEqual(metrics.pageTarget(direction: .forward), 750)
-
-        let trailing = TabBarScrollMetrics.resolve(
-            contentWidth: 1_200,
-            viewportWidth: 400,
-            offset: 800
-        )
-        XCTAssertTrue(trailing.canScrollBackward)
-        XCTAssertFalse(trailing.canScrollForward)
-        XCTAssertEqual(trailing.pageTarget(direction: .forward), 800)
-    }
-
-    func test滚轮与显露页签目标始终夹取在合法范围() {
-        let metrics = TabBarScrollMetrics.resolve(
-            contentWidth: 1_000,
-            viewportWidth: 300,
-            offset: 200
-        )
-
-        XCTAssertEqual(metrics.wheelTarget(delta: -120), 320)
-        XCTAssertEqual(metrics.wheelTarget(delta: 900), 0)
-        XCTAssertEqual(metrics.revealedOffset(itemMinX: 640, itemMaxX: 740), 448)
-
-        let scrolled = TabBarScrollMetrics.resolve(
-            contentWidth: 1_000,
-            viewportWidth: 300,
-            offset: 500
-        )
-        XCTAssertEqual(scrolled.revealedOffset(itemMinX: 120, itemMaxX: 220), 112)
-    }
-
-    func test无效尺寸与临界宽度安全回退() {
-        for values in [
-            (Double.nan, 300.0, 20.0),
-            (1_000.0, -Double.infinity, 20.0),
-            (-1.0, 300.0, 20.0),
-            (300.0, 300.0, 999.0),
-        ] {
-            let metrics = TabBarScrollMetrics.resolve(
-                contentWidth: values.0,
-                viewportWidth: values.1,
-                offset: values.2
-            )
-            XCTAssertGreaterThanOrEqual(metrics.offset, 0)
-            XCTAssertLessThanOrEqual(metrics.offset, metrics.maximumOffset)
-            XCTAssertFalse(metrics.needsScroll)
-            XCTAssertFalse(metrics.canScrollForward)
-        }
-    }
 
     // MARK: - 工具
 
@@ -90,7 +26,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
             print("PROBE \(indent)\(name) frame=\(view.frame)")
         }
         var hits: [NSRect] = []
-        if name.contains(match) {
+        if (match == "MonitorView" ? name == match : name.contains(match)) {
             hits.append(view.frame)
         }
         for sub in view.subviews {
@@ -108,116 +44,101 @@ final class TabBarLayoutProbeTests: XCTestCase {
         )
     }
 
-    // MARK: - 探针 1：独立 WorkspaceTabBar（滚动模式）在 500pt 宽下的高度与左对齐
+    private final class ChromeConfigurationProbeWindow: NSWindow {
+        private(set) var titlebarTransparencyWriteCount = 0
 
-    func testProbeStandaloneScrollTabBar() {
-        let model = AppModel.previewModel()
-        let store = WorkspaceStore.previewStore()
-        store.tabBarOverflowMode = .scroll
-
-        let hosting = NSHostingView(rootView:
-            WorkspaceTabBar()
-                .environmentObject(model)
-                .environmentObject(store)
-        )
-        let window = makeWindow()
-        window.contentView?.addSubview(hosting)
-        hosting.frame = NSRect(x: 0, y: 100, width: 500, height: 400)
-        window.orderFrontRegardless()
-        pump()
-        hosting.layoutSubtreeIfNeeded()
-        pump(0.1)
-
-        print("PROBE === 独立 WorkspaceTabBar（滚动模式, 宽 500）===")
-        let hits = dumpHierarchy(window.contentView!, match: "HeightConstrainedContainer")
-        XCTAssertFalse(hits.isEmpty, "未找到 HeightConstrainedContainer")
-        for frame in hits {
-            XCTAssertLessThan(frame.height, 60, "页签栏滚动容器高度异常: \(frame.height)")
-        }
-
-        // 左对齐回归：scroll document（NSClipView 的 documentView）宽度 MUST 等于
-        // 内容理想宽度而非撑满可见宽度——NSHostingView 根视图会把内容居中，
-        // document 撑满时少量页签会显示在页签栏中部而非左侧。
-        if let container = findView(window.contentView!, matching: "HeightConstrainedContainer"),
-           let (document, clipWidth) = findScrollDocument(in: container) {
-            print("PROBE document frame=\(document.frame) clipWidth=\(clipWidth)")
-            XCTAssertLessThan(document.frame.width, clipWidth,
-                              "document 不应撑满可见宽度（内容 \(document.frame.width)pt < 可见 \(clipWidth)pt）")
-            XCTAssertEqual(document.frame.origin.x, 0, accuracy: 0.5, "document 应左对齐于 clip 视图")
-        } else {
-            XCTFail("未找到页签滚动区的 document view")
+        override var titlebarAppearsTransparent: Bool {
+            didSet { titlebarTransparencyWriteCount += 1 }
         }
     }
 
-    func test二十个真实页签可按页向右再返回起点() throws {
+    func test首次打开页签不重复配置窗口Chrome() throws {
         let model = AppModel.previewModel()
-        let store = WorkspaceStore(hostNameProvider: { _ in "box" })
-        store.tabBarOverflowMode = .scroll
-        for _ in 0..<20 {
-            store.openTerminal(hostID: "box")
-        }
-        let controller = TabBarScrollController()
-
-        let hosting = NSHostingView(rootView:
-            WorkspaceTabBar(scrollController: controller)
-                .environmentObject(model)
-                .environmentObject(store)
-                .frame(width: 500)
+        let host = try XCTUnwrap(model.hosts.first)
+        let store = WorkspaceStore(hostNameProvider: { hostID in
+            model.hosts.first(where: { $0.id == hostID })?.name
+        })
+        let root = HostListView()
+            .environmentObject(model)
+            .environmentObject(store)
+            .transferStore(TransferStore())
+        let hosting = NSHostingView(rootView: root)
+        let window = ChromeConfigurationProbeWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 600),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
         )
-        let window = makeWindow()
         window.contentView = hosting
         window.orderFrontRegardless()
-        pump(0.6)
-        hosting.layoutSubtreeIfNeeded()
+        pump(1.2)
 
-        XCTAssertTrue(controller.needsScroll)
-        XCTAssertFalse(controller.canScrollLeft)
-        XCTAssertTrue(controller.canScrollRight)
+        let writeCountBeforeOpening = window.titlebarTransparencyWriteCount
+        XCTAssertGreaterThan(writeCountBeforeOpening, 0, "真实窗口应在初始挂载时配置 chrome")
 
-        let container = try XCTUnwrap(findView(hosting, matching: "HeightConstrainedContainer"))
-        let scrollView = try XCTUnwrap(findScrollView(in: container))
-        let initialOffset = scrollView.contentView.bounds.minX
+        let tabID = store.openTerminal(hostID: host.id)
+        model.presentTab(tabID)
+        pump(0.5)
 
-        controller.scrollRight()
-        pump(0.4)
-        XCTAssertGreaterThan(scrollView.contentView.bounds.minX, initialOffset)
-        XCTAssertTrue(controller.canScrollLeft)
+        XCTAssertEqual(
+            window.titlebarTransparencyWriteCount,
+            writeCountBeforeOpening,
+            "首次打开页签不得重复写入未变化的标题栏透明度"
+        )
+    }
 
-        controller.scrollLeft()
-        pump(0.4)
-        XCTAssertEqual(scrollView.contentView.bounds.minX, 0, accuracy: 1)
+    func test窗口失去焦点后保持透明且不重复写入属性() throws {
+        let model = AppModel.previewModel()
+        let host = try XCTUnwrap(model.hosts.first)
+        let store = WorkspaceStore(hostNameProvider: { hostID in
+            model.hosts.first(where: { $0.id == hostID })?.name
+        })
+        let root = HostListView()
+            .environmentObject(model)
+            .environmentObject(store)
+            .transferStore(TransferStore())
+        let hosting = NSHostingView(rootView: root)
+        let window = ChromeConfigurationProbeWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 600),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        pump(1.2)
 
-        let lastTabID = try XCTUnwrap(store.tabs.last?.id)
-        model.presentTab(lastTabID)
-        pump(0.4)
-        XCTAssertGreaterThan(scrollView.contentView.bounds.minX, 0)
-        XCTAssertFalse(controller.canScrollRight)
+        _ = try XCTUnwrap(
+            findView(hosting, matching: "MonitorView"),
+            "激活时应存在统一顶部页签栏 MonitorView"
+        )
+        let writeCountBeforeResign = window.titlebarTransparencyWriteCount
+        XCTAssertTrue(window.titlebarAppearsTransparent, "激活时标题栏应为透明")
+
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        pump(0.3)
+
+        XCTAssertTrue(window.titlebarAppearsTransparent, "失去焦点后标题栏仍应保持透明")
+        // 与当前幂等 chrome 契约一致：焦点通知复核属性，但不重复写入正确值。
+        XCTAssertEqual(
+            window.titlebarTransparencyWriteCount,
+            writeCountBeforeResign,
+            "失焦通知不得重复写入已正确的窗口属性"
+        )
+        let chrome = try XCTUnwrap(
+            findView(hosting, matching: "MonitorView"),
+            "失去焦点后统一顶部页签栏仍应保留在层级中"
+        )
+        let frame = chrome.convert(chrome.bounds, to: nil)
+        XCTAssertGreaterThan(frame.width, 0, "失去焦点后页签栏宽度应大于 0")
+        XCTAssertGreaterThan(frame.height, 0, "失去焦点后页签栏高度应大于 0")
     }
 
     /// 深度优先查找第一个类名包含 match 的视图。
     private func findView(_ view: NSView, matching match: String) -> NSView? {
-        if String(describing: type(of: view)).contains(match) { return view }
+        if (match == "MonitorView" ? String(describing: type(of: view)) == match : String(describing: type(of: view)).contains(match)) { return view }
         for sub in view.subviews {
             if let found = findView(sub, matching: match) { return found }
-        }
-        return nil
-    }
-
-    /// 在容器视图树中查找 NSScrollView 的 documentView 及其可见宽度。
-    private func findScrollDocument(in container: NSView) -> (document: NSView, clipWidth: CGFloat)? {
-        for sub in container.subviews {
-            if let scrollView = sub as? NSScrollView, let document = scrollView.documentView {
-                return (document, scrollView.contentView.bounds.width)
-            }
-            if let found = findScrollDocument(in: sub) { return found }
-        }
-        return nil
-    }
-
-    private func findScrollView(in container: NSView) -> NSScrollView? {
-        if let scrollView = container as? NSScrollView { return scrollView }
-        for subview in container.subviews {
-            if let found = findScrollView(in: subview) { return found }
         }
         return nil
     }
@@ -227,7 +148,6 @@ final class TabBarLayoutProbeTests: XCTestCase {
     func testProbeWithTerminalDuringAnimatedSidebarToggle() {
         let model = AppModel.previewModel()
         let store = WorkspaceStore.previewStore()
-        store.tabBarOverflowMode = .scroll
         // 选中终端标签（previewStore 最后打开的是 SFTP 标签，终端视图不会创建）
         if let terminalTab = store.tabs.first(where: { $0.kind == .terminal }) {
             store.select(tabID: terminalTab.id)
@@ -238,7 +158,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
         let root = WorkspaceView()
             .environmentObject(model)
             .environmentObject(store)
-            .environmentObject(TransferStore())
+            .transferStore(TransferStore())
             .environmentObject(ToastCenter())
             .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
@@ -251,7 +171,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
         hosting.layoutSubtreeIfNeeded()
 
         func probe(_ label: String) {
-            let tabBar = dumpHierarchy(window.contentView!, depth: 0, match: "HeightConstrainedContainer", verbose: false)
+            let tabBar = dumpHierarchy(window.contentView!, depth: 0, match: "MonitorView", verbose: false)
             let terminal = dumpHierarchy(window.contentView!, depth: 0, match: "PandaTerminalView", verbose: false)
             print("PROBE [\(label)] tabBar=\(tabBar.map { "\($0.size)" }) terminal=\(terminal.map { "\($0)" })")
         }
@@ -283,7 +203,7 @@ final class TabBarLayoutProbeTests: XCTestCase {
         let root = WorkspaceView()
             .environmentObject(model)
             .environmentObject(store)
-            .environmentObject(TransferStore())
+            .transferStore(TransferStore())
             .environmentObject(ToastCenter())
             .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
@@ -305,52 +225,84 @@ final class TabBarLayoutProbeTests: XCTestCase {
         XCTAssertEqual(remainingTerminalViews.count, 1, "关闭标签后才应释放对应终端视图")
     }
 
-    func test工作区内容行承载溢出页签滚动容器() throws {
+    func testProbeUnifiedTabStripAfterOpeningFirstTab() throws {
         let model = AppModel.previewModel()
-        let store = WorkspaceStore(hostNameProvider: { _ in "box" })
-        store.tabBarOverflowMode = .scroll
-        for _ in 0..<20 {
-            store.openTerminal(hostID: "box")
-        }
-        model.presentTab(try XCTUnwrap(store.tabs.last?.id))
-
-        // 内容区页签行属于保留的旧版布局，统一顶部栏另有专门测试。
-        let root = WorkspaceView(chromeStrategy: .legacy)
+        let host = try XCTUnwrap(model.hosts.first)
+        let store = WorkspaceStore(hostNameProvider: { hostID in
+            model.hosts.first(where: { $0.id == hostID })?.name
+        })
+        let root = HostListView()
             .environmentObject(model)
             .environmentObject(store)
-            .environmentObject(TransferStore())
-            .environmentObject(ToastCenter())
-            .environmentObject(MacOSWorkspaceChromeMetrics())
+            .transferStore(TransferStore())
         let hosting = NSHostingView(rootView: root)
-        let window = makeWindow(width: 700)
+        let window = makeWindow()
         window.contentView = hosting
         window.orderFrontRegardless()
-        pump(0.8)
-        hosting.layoutSubtreeIfNeeded()
+        pump(1.2)
 
-        let container = try XCTUnwrap(
-            findView(hosting, matching: "HeightConstrainedContainer"),
-            "页签栏必须在工作区内容区保留自定义滚动容器"
+        let tabID = store.openTerminal(hostID: host.id)
+        model.presentTab(tabID)
+        pump(0.5)
+
+        _ = try XCTUnwrap(findView(hosting, matching: "MonitorView"))
+        print("PROBE === UnifiedWorkspaceTabStrip 首次打开页签后 ===")
+        dumpHierarchy(hosting, match: "")
+    }
+
+    func test首次打开页签期间统一顶部栏保持稳定几何() throws {
+        let model = AppModel.previewModel()
+        let host = try XCTUnwrap(model.hosts.first)
+        let store = WorkspaceStore(hostNameProvider: { hostID in
+            model.hosts.first(where: { $0.id == hostID })?.name
+        })
+
+        let root = HostListView()
+            .environmentObject(model)
+            .environmentObject(store)
+            .transferStore(TransferStore())
+        let hosting = NSHostingView(rootView: root)
+        let window = makeWindow()
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        pump(1.2)
+
+        let chrome = try XCTUnwrap(
+            findView(hosting, matching: "MonitorView"),
+            "未找到统一顶部页签栏的 MonitorView"
         )
-        let scrollView = try XCTUnwrap(findScrollView(in: container))
-        XCTAssertGreaterThan(
-            scrollView.documentView?.frame.width ?? 0,
-            scrollView.contentView.bounds.width,
-            "窄窗口下内容页签栏必须保留可翻页的溢出宽度"
+        let initialFrame = chrome.convert(chrome.bounds, to: nil)
+        XCTAssertGreaterThan(initialFrame.width, 0)
+        XCTAssertGreaterThan(initialFrame.height, 0)
+
+        let tabID = store.openTerminal(hostID: host.id)
+        model.presentTab(tabID)
+
+        var observedFrames: [NSRect] = []
+        for _ in 0..<20 {
+            pump(0.02)
+            observedFrames.append(chrome.convert(chrome.bounds, to: nil))
+        }
+
+        XCTAssertFalse(observedFrames.isEmpty)
+        XCTAssertTrue(
+            observedFrames.allSatisfy {
+                $0.width >= initialFrame.width / 2 && $0.height >= initialFrame.height / 2
+            },
+            "首次打开页签期间统一顶部栏不得短暂压缩；初始 frame=\(initialFrame)，采样 frame=\(observedFrames)"
         )
     }
 
     // MARK: - 探针 2：WorkspaceView 整体 + 侧栏显隐切换后的页签栏高度
 
-    func testProbeWorkspaceTabBarAcrossSidebarToggle() {
+    func testProbeUnifiedTabStripAcrossSidebarToggle() {
         let model = AppModel.previewModel()
         let store = WorkspaceStore.previewStore()
-        store.tabBarOverflowMode = .scroll
 
         let root = WorkspaceView()
             .environmentObject(model)
             .environmentObject(store)
-            .environmentObject(TransferStore())
+            .transferStore(TransferStore())
             .environmentObject(ToastCenter())
             .environmentObject(MacOSWorkspaceChromeMetrics())
         let hosting = NSHostingView(rootView: root)
@@ -366,7 +318,8 @@ final class TabBarLayoutProbeTests: XCTestCase {
             pump()
             hosting.layoutSubtreeIfNeeded()
             print("PROBE === WorkspaceView columnVisibility=\(visibility) ===")
-            let hits = dumpHierarchy(window.contentView!, match: "HeightConstrainedContainer")
+            let hits = dumpHierarchy(window.contentView!, match: "MonitorView")
+            XCTAssertFalse(hits.isEmpty, "统一页签栏输入桥接必须保持在视图树中")
             for frame in hits {
                 XCTAssertLessThan(frame.height, 60, "侧栏显隐后页签栏高度异常: \(frame.height)")
             }

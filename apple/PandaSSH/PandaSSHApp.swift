@@ -5,8 +5,9 @@ struct PandaSSHApp: App {
     @StateObject private var model: AppModel
     @StateObject private var workspace: WorkspaceStore
     /// 全局传输任务队列(与原型全局传输列表一致,各 SFTP 标签共享)。
-    /// 在 init 中与 workspace 共享同一实例。
-    @StateObject private var transfers: TransferStore
+    /// 普通常量持有而非 `@StateObject`:App body 不订阅其 5Hz 状态发布,
+    /// 避免传输期间整个主窗口树随任务进度重渲染;生命周期仍与 App 一致。
+    private let transfers: TransferStore
 
     init() {
         // 先建 AppModel 与 TransferStore,再把主机名查询闭包与传输队列注入工作区
@@ -15,7 +16,7 @@ struct PandaSSHApp: App {
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
         let transfers = TransferStore()
-        _transfers = StateObject(wrappedValue: transfers)
+        self.transfers = transfers
         _workspace = StateObject(wrappedValue: WorkspaceStore(
             hostNameProvider: { hostID in
                 model.hosts.first(where: { $0.id == hostID })?.name
@@ -29,7 +30,7 @@ struct PandaSSHApp: App {
             HostListView()
                 .environmentObject(model)
                 .environmentObject(workspace)
-                .environmentObject(transfers)
+                .transferStore(transfers)
                 .environmentObject(Logger.shared)
                 .task {
                     // 独立于监控窗口的应用级日志消费；只读取 Rust 内存事件，不主动探测网络。
@@ -41,6 +42,11 @@ struct PandaSSHApp: App {
                     }
                 }
         }
+        #if os(macOS)
+        // 场景必须与自绘顶栏采用一致样式，否则 SwiftUI 在焦点或内容更新后
+        // 会恢复不透明的系统标题栏，遮住伸入标题栏区域的按钮和页签。
+        .windowStyle(.hiddenTitleBar)
+        #endif
         #if os(macOS)
         Settings {
             SettingsView()
@@ -77,9 +83,6 @@ enum ConnectionMonitorWindow {
 /// 全局开关:DEBUG 构建默认走真实后端,只有 Preview 与单元测试显式使用 Mock。
 enum AppConfig {
     static var useMockBackend: Bool = false
-    /// 统一 workspace chrome 已验证时默认启用；测试或宿主降级可显式回退旧路径。
-    static var isUnifiedWorkspaceChromeAvailable: Bool = true
-    static var isUnifiedWorkspaceChromeExplicitlyDisabled: Bool = false
 }
 
 /// 侧栏底部入口决定主区页面:主机(工作区)/代码片段/设置。

@@ -1,21 +1,6 @@
 import Foundation
 import Combine
 
-/// 页签栏溢出后的显示策略。
-enum TabBarOverflowMode: String, CaseIterable, Identifiable {
-    case scroll
-    case expand
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .scroll: return "左右滚动（默认）"
-        case .expand: return "多行显示"
-        }
-    }
-}
-
 /// 工作区标签页:一个标签页 = 一台主机上的一个会话(终端或 SFTP)。
 /// `title` 由 `WorkspaceStore` 在标签数组变化时统一重算(同主机序号消歧)。
 struct WorkspaceTab: Identifiable, Equatable {
@@ -60,12 +45,6 @@ struct PendingBatchClose: Equatable {
 final class WorkspaceStore: ObservableObject {
     @Published private(set) var tabs: [WorkspaceTab] = []
     @Published private(set) var activeTabID: UUID?
-    /// 页签栏溢出模式：左右滚动或多行显示，从 UserDefaults 持久化。
-    @Published var tabBarOverflowMode: TabBarOverflowMode = .scroll {
-        didSet {
-            UserDefaults.standard.set(tabBarOverflowMode.rawValue, forKey: "panda.tabBarOverflowMode")
-        }
-    }
     /// 待二次确认关闭的终端标签页 id;nil 表示无待确认关闭。
     @Published private(set) var pendingCloseTabID: UUID?
     /// 批量关闭时待确认的终端标签页集合(含目标范围与已连接数);nil 表示无待确认。
@@ -103,10 +82,6 @@ final class WorkspaceStore: ObservableObject {
         terminalConnectedChecker: ((UUID) -> Bool)? = nil,
         reconnectHandler: ((UUID) -> Void)? = nil
     ) {
-        if let raw = UserDefaults.standard.string(forKey: "panda.tabBarOverflowMode"),
-           let mode = TabBarOverflowMode(rawValue: raw) {
-            self.tabBarOverflowMode = mode
-        }
         self.hostNameProvider = hostNameProvider
         self.closeSessionHandler = closeSessionHandler
         self.transferStore = transferStore

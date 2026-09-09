@@ -55,7 +55,10 @@ extension SidebarSheetKind {
 /// (macOS 右键、iPadOS 长按)。
 struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var transfers: TransferStore
+    /// 传输队列以非订阅环境值取引用（不观察）：传输期间 5Hz 状态发布
+    /// 不再使侧栏树（分组/主机列表/搜索）失效；角标数字由
+    /// `TransferSideEntryButton` 小组件自行订阅刷新。
+    @Environment(\.transferStore) private var transfers
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var toast: ToastCenter
     #if os(macOS)
@@ -66,13 +69,6 @@ struct SidebarView: View {
     @State private var searchText = ""
     @State private var hostPendingDelete: HostEntry?
     @State private var groupPendingDelete: HostGroup?
-    /// 新统一顶行已提供这些操作时为 false；旧页签栏回退路径在侧栏内部保留入口。
-    private let showsWorkspaceActions: Bool
-
-    init(showsWorkspaceActions: Bool = false) {
-        self.showsWorkspaceActions = showsWorkspaceActions
-    }
-
     private var callbacks: SidebarCallbacks {
         SidebarCallbacks(
             openTerminal: { model.presentTab(workspace.openTerminal(hostID: $0.id)) },
@@ -98,12 +94,6 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             #if os(macOS)
-            if showsWorkspaceActions {
-                workspaceActions
-                Divider()
-            }
-            #endif
-            #if os(macOS)
             searchField
             #endif
             treeView
@@ -118,7 +108,7 @@ struct SidebarView: View {
         #endif
         #if os(iOS)
         .searchable(text: $searchText, placement: .sidebar, prompt: "搜索主机")
-        // iPadOS 添加入口:macOS 在侧栏顶部自绘工具条,iPadOS 用系统导航栏按钮。
+        // iPadOS 添加入口:macOS 在统一顶行提供操作,iPadOS 用系统导航栏按钮。
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -166,32 +156,6 @@ struct SidebarView: View {
     }
 
     #if os(macOS)
-    private var workspaceActions: some View {
-        HStack(spacing: 4) {
-            Button {
-                model.sidebarSheet = .addHost(defaultGroupID: nil)
-            } label: {
-                Label("添加主机", systemImage: "plus")
-            }
-            Button {
-                model.sidebarSheet = .newGroup(parent: nil)
-            } label: {
-                Label("新建分组", systemImage: "folder.badge.plus")
-            }
-            Button {
-                withAnimation { model.columnVisibility = .detailOnly }
-            } label: {
-                Label("隐藏侧栏", systemImage: "sidebar.left")
-            }
-            Spacer(minLength: 0)
-        }
-        .labelStyle(.iconOnly)
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .frame(height: 36)
-        .accessibilityElement(children: .contain)
-    }
-
     private var sidebarWidthReporter: some View {
         GeometryReader { proxy in
             Color.clear
@@ -303,11 +267,9 @@ struct SidebarView: View {
                 action: model.showConnectionMonitor
             )
             #endif
-            SideEntryButton(
-                title: "传输任务",
-                systemImage: "arrow.up.arrow.down",
+            TransferSideEntryButton(
+                store: transfers,
                 isActive: model.sidebarPage == .transfers,
-                badgeCount: transfers.activeCount,
                 action: {
                     model.showTransfers()
                     #if os(macOS)
@@ -501,6 +463,24 @@ struct GroupRowView: View {
     }
 }
 
+/// 传输入口按钮：由本小组件（而非整个侧栏）订阅 TransferStore，
+/// 传输期间 5Hz 状态发布只重算角标数字，侧栏树其余部分保持静默。
+private struct TransferSideEntryButton: View {
+    @ObservedObject var store: TransferStore
+    let isActive: Bool
+    let action: () -> Void
+
+    var body: some View {
+        SideEntryButton(
+            title: "传输任务",
+            systemImage: "arrow.up.arrow.down",
+            isActive: isActive,
+            badgeCount: store.activeCount,
+            action: action
+        )
+    }
+}
+
 /// 侧栏底部固定入口按钮，使用与系统侧栏一致的选中和悬停层级。
 private struct SideEntryButton: View {
     let title: String
@@ -548,7 +528,7 @@ private struct SideEntryButton: View {
     }
     .environmentObject(AppModel.previewModel())
     .environmentObject(WorkspaceStore.previewStore())
-    .environmentObject(TransferStore(failRule: { _ in false }))
+    .transferStore(TransferStore(failRule: { _ in false }))
     .environmentObject(ToastCenter())
 }
 #endif

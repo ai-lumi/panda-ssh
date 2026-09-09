@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SwiftUI
 
 /// 传输方向:上传(本地 → 远程)/ 下载(远程 → 本地)。
 enum TransferDirection: Equatable {
@@ -1083,6 +1084,36 @@ private extension BatchTransferRecord {
         } else {
             self.name = "\((ffiRecord.sources[0] as NSString).lastPathComponent) 等 \(count) 项"
         }
+    }
+}
+
+// MARK: - 环境注入（非订阅）
+
+/// `\.transferStore` 环境键：只存实例引用，不建立订阅关系。
+/// 与 `.environmentObject` 的区别：读取该值的视图不会因 store 的
+/// `@Published tasks`（传输期间 5Hz 发布）而失效重渲染；
+/// 需要实时刷新的视图（传输页/任务行/侧栏角标）应以 `@ObservedObject`
+/// 显式订阅或由父视图参数注入。
+private struct TransferStoreEnvironmentKey: EnvironmentKey {
+    /// 未注入时的兜底：Mock 空源实例，不触碰 FFI，仅防预览/测试漏注入。
+    /// 环境值默认值在 SwiftUI 渲染（主线程）时首次求值，用
+    /// assumeIsolated 表达该约束；正常路径必须显式注入。
+    static let defaultValue: TransferStore = MainActor.assumeIsolated {
+        TransferStore(failRule: nil)
+    }
+}
+
+extension EnvironmentValues {
+    var transferStore: TransferStore {
+        get { self[TransferStoreEnvironmentKey.self] }
+        set { self[TransferStoreEnvironmentKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// 以非订阅环境值注入 TransferStore（区别于 environmentObject 的订阅语义）。
+    func transferStore(_ store: TransferStore) -> some View {
+        environment(\.transferStore, store)
     }
 }
 

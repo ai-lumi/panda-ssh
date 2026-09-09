@@ -263,9 +263,21 @@ struct SftpTabView: View {
             } label: {
                 Text(local ? "本地" : "远程 — \(host.name)")
                     .font(.caption.bold())
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
             .sftpNavigationPointer()
+            .foregroundStyle(.secondary)
+            .background(
+                Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
             .accessibilityLabel("返回顶级目录")
             Button {
                 Task {
@@ -274,10 +286,20 @@ struct SftpTabView: View {
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.caption)
+                    .frame(width: 24, height: 20)
+                    .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
             .sftpNavigationPointer()
             .foregroundStyle(nav.canGoUp ? Color.primary : Color.secondary.opacity(0.4))
+            .background(
+                Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
             .disabled(!nav.canGoUp)
             .accessibilityLabel("返回上级")
             // 面包屑:点击进入路径输入态;输入态展示 TextField,回车跳转、Esc/失焦取消(item 7)。
@@ -343,9 +365,20 @@ struct SftpTabView: View {
                     submitPath(local: local)
                 } label: {
                     Image(systemName: "arrow.right.circle")
+                        .frame(width: 24, height: 20)
+                        .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .sftpNavigationPointer()
+                .foregroundStyle(.secondary)
+                .background(
+                    Color.primary.opacity(0.04),
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                )
                 .accessibilityLabel("前往目录")
             }
         } else {
@@ -383,9 +416,20 @@ struct SftpTabView: View {
                 } label: {
                     Image(systemName: "pencil")
                         .font(.caption)
+                        .frame(width: 24, height: 20)
+                        .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .sftpNavigationPointer()
+                .foregroundStyle(.secondary)
+                .background(
+                    Color.primary.opacity(0.04),
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                )
                 .accessibilityLabel(local ? "编辑本地路径" : "编辑远程路径")
                 .help(nav.path)
             }
@@ -997,6 +1041,6 @@ struct OverwriteConfirmationSheet: View {
     .environmentObject(AppModel.previewModel())
     .environmentObject(WorkspaceStore.previewStore())
     .environmentObject(ToastCenter())
-    .environmentObject(transfers)
+    .transferStore(transfers)
 }
 #endif

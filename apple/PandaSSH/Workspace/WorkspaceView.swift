@@ -6,16 +6,13 @@ import SwiftUI
 struct WorkspaceView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var transfers: TransferStore
+    /// 传输队列以非订阅环境值取引用（不观察）：传输期间 5Hz 状态发布
+    /// 不再使本视图失效，仅向传输页与 SFTP 标签页传参；需要实时
+    /// 刷新的叶子视图自行以 `@ObservedObject` 订阅。
+    @Environment(\.transferStore) private var transfers
     #if os(macOS)
     @EnvironmentObject private var chromeMetrics: MacOSWorkspaceChromeMetrics
     #endif
-    private let chromeStrategy: WorkspaceChromeStrategy
-
-    init(chromeStrategy: WorkspaceChromeStrategy = .unified) {
-        self.chromeStrategy = chromeStrategy
-    }
-
     var body: some View {
         Group {
         #if os(macOS)
@@ -52,47 +49,23 @@ struct WorkspaceView: View {
 
     #if os(macOS)
     private var macOSBody: some View {
-        Group {
-            switch chromeStrategy {
-            case .unified:
-                VStack(spacing: 0) {
-                    UnifiedWorkspaceChrome(
-                        leadingReservedWidth: chromeMetrics.trafficLightSafeWidth,
-                        sidebarWidth: chromeMetrics.sidebarWidth
-                    )
-                        // AppKit 宿主只负责窗口拖拽；页签与会话规则保持在共享 SwiftUI 层。
-                        .background(WindowDragView())
-                    Divider()
-                    macOSUnifiedSplitView
-                }
-                // 顶部 chrome 与原生红绿灯处于同一标题栏行；其左侧由实测安全矩形避让。
-                .ignoresSafeArea(.container, edges: .top)
-            case .legacy:
-                macOSSplitView(drawsLegacyTabBar: true)
-            }
+        VStack(spacing: 0) {
+            UnifiedWorkspaceChrome(
+                leadingReservedWidth: chromeMetrics.trafficLightSafeWidth,
+                sidebarWidth: chromeMetrics.sidebarWidth
+            )
+            .background(WindowDragView())
+            Divider()
+            macOSUnifiedSplitView
         }
+        // 顶部 chrome 与原生红绿灯处于同一行，由实测安全矩形避让。
+        .ignoresSafeArea(.container, edges: .top)
         .modifier(macOSCloseAlerts)
-    }
-
-    private func macOSSplitView(drawsLegacyTabBar: Bool) -> some View {
-        NavigationSplitView(columnVisibility: $model.columnVisibility) {
-            SidebarView(showsWorkspaceActions: drawsLegacyTabBar)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
-        } detail: {
-            VStack(spacing: 0) {
-                if drawsLegacyTabBar && !workspace.tabs.isEmpty {
-                    macOSTabBar
-                    Divider()
-                }
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
     }
 
     private var macOSUnifiedSplitView: some View {
         MacOSUnifiedSplitHost(
-            sidebar: SidebarView(showsWorkspaceActions: false),
+            sidebar: SidebarView(),
             detail: content.frame(maxWidth: .infinity, maxHeight: .infinity),
             policy: .resolve(
                 requestedSidebarWidth: chromeMetrics.sidebarWidth,
@@ -141,27 +114,11 @@ struct WorkspaceView: View {
         }
     }
 
-    private var macOSTabBar: some View {
-        WorkspaceTabBar()
-            .environmentObject(model)
-            .environmentObject(workspace)
-            .frame(maxWidth: .infinity)
-    }
     #endif
 
     #if os(iOS)
-    @ViewBuilder
-    private var iOSBody: some View {
-        switch chromeStrategy {
-        case .unified:
-            unifiedIOSBody
-        case .legacy:
-            legacyIOSBody
-        }
-    }
-
     /// iPadOS 页签复用系统导航栏，内容区不再叠加第二行顶部栏。
-    private var unifiedIOSBody: some View {
+    private var iOSBody: some View {
         GeometryReader { geometry in
             content
                 .alert(
@@ -189,6 +146,9 @@ struct WorkspaceView: View {
                     Text("将关闭并断开 \(workspace.pendingBatchClose?.connectedTerminalCount ?? 0) 个已连接终端会话。")
                 }
                 .navigationBarTitleDisplayMode(.inline)
+                // 导航栏背景与页签的语义前景色保持同一主题，避免黑色终端透底。
+                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .principal) {
                         UnifiedWorkspaceTabStrip()
@@ -202,40 +162,6 @@ struct WorkspaceView: View {
         }
     }
 
-    /// 旧内容区页签栏仅作回退使用，不参与新路径的顶部 chrome。
-    private var legacyIOSBody: some View {
-        VStack(spacing: 0) {
-            // 批量关闭含已连接终端的聚合确认挂在标签栏上。
-            iosTabBar
-                .alert(
-                    "关闭已连接终端？",
-                    isPresented: Binding(
-                        get: { workspace.pendingBatchClose != nil },
-                        set: { if !$0 { workspace.cancelBatchClose() } }
-                    )
-                ) {
-                    Button("关闭并断开", role: .destructive) { workspace.confirmBatchClose() }
-                    Button("取消", role: .cancel) { workspace.cancelBatchClose() }
-                } message: {
-                    Text("将关闭并断开 \(workspace.pendingBatchClose?.connectedTerminalCount ?? 0) 个已连接终端会话。")
-                }
-            Divider()
-            // 单个已连接终端标签关闭二次确认挂在内容区上。
-            content
-                .alert(
-                    "关闭终端？",
-                    isPresented: Binding(
-                        get: { workspace.pendingCloseTabID != nil },
-                        set: { if !$0 { workspace.cancelClose() } }
-                    )
-                ) {
-                    Button("关闭并断开", role: .destructive) { workspace.confirmClose() }
-                    Button("取消", role: .cancel) { workspace.cancelClose() }
-                } message: {
-                    Text("关闭后将断开与「\(pendingCloseTabTitle)」的 SSH 连接。")
-                }
-        }
-    }
     #endif
 
     /// 待关闭标签在弹窗中使用当前标题；状态在显示期间失效时安全回退。
@@ -245,50 +171,6 @@ struct WorkspaceView: View {
             return "此主机"
         }
         return tab.title
-    }
-
-    /// 横向滚动的标签栏;标签过多时可滑动,iPadOS 紧凑宽度下不拥挤。
-    private var iosTabBar: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(workspace.tabs) { tab in
-                        WorkspaceTabItemView(
-                            tab: tab,
-                            isActive: model.workspacePresentation == .tab(tabID: tab.id),
-                            onSelect: {
-                                workspace.select(tabID: tab.id)
-                                model.presentTab(tab.id)
-                            },
-                            onClose: { workspace.requestClose(tabID: tab.id) }
-                        )
-                        // 右键菜单(macOS)/长按菜单(iPadOS):重连 / 关闭其他 / 关闭全部(item 2)
-                        .contextMenu {
-                            if tab.kind == .terminal {
-                                Button {
-                                    workspace.reconnectTerminal(tabID: tab.id)
-                                } label: {
-                                    Label("重连", systemImage: "arrow.clockwise")
-                                }
-                                Divider()
-                            }
-                            Button {
-                                workspace.requestCloseOthers(keeping: tab.id)
-                            } label: {
-                                Label("关闭其他标签页", systemImage: "xmark")
-                            }
-                            Button(role: .destructive) {
-                                workspace.requestCloseAll()
-                            } label: {
-                                Label("关闭全部标签页", systemImage: "xmark.circle")
-                            }
-                        }
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-            }
-        }
     }
 
     /// 内容区:先按侧栏入口分支(片段/设置整页替换,与原型一致);
@@ -463,102 +345,12 @@ struct WorkspaceView: View {
     }
 }
 
-/// 单个标签:浏览器风格胶囊标签,hover 显关闭按钮,选中态有背景。
-struct WorkspaceTabItemView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    let tab: WorkspaceTab
-    let isActive: Bool
-    let onSelect: () -> Void
-    let onClose: () -> Void
-    @State private var hovering = false
-
-    private var metrics: WorkspaceTabPresentationMetrics {
-        WorkspaceTabPresentationMetrics.resolve(
-            platform: .iPadOS,
-            isActive: isActive,
-            isHovered: hovering,
-            availableWidth: WorkspaceTabPresentationMetrics.maximumTitleWidth,
-            titleCharacterCount: tab.title.count
-        )
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(dotColor)
-                .frame(width: 6, height: 6)
-                .accessibilityHidden(true)
-            Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text(tab.title)
-                .font(.callout)
-                .lineLimit(1)
-                .frame(maxWidth: metrics.maximumTitleWidth, alignment: .leading)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: metrics.minimumHitTarget, height: metrics.minimumHitTarget)
-                    .contentShape(
-                        RoundedRectangle(cornerRadius: metrics.closeButtonCornerRadius, style: .continuous)
-                    )
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .background(
-                hovering ? Color.primary.opacity(0.12) : Color.clear,
-                in: Circle()
-            )
-            .opacity(metrics.showsCloseButton ? 1 : 0)
-            .allowsHitTesting(metrics.showsCloseButton)
-            .accessibilityLabel("关闭 \(tab.title)")
-        }
-        .padding(.horizontal, 10)
-        .frame(minHeight: metrics.minimumTabHeight)
-        .background(
-            isActive ? Color.primary.opacity(0.14) : (hovering ? Color.primary.opacity(0.06) : Color.clear),
-            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .gesture(
-            TapGesture().onEnded(onSelect),
-            including: metrics.selectionGestureIncludesSubviews ? .all : .gesture
-        )
-        .onHover { hovering = $0 }
-        .accessibilityLabel(tab.title)
-        .accessibilityValue(statusLabel)
-        .accessibilityHint("切换到此标签页")
-        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction(.default, onSelect)
-        .accessibilityElement(children: .contain)
-    }
-
-    private var dotColor: Color {
-        switch workspace.connectionStatus(forTabID: tab.id) {
-        case .connected: return .green
-        case .connecting: return .yellow
-        case .failed: return .red
-        case .inactive: return Color(.gray).opacity(0.6)
-        }
-    }
-
-    private var statusLabel: String {
-        switch workspace.connectionStatus(forTabID: tab.id) {
-        case .connected: return "SSH 会话已连接"
-        case .connecting: return "正在建立 SSH 会话"
-        case .failed: return "SSH 会话已断开或连接失败"
-        case .inactive: return "SSH 会话未建立"
-        }
-    }
-}
-
 #if DEBUG
 #Preview("工作区(含同主机多标签)") {
     WorkspaceView()
         .environmentObject(AppModel.previewModel())
         .environmentObject(WorkspaceStore.previewStore())
-        .environmentObject(TransferStore())
+        .transferStore(TransferStore())
         .environmentObject(ToastCenter())
 }
 #endif

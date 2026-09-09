@@ -30,3 +30,7 @@
 
 - 影响 `WorkspaceView`、`MainWindowChrome`、侧栏装配、页签栏组件、macOS/iPadOS XCTest 和 workspace 规格。
 - 现有 `refactor-macos-titlebar-tab-strip` 提案不再是实施依据；其内容只保留作问题与回退路径的参考。
+
+## 验收及迁移完成
+
+2026-09-09 用户确认 UI 验收通过。旧路径按后续已批准的 remove-legacy-workspace-ui 清理提案退役；上文保留旧代码的约束仅适用于首次迁移阶段。

@@ -10,18 +10,9 @@ struct HostListView: View {
     #if os(macOS)
     @StateObject private var chromeMetrics = MacOSWorkspaceChromeMetrics()
     #endif
-    private let chromeStrategy: WorkspaceChromeStrategy
-
-    init(chromeStrategy: WorkspaceChromeStrategy? = nil) {
-        self.chromeStrategy = chromeStrategy ?? .resolve(
-            isUnifiedChromeAvailable: AppConfig.isUnifiedWorkspaceChromeAvailable,
-            isExplicitlyDisabled: AppConfig.isUnifiedWorkspaceChromeExplicitlyDisabled
-        )
-    }
-
     var body: some View {
         #if os(macOS)
-        WorkspaceView(chromeStrategy: chromeStrategy)
+        WorkspaceView()
             .environmentObject(chromeMetrics)
             .environmentObject(toast)
             .toastOverlay(toast)
@@ -36,7 +27,7 @@ struct HostListView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 400)
         } detail: {
-            WorkspaceView(chromeStrategy: chromeStrategy)
+            WorkspaceView()
         }
         .environmentObject(toast)
         .toastOverlay(toast)
@@ -53,7 +44,7 @@ struct HostListView: View {
     HostListView()
         .environmentObject(AppModel.previewModel())
         .environmentObject(WorkspaceStore.previewStore())
-        .environmentObject(TransferStore())
+        .transferStore(TransferStore())
         .frame(width: 1180, height: 760)
 }
 
@@ -66,7 +57,7 @@ struct HostListView: View {
     HostListView()
         .environmentObject(model)
         .environmentObject(WorkspaceStore.previewStore())
-        .environmentObject(TransferStore())
+        .transferStore(TransferStore())
         .preferredColorScheme(.dark)
         .frame(width: 1180, height: 760)
 }
@@ -75,7 +66,7 @@ struct HostListView: View {
     HostListView()
         .environmentObject(AppModel.previewModel())
         .environmentObject(WorkspaceStore.previewStore())
-        .environmentObject(TransferStore())
+        .transferStore(TransferStore())
         .frame(width: 1024, height: 768)
 }
 
@@ -83,7 +74,7 @@ struct HostListView: View {
     HostListView()
         .environmentObject(AppModel.previewModel())
         .environmentObject(WorkspaceStore.previewStore())
-        .environmentObject(TransferStore())
+        .transferStore(TransferStore())
         .frame(width: 520, height: 768)
 }
 
@@ -97,7 +88,7 @@ struct HostListView: View {
     HostListView()
         .environmentObject(model)
         .environmentObject(WorkspaceStore.previewStore())
-        .environmentObject(TransferStore())
+        .transferStore(TransferStore())
         .environment(\.dynamicTypeSize, .accessibility2)
         .frame(width: 520, height: 768)
 }

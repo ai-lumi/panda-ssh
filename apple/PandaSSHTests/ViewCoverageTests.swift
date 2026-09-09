@@ -101,7 +101,6 @@ final class ViewCoverageTests: XCTestCase {
             .environmentObject(model)
             .environmentObject(workspace))
 
-        XCTAssertEqual(workspace.tabBarOverflowMode, .scroll)
     }
 
     func testSFTP覆盖连接成功与离线失败状态() throws {
@@ -121,7 +120,7 @@ final class ViewCoverageTests: XCTestCase {
                 SftpTabView(tab: tab, host: host, transfers: transfers)
                     .environmentObject(model)
                     .environmentObject(workspace)
-                    .environmentObject(transfers)
+                    .transferStore(transfers)
                     .environmentObject(toast),
                 settle: 0.95
             )
