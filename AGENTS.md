@@ -68,5 +68,5 @@ Swift 双端共享源码中，平台条件编译只允许用于**界面与平台
 
 - 开源协议：Apache-2.0（见 `LICENSE`），新增依赖必须协议兼容（MIT/BSD/Apache/MPL 均可，GPL/LGPL 不行）。
 - 全中文约定：大模型响应、代码注释、文档一律用中文；提交信息保留 Conventional Commits 格式（类型前缀如 feat/fix 用英文），描述用中文。
-- 安全红线：密码、私钥口令只存系统钥匙串（`kSecAttrSynchronizable`），配置 TOML 只存 `*_ref` 引用 key，不落密钥材料。
+- 安全红线：密码、私钥口令存入配置目录的专用凭据文件（`credentials.toml`），可选以用户设置的保护密钥加密（AES-256-GCM + Argon2）；主机配置 TOML 只存 `*_ref` 引用 key，不落密钥材料。系统钥匙串不参与凭据存储。
 - 当前 host key 行为：首次连接未知主机时，FFI 以 `Reject` 策略探测并返回 `UnknownHostKey`（携带呈现密钥与 SHA256 指纹），由 Swift UI 弹框要求用户确认；用户信任后调用 `accept_unknown_host_key` 存储探测呈现的密钥，再正常连接。连接入口（`test_connection`/`sftp_*`）带 `trust_on_first_use: bool` 参数，`false` 对应 `Reject`，`true` 对应 `AcceptAndStore`（保留给自动化/未来「始终信任」选项）。同一主机的多个并发连接请求在 `AppModel` 层串行化，只弹一次确认框。密钥变更（`HostKeyMismatch`）时阻断连接并展示告警。改动此行为需同步改 spec。
