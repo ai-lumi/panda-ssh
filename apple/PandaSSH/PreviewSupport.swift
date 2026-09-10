@@ -16,9 +16,11 @@ extension AppModel {
 extension WorkspaceStore {
     /// 预览专用实例:预置几个标签(含同主机多标签,展示序号消歧)。
     static func previewStore() -> WorkspaceStore {
+        let mock = MockBackend.demo()
         let store = WorkspaceStore { hostID in
-            MockBackend.demo().allHosts().first(where: { $0.id == hostID })?.name
+            mock.allHosts().first(where: { $0.id == hostID })?.name
         }
+        store.syncHostNames(mock.allHosts().map(\.id))
         store.openTerminal(hostID: "h-webprod")
         store.openTerminal(hostID: "h-webprod")
         store.openSFTP(hostID: "h-staging")

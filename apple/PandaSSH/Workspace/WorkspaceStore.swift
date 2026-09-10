@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// 工作区标签页:一个标签页 = 一台主机上的一个会话(终端或 SFTP)。
-/// `title` 由 `WorkspaceStore` 在标签数组变化时统一重算(同主机序号消歧)。
+/// `title` 由 Rust 侧工作区管理器统一重算(同主机序号消歧)。
 struct WorkspaceTab: Identifiable, Equatable {
     /// 标签页类型:终端或 SFTP 文件浏览器
     enum Kind: Equatable {
@@ -36,9 +36,12 @@ struct PendingBatchClose: Equatable {
     let connectedTerminalCount: Int
 }
 
-/// 标签页工作区状态:持有标签数组与活动标签,负责打开/切换/关闭
-/// 以及同主机标签标题的序号消歧。主机名通过注入的查询闭包解析,
-/// 便于测试替换、也避免模型层反向依赖 AppModel。
+/// 标签页工作区状态:持有标签数组与活动标签,负责打开/切换/关闭。
+/// 标签列表、标题消歧、活动标签选择与连接状态跟踪均由 Rust 侧工作区
+/// 管理器管理;Swift 侧通过 FFI 调用委托并同步 `@Published` 属性。
+///
+/// 关闭确认决策仍保留在 Swift 侧(通过 `terminalConnectedChecker` 注入点),
+/// 便于测试隔离;实际标签移除由 Rust 执行。
 ///
 /// 每个标签精确拥有连接；后台传输独立运行，不参与标签连接释放。
 @MainActor
@@ -49,22 +52,14 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var pendingCloseTabID: UUID?
     /// 批量关闭时待确认的终端标签页集合(含目标范围与已连接数);nil 表示无待确认。
     @Published private(set) var pendingBatchClose: PendingBatchClose?
-    /// 每个已打开标签页上报的当前连接状态。用 `@Published` 使页签栏与侧栏
-    /// 能在读循环发现断开后立即重新渲染。
-    @Published private var tabConnectionStatuses: [UUID: WorkspaceConnectionStatus] = [:]
-    /// 已连接终端标签集合(tabID)。独立于视图生命周期:
-    /// TerminalTabView 在 phase→.shell 时 markConnected,仅在标签关闭时清理。
-    /// 解决:非活动终端标签(视图已销毁)仍需关闭确认的问题。
-    private var connectedTerminalTabs: Set<UUID> = []
 
     /// 按 hostID 查询主机显示名;查不到(如主机已删除)时返回 nil,标题回退为 hostID。
+    /// 同时用于在标签操作前同步主机名映射到 Rust。
     private let hostNameProvider: (String) -> String?
     /// 标签释放通知注入点，只传递正在关闭的标签，不执行主机级断开。
     private let closeSessionHandler: (WorkspaceTab) -> Void
     /// 判断指定终端标签页是否处于「已连接」状态(.shell),用于关闭二次确认门控。
-    /// 默认走 `terminalSessions` 注册表;测试可注入以隔离。
-    /// 注意:这里用 `var` 并给占位默认值,是因为默认闭包需要捕获 `self`,
-    /// 而 `self` 在 init 中必须先完成两阶段初始化才能被捕获。
+    /// 测试可注入以隔离;生产环境由 `reportConnectionStatus` 维护 Rust 侧状态。
     private var terminalConnectedChecker: (UUID) -> Bool = { _ in false }
     /// 重连终端标签页时调用,参数为 tabID。默认走注册表转发到 TerminalSessionStore.retry。
     private var reconnectHandler: (UUID) -> Void = { _ in }
@@ -85,13 +80,25 @@ final class WorkspaceStore: ObservableObject {
         self.hostNameProvider = hostNameProvider
         self.closeSessionHandler = closeSessionHandler
         self.transferStore = transferStore
-        self.terminalConnectedChecker = terminalConnectedChecker ?? { [weak self] id in
-            self?.connectedTerminalTabs.contains(id) ?? false
-        }
+        self.terminalConnectedChecker = terminalConnectedChecker ?? { _ in false }
         self.reconnectHandler = reconnectHandler ?? { [weak self] id in
             self?.terminalSessions[id]?.value?.retry()
         }
     }
+
+    // MARK: - 主机名同步
+
+    /// 将当前主机名映射同步到 Rust,确保标签标题消歧使用正确名称。
+    /// 在打开标签页前调用,由 `AppModel.reload()` 触发增量更新。
+    func syncHostNames(_ hostIDs: [String]) {
+        let mappings = hostIDs.compactMap { id -> HostNameMapping? in
+            guard let name = hostNameProvider(id) else { return nil }
+            return HostNameMapping(hostId: id, name: name)
+        }
+        workspaceSetHostNames(hostNames: mappings)
+    }
+
+    // MARK: - 会话注册
 
     /// 注册终端会话(由 TerminalTabView.onAppear 调用)。
     func registerTerminal(_ session: TerminalSessionStore, for tabID: UUID) {
@@ -107,29 +114,32 @@ final class WorkspaceStore: ObservableObject {
         terminalSessions.removeValue(forKey: tabID)
     }
 
-    /// 标记终端标签已连接(phase→.shell)。独立于视图生命周期,
-    /// 切换标签时视图销毁不会清除此标记,确保非活动终端仍可触发关闭确认。
+    // MARK: - 连接状态
+
+    /// 标记终端标签已连接(phase→.shell)。同时通知 Rust 侧工作区管理器,
+    /// 用于关闭确认判断。
     func markTerminalConnected(tabID: UUID) {
-        connectedTerminalTabs.insert(tabID)
+        reportConnectionStatus(.connected, forTabID: tabID)
     }
 
     /// 标记终端标签已断开(phase→.failed 或连接丢失)。
     func markTerminalDisconnected(tabID: UUID) {
-        connectedTerminalTabs.remove(tabID)
+        reportConnectionStatus(.failed, forTabID: tabID)
     }
 
     /// 由终端/SFTP 页签在连接状态变化时调用。已被关闭的页签不得重新写入状态，
-    /// 以避免 SwiftUI 的延迟 onDisappear 产生“幽灵连接”。
+    /// 以避免 SwiftUI 的延迟 onDisappear 产生"幽灵连接"。
+    /// 同时转发到 Rust 侧工作区管理器,维护关闭确认所需的连接状态。
     func reportConnectionStatus(_ status: WorkspaceConnectionStatus, forTabID tabID: UUID) {
         guard tabs.contains(where: { $0.id == tabID }) else { return }
-        tabConnectionStatuses[tabID] = status
-        if tabs.first(where: { $0.id == tabID })?.kind == .terminal {
-            if status == .connected {
-                markTerminalConnected(tabID: tabID)
-            } else if status == .failed || status == .inactive {
-                markTerminalDisconnected(tabID: tabID)
-            }
+        let ffiStatus: ConnectionStatusEnum
+        switch status {
+        case .inactive: ffiStatus = .inactive
+        case .connecting: ffiStatus = .connecting
+        case .connected: ffiStatus = .connected
+        case .failed: ffiStatus = .failed
         }
+        workspaceReportConnectionStatus(tabId: tabID.uuidString, status: ffiStatus)
     }
 
     /// 终端读循环确认远端 shell 已结束后调用。结束的标签仍保留在工作区，
@@ -139,20 +149,22 @@ final class WorkspaceStore: ObservableObject {
         reportConnectionStatus(.failed, forTabID: tabID)
     }
 
-    /// 返回单个标签页的状态；不存在或已关闭时为 inactive。
+    /// 返回单个标签页的状态；从 Rust 侧标签记录读取。
+    /// 不存在或已关闭时为 inactive。
     func connectionStatus(forTabID tabID: UUID) -> WorkspaceConnectionStatus {
-        tabConnectionStatuses[tabID] ?? .inactive
+        let records = workspaceTabList()
+        guard let record = records.first(where: { $0.id == tabID.uuidString }) else { return .inactive }
+        return connectionStatusFromFFI(record.connectionStatus)
     }
 
-    /// 聚合同一主机全部已打开标签页的最近连接状态。只要任一会话可用就为 connected；
-    /// 这避免一个失败的并行标签把仍可交互的主机误标为不可达。
+    /// 聚合同一主机全部已打开标签页的最近连接状态。
+    /// 委托 Rust 侧 `workspaceHostConnectionStatus` 实现优先级聚合。
     func connectionStatus(forHostID hostID: String) -> WorkspaceConnectionStatus {
-        let statuses = tabs.filter { $0.hostID == hostID }.map { connectionStatus(forTabID: $0.id) }
-        if statuses.contains(.connected) { return .connected }
-        if statuses.contains(.connecting) { return .connecting }
-        if statuses.contains(.failed) { return .failed }
-        return .inactive
+        let ffiStatus = workspaceHostConnectionStatus(hostId: hostID)
+        return connectionStatusFromFFI(ffiStatus)
     }
+
+    // MARK: - 标签页操作
 
     /// 打开终端标签页。总是新建,不做按主机的去重。
     @discardableResult
@@ -169,27 +181,27 @@ final class WorkspaceStore: ObservableObject {
     /// 切换活动标签;标签不存在时忽略。
     func select(tabID: UUID) {
         guard tabs.contains(where: { $0.id == tabID }) else { return }
-        activeTabID = tabID
+        workspaceSelectTab(tabId: tabID.uuidString)
+        syncFromFfi()
     }
 
-    /// 关闭标签页;标签不存在时忽略。关闭活动标签后,活动标签优先落在
-    /// 左侧相邻标签,越界(关闭的是第一个)则落在原索引位置,即原右侧邻居。
-    /// 同步释放该标签，不依赖 SwiftUI 延迟的 onDisappear。
-    func close(tabID: UUID) {
-        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        let tab = tabs[index]
+    /// 关闭标签页;标签不存在时忽略。
+    /// `force` 为 true 时先向 Rust 上报断开状态,绕过关闭确认(用于批量确认
+    /// 后执行、主机删除级联等场景)。关闭活动标签后,活动标签优先落在
+    /// 左侧相邻标签。
+    func close(tabID: UUID, force: Bool = false) {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
+        // 清理本地会话
         terminalSessions[tabID]?.value?.close()
         sftpSessions.removeValue(forKey: tabID)?.value?.disconnect()
         closeSessionHandler(tab)
-        connectedTerminalTabs.remove(tabID)
         terminalSessions.removeValue(forKey: tabID)
-        tabConnectionStatuses.removeValue(forKey: tabID)
-        let closingActive = (activeTabID == tabID)
-        tabs.remove(at: index)
-        if closingActive {
-            activeTabID = tabs.isEmpty ? nil : tabs[max(index - 1, 0)].id
+        // force 模式下先向 Rust 报告断开,确保 Rust 侧 request_close 不设置 pending
+        if force {
+            workspaceReportConnectionStatus(tabId: tabID.uuidString, status: .inactive)
         }
-        retitle()
+        workspaceCloseTab(tabId: tabID.uuidString)
+        syncFromFfi()
     }
 
     /// 请求关闭标签页:已连接终端标签页弹出二次确认(设置 pendingCloseTabID);
@@ -207,7 +219,7 @@ final class WorkspaceStore: ObservableObject {
     func confirmClose() {
         guard let id = pendingCloseTabID else { return }
         pendingCloseTabID = nil
-        close(tabID: id)
+        close(tabID: id, force: true)
     }
 
     /// 取消关闭,保留待确认的终端标签页与会话。
@@ -216,11 +228,10 @@ final class WorkspaceStore: ObservableObject {
     }
 
     /// 关闭除目标外的全部标签页;目标保留为活动标签。
-    /// 被关闭的终端标签页走与单标签关闭一致的连接释放流程(直接断开,
-    /// 不弹逐个确认;批量关闭的聚合确认由视图层在调用前处理)。
+    /// 被关闭的终端标签页走与单标签关闭一致的连接释放流程。
     func closeOthers(keeping tabID: UUID) {
         let others = tabs.filter { $0.id != tabID }.map(\.id)
-        for id in others { close(tabID: id) }
+        for id in others { close(tabID: id, force: true) }
         if tabs.contains(where: { $0.id == tabID }) {
             activeTabID = tabID
         }
@@ -229,7 +240,7 @@ final class WorkspaceStore: ObservableObject {
     /// 关闭全部标签页。
     func closeAll() {
         let ids = tabs.map(\.id)
-        for id in ids { close(tabID: id) }
+        for id in ids { close(tabID: id, force: true) }
     }
 
     /// 重连终端标签页;SFTP 标签页为 no-op。
@@ -278,36 +289,86 @@ final class WorkspaceStore: ObservableObject {
         pendingBatchClose = nil
     }
 
-    private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
-        let tab = WorkspaceTab(id: UUID(), hostID: hostID, kind: kind, title: "")
-        tabs.append(tab)
-        tabConnectionStatuses[tab.id] = .connecting
-        activeTabID = tab.id
-        retitle()
-        return tab.id
-    }
-
     /// 关闭某台主机的全部标签页(删除主机时级联清理)。
     /// 主机已被删除,其活跃传输任务无意义,先取消再立即断开连接。
     func closeTabs(forHostID hostID: String) {
         transferStore?.cancelAll(forHostID: hostID)
         let removedIDs = tabs.filter { $0.hostID == hostID }.map(\.id)
         for id in removedIDs {
-            close(tabID: id)
+            close(tabID: id, force: true)
         }
     }
 
-    /// 重算全部标签标题:同一主机的标签按数组中的稳定顺序编号,
-    /// 第一个不带序号,后续为「名称 (2)」「名称 (3)」……
-    private func retitle() {
-        // 记录每个主机已出现的标签数,按数组顺序递增
-        var counts: [String: Int] = [:]
-        for index in tabs.indices {
-            let hostID = tabs[index].hostID
-            let base = hostNameProvider(hostID) ?? hostID
-            let ordinal = (counts[hostID] ?? 0) + 1
-            counts[hostID] = ordinal
-            tabs[index].title = ordinal == 1 ? base : "\(base) (\(ordinal))"
+    // MARK: - 内部
+
+    private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
+        // 确保 Rust 侧有该主机的名称,用于标题消歧
+        if let name = hostNameProvider(hostID) {
+            workspaceSetHostNames(hostNames: [HostNameMapping(hostId: hostID, name: name)])
+        }
+        let ffiKind: TabKindEnum = kind == .terminal ? .terminal : .sftp
+        let record = workspaceOpenTab(hostId: hostID, kind: ffiKind)
+        syncFromFfi()
+        return UUID(uuidString: record.id) ?? UUID()
+    }
+
+    /// 从 Rust FFI 同步标签列表、活动标签与待关闭状态到 @Published 属性。
+    private func syncFromFfi() {
+        let records = workspaceTabList()
+        tabs = records.compactMap { record in
+            guard let id = UUID(uuidString: record.id) else { return nil }
+            return WorkspaceTab(
+                id: id,
+                hostID: record.hostId,
+                kind: record.kind == .terminal ? .terminal : .sftp,
+                title: record.title
+            )
+        }
+        if let activeStr = workspaceActiveTabId() {
+            activeTabID = UUID(uuidString: activeStr)
+        } else {
+            activeTabID = nil
+        }
+        // 同步 Rust 侧待关闭状态(Swift 侧设置的 pendingCloseTabID/pendingBatchClose 优先)
+        syncPendingCloseFromRust()
+    }
+
+    /// 从 Rust 读取待关闭状态并更新 Swift 侧 @Published 属性。
+    /// 仅在 Swift 侧未自行设置 pending 状态时从 Rust 读取。
+    private func syncPendingCloseFromRust() {
+        guard let pending = workspacePendingClose() else {
+            // Rust 无 pending: 如果 Swift 侧也没有 pending, 无需操作
+            // 如果 Swift 侧有 pending (由 requestClose/requestCloseOthers/requestCloseAll 设置), 保留
+            return
+        }
+        let pendingIDs = Set(pending.tabIds.compactMap { UUID(uuidString: $0) })
+        let count = Int(pending.connectedTerminalCount)
+
+        // 如果 Swift 侧已设置了 pending 状态, 保留 Swift 侧的(它有 scope 信息)
+        if pendingCloseTabID != nil || pendingBatchClose != nil { return }
+
+        // 从 Rust pending 推断 scope
+        if pendingIDs.count == 1, let id = pendingIDs.first {
+            pendingCloseTabID = id
+        } else if !pendingIDs.isEmpty {
+            // 推断 scope: 如果只有一个标签不在 pending 中, 是 closeOthers
+            let allTabIDs = Set(tabs.map(\.id))
+            let nonPending = allTabIDs.subtracting(pendingIDs)
+            if nonPending.count == 1, let keeping = nonPending.first {
+                pendingBatchClose = PendingBatchClose(scope: .others(keeping: keeping), connectedTerminalCount: count)
+            } else {
+                pendingBatchClose = PendingBatchClose(scope: .all, connectedTerminalCount: count)
+            }
+        }
+    }
+
+    /// 将 FFI 连接状态枚举转换为 Swift 侧枚举。
+    private func connectionStatusFromFFI(_ ffiStatus: ConnectionStatusEnum) -> WorkspaceConnectionStatus {
+        switch ffiStatus {
+        case .inactive: return .inactive
+        case .connecting: return .connecting
+        case .connected: return .connected
+        case .failed: return .failed
         }
     }
 }

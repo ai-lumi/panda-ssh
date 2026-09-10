@@ -1694,6 +1694,8 @@ fn ffi_transfer_upload_and_poll_completes() {
         0,
         Some(PASSWORD.into()),
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -1741,6 +1743,8 @@ fn ffi_transfer_download_and_poll_completes() {
         100_000,
         Some(PASSWORD.into()),
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -1775,6 +1779,8 @@ fn ffi_transfer_cancel_running_task() {
         "/big.bin".into(),
         0,
         Some(PASSWORD.into()),
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -1823,6 +1829,8 @@ fn ffi_transfer_cancel_queued_task() {
             0,
             Some(PASSWORD.into()),
             None,
+            None,
+            None,
         )
         .unwrap();
         ids.push(id);
@@ -1861,6 +1869,8 @@ fn ffi_transfer_retry_failed_task() {
         "/does-not-exist.bin".into(),
         0,
         Some(PASSWORD.into()),
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -1920,6 +1930,8 @@ fn ffi_transfer_retry_non_terminal_task_fails() {
         0,
         Some(PASSWORD.into()),
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -1949,6 +1961,8 @@ fn ffi_transfer_pause_and_resume_running_task() {
         "/pause-running.bin".into(),
         0,
         Some(PASSWORD.into()),
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -2039,6 +2053,8 @@ fn ffi_transfer_list_includes_tasks() {
         0,
         Some(PASSWORD.into()),
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -2085,6 +2101,8 @@ fn ffi_start_transfer_unknown_host_returns_error() {
             "/tmp/x".into(),
             "/remote/x".into(),
             0,
+            None,
+            None,
             None,
             None,
         ),
@@ -3116,6 +3134,8 @@ fn ffi_transfer_pause_terminal_task_returns_error() {
         1,
         Some(PASSWORD.into()),
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -3143,6 +3163,8 @@ fn ffi_transfer_resume_non_paused_task_is_noop() {
         "/q.txt".into(),
         1,
         Some(PASSWORD.into()),
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -3234,6 +3256,7 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
     .unwrap();
     std::fs::write(&file, b"new content").unwrap();
 
+    let revision_before_start = panda_ffi::transfer_change_counter();
     let task_id = start_batch_upload(
         host.id.clone(),
         vec![file.to_string_lossy().into_owned()],
@@ -3244,6 +3267,7 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
     .unwrap();
 
     let record = wait_for_batch_conflict(&task_id);
+    assert!(panda_ffi::transfer_change_counter() > revision_before_start, "批量创建/等待决策必须发布修订");
     let conflict = record.pending_conflict.expect("应携带冲突信息");
     assert_eq!(conflict.item_source, file.to_string_lossy().into_owned());
     assert_eq!(conflict.item_destination, "/remote/a.txt");
@@ -3253,7 +3277,9 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
     assert!(conflict.target_mtime.is_some());
 
     // 决策覆盖 → 任务完成，目标内容被替换。
+    let revision_before_resolve = panda_ffi::transfer_change_counter();
     batch_transfer_resolve_conflict(task_id.clone(), true).unwrap();
+    assert!(panda_ffi::transfer_change_counter() > revision_before_resolve, "决策必须发布修订");
     wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
 
     let back = dir.join("back.txt");
@@ -3475,4 +3501,259 @@ fn ffi_batch_upload_subsystem_rejected_fails() {
         }
     }
     panic!("批量上传 SFTP 子系统被拒应失败");
+}
+
+// ---------------------------------------------------------------------------
+// 非阻塞扫描与异步冲突回调测试
+// ---------------------------------------------------------------------------
+
+/// 1.1 多线程并发调用 scan_local_batch 不死锁，结果正确。
+/// 验证 spawn+oneshot 模式在并发 FFI 调用下正常工作。
+#[test]
+fn ffi_scan_local_batch_concurrent_does_not_deadlock() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-scan-concurrent-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..5 {
+        std::fs::write(dir.join(format!("f{i}.txt")), b"data").unwrap();
+    }
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("g.txt"), b"nested").unwrap();
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let d = dir.clone();
+            std::thread::spawn(move || {
+                scan_local_batch(vec![d.to_string_lossy().into_owned()], "/remote".into()).unwrap()
+            })
+        })
+        .collect();
+
+    for h in handles {
+        let items = h.join().unwrap();
+        // 5 文件 + 1 目录 + 1 子文件 + 1 顶层目录条目 = 8
+        assert!(items.len() >= 7, "应包含至少 7 项，实际 {}", items.len());
+    }
+    cleanup_store();
+}
+
+/// 1.2 scan_local_batch 执行期间不阻塞 runtime：
+/// 从一个线程调用 scan，同时另一个线程可以正常启动批量任务。
+#[test]
+fn ffi_scan_local_batch_does_not_starve_runtime() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "scan-starve");
+
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-scan-starve-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..10 {
+        std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+    }
+
+    // 从一个线程调用 scan_local_batch。
+    let scan_handle = {
+        let d = dir.clone();
+        std::thread::spawn(move || {
+            scan_local_batch(vec![d.to_string_lossy().into_owned()], "/remote".into()).unwrap()
+        })
+    };
+
+    // 同时从主线程启动批量上传——如果 scan 阻塞了 runtime，spawn 的任务无法推进。
+    let file = dir.join("f0.txt");
+    let task_id = start_batch_upload(
+        host.id,
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    let items = scan_handle.join().unwrap();
+    assert!(items.len() >= 10);
+
+    // 批量任务应能正常启动并进入终态。
+    wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
+    cleanup_store();
+}
+
+/// 2.1 批量上传冲突回调：用户选择覆盖（异步 oneshot 通道）。
+#[test]
+fn ffi_batch_upload_conflict_resolve_overwrite_async() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "conflict-ow-async");
+
+    let dir = std::env::temp_dir().join(format!("panda-ffi-conflict-ow-a-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"new content").unwrap();
+
+    // 先接受主机密钥并创建远程目录。
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    // 上传同名文件到远程（制造冲突）。
+    sftp_upload(
+        host.id.clone(),
+        file.to_string_lossy().into_owned(),
+        "/remote/a.txt".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let task_id = start_batch_upload(
+        host.id,
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    let record = wait_for_batch_conflict(&task_id);
+    assert!(record.pending_conflict.is_some());
+
+    // 通过 oneshot 通道选择覆盖。
+    batch_transfer_resolve_conflict(task_id.clone(), true).unwrap();
+    wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
+
+    cleanup_store();
+}
+
+/// 2.1 批量上传冲突回调：用户选择跳过（异步 oneshot 通道）。
+#[test]
+fn ffi_batch_upload_conflict_resolve_skip_async() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "conflict-sk-async");
+
+    let dir = std::env::temp_dir().join(format!("panda-ffi-conflict-sk-a-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("b.txt");
+    std::fs::write(&file, b"new content").unwrap();
+
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    sftp_upload(
+        host.id.clone(),
+        file.to_string_lossy().into_owned(),
+        "/remote/b.txt".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let task_id = start_batch_upload(
+        host.id,
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    let record = wait_for_batch_conflict(&task_id);
+    assert!(record.pending_conflict.is_some());
+
+    // 通过 oneshot 通道选择跳过。
+    batch_transfer_resolve_conflict(task_id.clone(), false).unwrap();
+    wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
+
+    cleanup_store();
+}
+
+/// 2.2 批量传输冲突：取消等待中的冲突 → 跳过（不等待 300 秒超时）。
+/// 验证异步回调在取消时能正确唤醒。
+#[test]
+fn ffi_batch_upload_conflict_cancel_wakes_waiter() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    ensure_store_and_clear_hosts();
+    let port = start_server();
+    let host = save_test_host(port, "conflict-cancel-async");
+
+    let dir = std::env::temp_dir().join(format!(
+        "panda-ffi-conflict-cancel-a-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("c.txt");
+    std::fs::write(&file, b"content").unwrap();
+
+    sftp_create_dir(
+        host.id.clone(),
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+    sftp_upload(
+        host.id.clone(),
+        file.to_string_lossy().into_owned(),
+        "/remote/c.txt".into(),
+        Some(PASSWORD.into()),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let task_id = start_batch_upload(
+        host.id,
+        vec![file.to_string_lossy().into_owned()],
+        "/remote".into(),
+        Some(PASSWORD.into()),
+        None,
+    )
+    .unwrap();
+
+    // 等待冲突出现，然后取消。
+    wait_for_batch_conflict(&task_id);
+    batch_transfer_cancel(task_id.clone()).unwrap();
+
+    // 取消后应迅速进入终态（不等待 300 秒超时）。
+    let start = std::time::Instant::now();
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(50));
+        let record = batch_transfer_status(task_id.clone()).unwrap();
+        if matches!(
+            record.status,
+            BatchTransferStatusEnum::Cancelled | BatchTransferStatusEnum::Failed
+        ) {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "取消后应在合理时间内进入终态"
+            );
+            cleanup_store();
+            return;
+        }
+    }
+    panic!("取消等待中的冲突应迅速进入终态");
 }

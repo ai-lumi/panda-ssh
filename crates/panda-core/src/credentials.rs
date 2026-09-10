@@ -151,6 +151,61 @@ impl CredentialStore {
     }
 }
 
+/// 凭据解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedCredential {
+    /// 凭据可用。
+    Available {
+        password: Option<String>,
+        passphrase: Option<String>,
+    },
+    /// 需要密码(密码认证但未保存)。
+    NeedsPassword,
+    /// 需要私钥口令(公钥认证但口令不可读)。
+    NeedsPassphrase,
+}
+
+/// 解析主机的凭据状态。
+///
+/// - 密码认证:如果 password_ref 存在且可读 → Available(password);否则 NeedsPassword
+/// - 公钥认证:passphrase 可选。如果 passphrase_ref 存在且可读 → Available(passphrase);
+///   如果无 passphrase_ref → Available(None);如果 passphrase_ref 存在但不可读 → NeedsPassphrase
+pub fn credential_resolve(
+    store: &CredentialStore,
+    host: &crate::config::HostConfig,
+) -> Result<ResolvedCredential> {
+    match &host.auth {
+        crate::config::AuthMethod::Password { password_ref } => {
+            match password_ref {
+                Some(r) => match store.get(r)? {
+                    Some(password) => Ok(ResolvedCredential::Available {
+                        password: Some(password),
+                        passphrase: None,
+                    }),
+                    None => Ok(ResolvedCredential::NeedsPassword),
+                },
+                None => Ok(ResolvedCredential::NeedsPassword),
+            }
+        }
+        crate::config::AuthMethod::PublicKey { passphrase_ref, .. } => {
+            match passphrase_ref {
+                Some(r) => match store.get(r) {
+                    Ok(Some(passphrase)) => Ok(ResolvedCredential::Available {
+                        password: None,
+                        passphrase: Some(passphrase),
+                    }),
+                    Ok(None) => Ok(ResolvedCredential::NeedsPassphrase),
+                    Err(_) => Ok(ResolvedCredential::NeedsPassphrase),
+                },
+                None => Ok(ResolvedCredential::Available {
+                    password: None,
+                    passphrase: None,
+                }),
+            }
+        }
+    }
+}
+
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
     Argon2::default()
@@ -318,5 +373,145 @@ mod tests {
             store.is_protected(),
             Err(Error::InvalidCredentialFile)
         ));
+    }
+
+    #[test]
+    fn migration_interruption_does_not_corrupt_data() {
+        // 模拟明文→加密迁移:写入过程中如果加密失败,
+        // 原始明文数据不应被损坏(原子写入保证)。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        let store = CredentialStore::new(path.clone());
+        store
+            .save("host.a.password".into(), "original".into())
+            .unwrap();
+
+        // 用错误的 current_key 尝试加密迁移:
+        // 文件已加密但密钥不对,操作失败。
+        store
+            .set_protection_key(None, Some("correct-key".into()))
+            .unwrap();
+        let reopened = CredentialStore::new(path.clone());
+        let result = reopened.set_protection_key(Some("wrong-key".into()), None);
+        assert!(result.is_err());
+
+        // 用正确密钥仍可恢复原始数据
+        let recovered = CredentialStore::new(path.clone());
+        recovered
+            .set_protection_key(Some("correct-key".into()), None)
+            .unwrap();
+        assert_eq!(
+            recovered.get("host.a.password").unwrap().as_deref(),
+            Some("original")
+        );
+    }
+
+    // --- credential_resolve ---
+
+    fn password_host_with_ref(r: Option<&str>) -> crate::config::HostConfig {
+        crate::config::HostConfig {
+            id: "h1".into(),
+            name: "test".into(),
+            host: "example.com".into(),
+            port: 22,
+            username: "user".into(),
+            auth: crate::config::AuthMethod::Password {
+                password_ref: r.map(str::to_string),
+            },
+            notes: None,
+            group_id: None,
+        }
+    }
+
+    fn key_host_with_ref(r: Option<&str>) -> crate::config::HostConfig {
+        crate::config::HostConfig {
+            id: "h2".into(),
+            name: "test".into(),
+            host: "example.com".into(),
+            port: 22,
+            username: "user".into(),
+            auth: crate::config::AuthMethod::PublicKey {
+                key_path: "/keys/id_ed25519".into(),
+                passphrase_ref: r.map(str::to_string),
+            },
+            notes: None,
+            group_id: None,
+        }
+    }
+
+    #[test]
+    fn credential_resolve_password_with_saved_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("creds.toml"));
+        store.save("ref1".into(), "secret123".into()).unwrap();
+        let host = password_host_with_ref(Some("ref1"));
+        let result = credential_resolve(&store, &host).unwrap();
+        assert_eq!(
+            result,
+            ResolvedCredential::Available {
+                password: Some("secret123".into()),
+                passphrase: None,
+            }
+        );
+    }
+
+    #[test]
+    fn credential_resolve_password_without_saved_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("creds.toml"));
+        // 有 ref 但仓库中没有对应凭据
+        let host = password_host_with_ref(Some("missing"));
+        let result = credential_resolve(&store, &host).unwrap();
+        assert_eq!(result, ResolvedCredential::NeedsPassword);
+    }
+
+    #[test]
+    fn credential_resolve_password_without_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("creds.toml"));
+        let host = password_host_with_ref(None);
+        let result = credential_resolve(&store, &host).unwrap();
+        assert_eq!(result, ResolvedCredential::NeedsPassword);
+    }
+
+    #[test]
+    fn credential_resolve_public_key_without_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("creds.toml"));
+        let host = key_host_with_ref(None);
+        let result = credential_resolve(&store, &host).unwrap();
+        assert_eq!(
+            result,
+            ResolvedCredential::Available {
+                password: None,
+                passphrase: None,
+            }
+        );
+    }
+
+    #[test]
+    fn credential_resolve_public_key_with_saved_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("creds.toml"));
+        store.save("pp_ref".into(), "passphrase123".into()).unwrap();
+        let host = key_host_with_ref(Some("pp_ref"));
+        let result = credential_resolve(&store, &host).unwrap();
+        assert_eq!(
+            result,
+            ResolvedCredential::Available {
+                password: None,
+                passphrase: Some("passphrase123".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn credential_resolve_public_key_with_unreadable_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("creds.toml"));
+        // ref 存在但仓库中没有对应凭据 → 不可读
+        let host = key_host_with_ref(Some("missing_pp"));
+        let result = credential_resolve(&store, &host).unwrap();
+        assert_eq!(result, ResolvedCredential::NeedsPassphrase);
     }
 }

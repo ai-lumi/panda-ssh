@@ -248,6 +248,21 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
 void uniffi_panda_ffi_fn_func_accept_unknown_host_key(RustBuffer host, uint16_t port, RustBuffer key, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONFIG_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONFIG_EXPORT
+RustBuffer uniffi_panda_ffi_fn_func_config_export(RustBuffer output_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONFIG_IMPORT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONFIG_IMPORT
+RustBuffer uniffi_panda_ffi_fn_func_config_import(RustBuffer archive_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_FAILURE_CLASSIFY
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_FAILURE_CLASSIFY
+RustBuffer uniffi_panda_ffi_fn_func_connection_failure_classify(RustBuffer error_code, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_HEALTH_CHECK
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_HEALTH_CHECK
 RustBuffer uniffi_panda_ffi_fn_func_connection_health_check(uint64_t connection_id, RustCallStatus *_Nonnull out_status
@@ -271,6 +286,11 @@ int8_t uniffi_panda_ffi_fn_func_credential_protection_enabled(RustCallStatus *_N
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CREDENTIAL_RESOLVE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CREDENTIAL_RESOLVE
+RustBuffer uniffi_panda_ffi_fn_func_credential_resolve(RustBuffer host_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_CREDENTIAL
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_CREDENTIAL
 void uniffi_panda_ffi_fn_func_delete_credential(RustBuffer reference, RustCallStatus *_Nonnull out_status
@@ -289,6 +309,11 @@ void uniffi_panda_ffi_fn_func_delete_host(RustBuffer id, RustCallStatus *_Nonnul
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_DELETE_SNIPPET
 void uniffi_panda_ffi_fn_func_delete_snippet(RustBuffer name, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_GROUP_PATH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_GROUP_PATH
+RustBuffer uniffi_panda_ffi_fn_func_group_path(RustBuffer group_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_HOST_KEY_STATUS
@@ -324,9 +349,46 @@ RustBuffer uniffi_panda_ffi_fn_func_list_snippets(RustCallStatus *_Nonnull out_s
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_CLEAR
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_CLEAR
+void uniffi_panda_ffi_fn_func_log_clear(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_ENTRIES
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_ENTRIES
+RustBuffer uniffi_panda_ffi_fn_func_log_entries(uint32_t limit, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_WRITE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_WRITE
+void uniffi_panda_ffi_fn_func_log_write(RustBuffer level, RustBuffer module, RustBuffer message, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_MOVE_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_MOVE_GROUP
 void uniffi_panda_ffi_fn_func_move_group(RustBuffer id, RustBuffer new_parent_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_EVALUATE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_EVALUATE
+RustBuffer uniffi_panda_ffi_fn_func_preconnect_evaluate(RustBuffer host_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_TOFU_REGISTER_WAITER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_TOFU_REGISTER_WAITER
+int8_t uniffi_panda_ffi_fn_func_preconnect_tofu_register_waiter(RustBuffer host_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_TOFU_RESET
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_TOFU_RESET
+void uniffi_panda_ffi_fn_func_preconnect_tofu_reset(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_TOFU_RESOLVE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_PRECONNECT_TOFU_RESOLVE
+void uniffi_panda_ffi_fn_func_preconnect_tofu_resolve(RustBuffer host_id, int8_t trusted, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_READ_CREDENTIAL
@@ -352,6 +414,11 @@ void uniffi_panda_ffi_fn_func_save_host(RustBuffer host, RustCallStatus *_Nonnul
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SAVE_SNIPPET
 void uniffi_panda_ffi_fn_func_save_snippet(RustBuffer snippet, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SEARCH_HOSTS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SEARCH_HOSTS
+RustBuffer uniffi_panda_ffi_fn_func_search_hosts(RustBuffer query, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SET_CREDENTIAL_PROTECTION_KEY
@@ -479,9 +546,55 @@ void uniffi_panda_ffi_fn_func_shell_resize(uint64_t handle, uint64_t cols, uint6
 void uniffi_panda_ffi_fn_func_shell_write(uint64_t handle, RustBuffer data, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SIDEBAR_TREE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SIDEBAR_TREE
+RustBuffer uniffi_panda_ffi_fn_func_sidebar_tree(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_TRANSFER
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_TRANSFER
-RustBuffer uniffi_panda_ffi_fn_func_start_transfer(RustBuffer direction, RustBuffer host_id, RustBuffer local_path, RustBuffer remote_path, uint64_t size, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_panda_ffi_fn_func_start_transfer(RustBuffer direction, RustBuffer host_id, RustBuffer local_path, RustBuffer remote_path, uint64_t size, RustBuffer password, RustBuffer passphrase, RustBuffer group_id, RustBuffer group_name, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_CLOSE
+void uniffi_panda_ffi_fn_func_terminal_session_close(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_GET
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_GET
+RustBuffer uniffi_panda_ffi_fn_func_terminal_session_get(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_IS_STALE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_IS_STALE
+int8_t uniffi_panda_ffi_fn_func_terminal_session_is_stale(RustBuffer tab_id, uint32_t request_generation, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_PHASE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_PHASE
+RustBuffer uniffi_panda_ffi_fn_func_terminal_session_phase(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_REGISTER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_REGISTER
+RustBuffer uniffi_panda_ffi_fn_func_terminal_session_register(RustBuffer host_id, RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_RETRY
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_RETRY
+RustBuffer uniffi_panda_ffi_fn_func_terminal_session_retry(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_TRANSITION_TO_FAILED
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_TRANSITION_TO_FAILED
+void uniffi_panda_ffi_fn_func_terminal_session_transition_to_failed(RustBuffer tab_id, RustBuffer category, RustBuffer message, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_TRANSITION_TO_SHELL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TERMINAL_SESSION_TRANSITION_TO_SHELL
+void uniffi_panda_ffi_fn_func_terminal_session_transition_to_shell(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TEST_CONNECTION
@@ -492,6 +605,18 @@ RustBuffer uniffi_panda_ffi_fn_func_test_connection(RustBuffer host_id, RustBuff
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_CANCEL
 void uniffi_panda_ffi_fn_func_transfer_cancel(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_CHANGE_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_CHANGE_COUNTER
+uint64_t uniffi_panda_ffi_fn_func_transfer_change_counter(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_GROUPS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_GROUPS
+RustBuffer uniffi_panda_ffi_fn_func_transfer_groups(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_LIST
@@ -518,6 +643,83 @@ RustBuffer uniffi_panda_ffi_fn_func_transfer_retry(RustBuffer task_id, RustCallS
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_TRANSFER_STATUS
 RustBuffer uniffi_panda_ffi_fn_func_transfer_status(RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_ACTIVE_TAB_ID
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_ACTIVE_TAB_ID
+RustBuffer uniffi_panda_ffi_fn_func_workspace_active_tab_id(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CANCEL_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CANCEL_CLOSE
+void uniffi_panda_ffi_fn_func_workspace_cancel_close(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CLOSE_ALL_TABS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CLOSE_ALL_TABS
+void uniffi_panda_ffi_fn_func_workspace_close_all_tabs(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CLOSE_OTHER_TABS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CLOSE_OTHER_TABS
+void uniffi_panda_ffi_fn_func_workspace_close_other_tabs(RustBuffer keeping_tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CLOSE_TAB
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CLOSE_TAB
+void uniffi_panda_ffi_fn_func_workspace_close_tab(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CONFIRM_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_CONFIRM_CLOSE
+void uniffi_panda_ffi_fn_func_workspace_confirm_close(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_HOST_CONNECTION_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_HOST_CONNECTION_STATUS
+RustBuffer uniffi_panda_ffi_fn_func_workspace_host_connection_status(RustBuffer host_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_OPEN_TAB
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_OPEN_TAB
+RustBuffer uniffi_panda_ffi_fn_func_workspace_open_tab(RustBuffer host_id, RustBuffer kind, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_PENDING_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_PENDING_CLOSE
+RustBuffer uniffi_panda_ffi_fn_func_workspace_pending_close(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_REPORT_CONNECTION_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_REPORT_CONNECTION_STATUS
+void uniffi_panda_ffi_fn_func_workspace_report_connection_status(RustBuffer tab_id, RustBuffer status, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_RESET
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_RESET
+void uniffi_panda_ffi_fn_func_workspace_reset(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_SELECT_TAB
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_SELECT_TAB
+void uniffi_panda_ffi_fn_func_workspace_select_tab(RustBuffer tab_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_SET_HOST_NAMES
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_SET_HOST_NAMES
+void uniffi_panda_ffi_fn_func_workspace_set_host_names(RustBuffer host_names, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_TAB_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_TAB_LIST
+RustBuffer uniffi_panda_ffi_fn_func_workspace_tab_list(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_BATCH_TRANSFER_CANCEL
@@ -559,6 +761,11 @@ RustBuffer uniffi_panda_ffi_fn_func_start_batch_download(RustBuffer host_id, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_BATCH_UPLOAD
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_BATCH_UPLOAD
 RustBuffer uniffi_panda_ffi_fn_func_start_batch_upload(RustBuffer host_id, RustBuffer sources, RustBuffer dest_dir, RustBuffer password, RustBuffer passphrase, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_AGGREGATE_TASK_GROUPS_FFI
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_AGGREGATE_TASK_GROUPS_FFI
+RustBuffer uniffi_panda_ffi_fn_func_aggregate_task_groups_ffi(RustBuffer selected_paths, RustBuffer all_items, RustBuffer direction, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_PANDA_FFI_RUSTBUFFER_ALLOC
@@ -827,6 +1034,24 @@ uint16_t uniffi_panda_ffi_checksum_func_accept_unknown_host_key(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONFIG_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONFIG_EXPORT
+uint16_t uniffi_panda_ffi_checksum_func_config_export(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONFIG_IMPORT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONFIG_IMPORT
+uint16_t uniffi_panda_ffi_checksum_func_config_import(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_FAILURE_CLASSIFY
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_FAILURE_CLASSIFY
+uint16_t uniffi_panda_ffi_checksum_func_connection_failure_classify(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_HEALTH_CHECK
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_HEALTH_CHECK
 uint16_t uniffi_panda_ffi_checksum_func_connection_health_check(void
@@ -851,6 +1076,12 @@ uint16_t uniffi_panda_ffi_checksum_func_credential_protection_enabled(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CREDENTIAL_RESOLVE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CREDENTIAL_RESOLVE
+uint16_t uniffi_panda_ffi_checksum_func_credential_resolve(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_CREDENTIAL
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_CREDENTIAL
 uint16_t uniffi_panda_ffi_checksum_func_delete_credential(void
@@ -872,6 +1103,12 @@ uint16_t uniffi_panda_ffi_checksum_func_delete_host(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_SNIPPET
 uint16_t uniffi_panda_ffi_checksum_func_delete_snippet(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_GROUP_PATH
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_GROUP_PATH
+uint16_t uniffi_panda_ffi_checksum_func_group_path(void
     
 );
 #endif
@@ -911,9 +1148,51 @@ uint16_t uniffi_panda_ffi_checksum_func_list_snippets(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_CLEAR
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_CLEAR
+uint16_t uniffi_panda_ffi_checksum_func_log_clear(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_ENTRIES
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_ENTRIES
+uint16_t uniffi_panda_ffi_checksum_func_log_entries(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_WRITE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_WRITE
+uint16_t uniffi_panda_ffi_checksum_func_log_write(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_MOVE_GROUP
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_MOVE_GROUP
 uint16_t uniffi_panda_ffi_checksum_func_move_group(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_EVALUATE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_EVALUATE
+uint16_t uniffi_panda_ffi_checksum_func_preconnect_evaluate(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_TOFU_REGISTER_WAITER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_TOFU_REGISTER_WAITER
+uint16_t uniffi_panda_ffi_checksum_func_preconnect_tofu_register_waiter(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_TOFU_RESET
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_TOFU_RESET
+uint16_t uniffi_panda_ffi_checksum_func_preconnect_tofu_reset(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_TOFU_RESOLVE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_PRECONNECT_TOFU_RESOLVE
+uint16_t uniffi_panda_ffi_checksum_func_preconnect_tofu_resolve(void
     
 );
 #endif
@@ -944,6 +1223,12 @@ uint16_t uniffi_panda_ffi_checksum_func_save_host(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_SNIPPET
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SAVE_SNIPPET
 uint16_t uniffi_panda_ffi_checksum_func_save_snippet(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SEARCH_HOSTS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SEARCH_HOSTS
+uint16_t uniffi_panda_ffi_checksum_func_search_hosts(void
     
 );
 #endif
@@ -1097,9 +1382,63 @@ uint16_t uniffi_panda_ffi_checksum_func_shell_write(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SIDEBAR_TREE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_SIDEBAR_TREE
+uint16_t uniffi_panda_ffi_checksum_func_sidebar_tree(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_TRANSFER
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_TRANSFER
 uint16_t uniffi_panda_ffi_checksum_func_start_transfer(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_CLOSE
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_GET
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_GET
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_get(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_IS_STALE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_IS_STALE
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_is_stale(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_PHASE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_PHASE
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_phase(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_REGISTER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_REGISTER
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_register(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_RETRY
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_RETRY
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_retry(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_TRANSITION_TO_FAILED
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_TRANSITION_TO_FAILED
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_transition_to_failed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_TRANSITION_TO_SHELL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TERMINAL_SESSION_TRANSITION_TO_SHELL
+uint16_t uniffi_panda_ffi_checksum_func_terminal_session_transition_to_shell(void
     
 );
 #endif
@@ -1112,6 +1451,18 @@ uint16_t uniffi_panda_ffi_checksum_func_test_connection(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_CANCEL
 uint16_t uniffi_panda_ffi_checksum_func_transfer_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_CHANGE_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_CHANGE_COUNTER
+uint16_t uniffi_panda_ffi_checksum_func_transfer_change_counter(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_GROUPS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_GROUPS
+uint16_t uniffi_panda_ffi_checksum_func_transfer_groups(void
     
 );
 #endif
@@ -1142,6 +1493,90 @@ uint16_t uniffi_panda_ffi_checksum_func_transfer_retry(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_TRANSFER_STATUS
 uint16_t uniffi_panda_ffi_checksum_func_transfer_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_ACTIVE_TAB_ID
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_ACTIVE_TAB_ID
+uint16_t uniffi_panda_ffi_checksum_func_workspace_active_tab_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CANCEL_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CANCEL_CLOSE
+uint16_t uniffi_panda_ffi_checksum_func_workspace_cancel_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CLOSE_ALL_TABS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CLOSE_ALL_TABS
+uint16_t uniffi_panda_ffi_checksum_func_workspace_close_all_tabs(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CLOSE_OTHER_TABS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CLOSE_OTHER_TABS
+uint16_t uniffi_panda_ffi_checksum_func_workspace_close_other_tabs(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CLOSE_TAB
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CLOSE_TAB
+uint16_t uniffi_panda_ffi_checksum_func_workspace_close_tab(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CONFIRM_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_CONFIRM_CLOSE
+uint16_t uniffi_panda_ffi_checksum_func_workspace_confirm_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_HOST_CONNECTION_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_HOST_CONNECTION_STATUS
+uint16_t uniffi_panda_ffi_checksum_func_workspace_host_connection_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_OPEN_TAB
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_OPEN_TAB
+uint16_t uniffi_panda_ffi_checksum_func_workspace_open_tab(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_PENDING_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_PENDING_CLOSE
+uint16_t uniffi_panda_ffi_checksum_func_workspace_pending_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_REPORT_CONNECTION_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_REPORT_CONNECTION_STATUS
+uint16_t uniffi_panda_ffi_checksum_func_workspace_report_connection_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_RESET
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_RESET
+uint16_t uniffi_panda_ffi_checksum_func_workspace_reset(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_SELECT_TAB
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_SELECT_TAB
+uint16_t uniffi_panda_ffi_checksum_func_workspace_select_tab(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_SET_HOST_NAMES
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_SET_HOST_NAMES
+uint16_t uniffi_panda_ffi_checksum_func_workspace_set_host_names(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_TAB_LIST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_TAB_LIST
+uint16_t uniffi_panda_ffi_checksum_func_workspace_tab_list(void
     
 );
 #endif
@@ -1190,6 +1625,12 @@ uint16_t uniffi_panda_ffi_checksum_func_start_batch_download(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_BATCH_UPLOAD
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_START_BATCH_UPLOAD
 uint16_t uniffi_panda_ffi_checksum_func_start_batch_upload(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_AGGREGATE_TASK_GROUPS_FFI
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_AGGREGATE_TASK_GROUPS_FFI
+uint16_t uniffi_panda_ffi_checksum_func_aggregate_task_groups_ffi(void
     
 );
 #endif

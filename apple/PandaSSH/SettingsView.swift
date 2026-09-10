@@ -255,29 +255,32 @@ struct SettingsView: View {
     // MARK: - 导出
 
     private func exportConfig() {
-        do {
-            let data = try ConfigExporter.export(configDir: AppPaths.configDirectory)
-            #if os(macOS)
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = "panda-config.pandassh"
-            panel.allowedContentTypes = [UTType(filenameExtension: "pandassh")!]
-            if panel.runModal() == .OK, let url = panel.url {
-                try data.write(to: url)
+        #if os(macOS)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "panda-config.pandassh"
+        panel.allowedContentTypes = [UTType(filenameExtension: "pandassh")!]
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                _ = try configExport(outputPath: url.path)
+            } catch {
+                importError = "导出失败: \(error.localizedDescription)"
             }
-            #else
-            // iPadOS: 写入临时目录并分享
-            let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("panda-config.pandassh")
-            try data.write(to: tempURL)
+        }
+        #else
+        // iPadOS: 写入临时目录并分享
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("panda-config.pandassh")
+        do {
+            _ = try configExport(outputPath: tempURL.path)
             let activity = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
             if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                let root = scene.windows.first?.rootViewController {
                 root.present(activity, animated: true)
             }
-            #endif
         } catch {
             importError = "导出失败: \(error.localizedDescription)"
         }
+        #endif
     }
 
     // MARK: - 导入处理
@@ -285,18 +288,20 @@ struct SettingsView: View {
     private func handleImportResult(_ result: Result<Data, Error>) {
         switch result {
         case .success(let data):
+            // 将数据写入临时文件，然后调用 Rust FFI 导入
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("import-\(UUID().uuidString).pandassh")
             do {
-                let importResult = try ConfigImporter.import(pandasshData: data, configDir: AppPaths.configDirectory)
+                try data.write(to: tempURL)
+                let importResult = try configImport(archivePath: tempURL.path)
+                try? FileManager.default.removeItem(at: tempURL)
                 model.reload()
-                let backupInfo = importResult.backedUpFiles.isEmpty
+                let backupInfo = importResult.backupFiles.isEmpty
                     ? ""
-                    : "\n已备份文件: \(importResult.backedUpFiles.joined(separator: ", "))"
+                    : "\n已备份文件: \(importResult.backupFiles.joined(separator: ", "))"
                 importSuccess = "配置导入成功。密码/口令未包含在归档中，需重新输入。\(backupInfo)"
-            } catch ConfigImporter.ImportError.versionMismatch {
-                importError = "配置格式版本过高，请升级 App 后重试。"
-            } catch ConfigImporter.ImportError.invalidArchive {
-                importError = "配置文件损坏或格式不正确。"
             } catch {
+                try? FileManager.default.removeItem(at: tempURL)
                 importError = "导入失败: \(error.localizedDescription)"
             }
         case .failure(let error):

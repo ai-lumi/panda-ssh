@@ -828,6 +828,77 @@ impl Drop for ShellSession {
     }
 }
 
+/// 连接失败的分类。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailureCategory {
+    /// 连接超时
+    Timeout,
+    /// 认证失败
+    AuthFailed,
+    /// 缺少凭据(密码或口令未保存)
+    MissingCredential,
+    /// 主机密钥不匹配
+    HostKeyMismatch,
+    /// 其他错误
+    Other,
+}
+
+/// 连接失败的分类记录,包含分类、标题和详情。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFailureRecord {
+    pub category: FailureCategory,
+    pub title: String,
+    pub detail: String,
+}
+
+/// 将 `Error` 分类为连接失败记录。
+pub fn connection_failure_classify(error: &Error) -> ConnectionFailureRecord {
+    match error {
+        Error::Timeout => ConnectionFailureRecord {
+            category: FailureCategory::Timeout,
+            title: "连接超时".into(),
+            detail: "服务器在规定时间内未响应,请检查网络连接或服务器状态。".into(),
+        },
+        Error::AuthFailed => ConnectionFailureRecord {
+            category: FailureCategory::AuthFailed,
+            title: "认证失败".into(),
+            detail: "用户名或密码不正确,请检查凭据。".into(),
+        },
+        Error::MissingPassphrase
+        | Error::CredentialProtectionKeyRequired
+        | Error::CredentialUnlockFailed
+        | Error::InvalidCredentialFile => ConnectionFailureRecord {
+            category: FailureCategory::MissingCredential,
+            title: "缺少凭据".into(),
+            detail: format!("{error}"),
+        },
+        Error::HostKeyMismatch {
+            host,
+            stored_fingerprint,
+            presented_fingerprint,
+        } => ConnectionFailureRecord {
+            category: FailureCategory::HostKeyMismatch,
+            title: "主机密钥变更".into(),
+            detail: format!(
+                "主机 {host} 的密钥与已存储的不匹配。\n\
+                 已存储: {stored_fingerprint}\n\
+                 当前: {presented_fingerprint}\n\
+                 这可能是中间人攻击,也可能是服务器重装。"
+            ),
+        },
+        Error::UnknownHostKey { .. } => ConnectionFailureRecord {
+            category: FailureCategory::Other,
+            title: "未知主机密钥".into(),
+            detail: format!("{error}"),
+        },
+        other => ConnectionFailureRecord {
+            category: FailureCategory::Other,
+            title: "连接失败".into(),
+            detail: format!("{other}"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,5 +1053,97 @@ mod tests {
         handler.record(|f| f.io_error = Some("healthy".into()));
         let guard = failure.lock().unwrap();
         assert_eq!(guard.io_error.as_deref(), Some("healthy"));
+    }
+
+    // --- connection_failure_classify ---
+
+    #[test]
+    fn timeout_error_classifies_as_timeout() {
+        let record = connection_failure_classify(&Error::Timeout);
+        assert_eq!(record.category, FailureCategory::Timeout);
+        assert!(!record.title.is_empty());
+    }
+
+    #[test]
+    fn auth_failed_classifies_as_auth_failed() {
+        let record = connection_failure_classify(&Error::AuthFailed);
+        assert_eq!(record.category, FailureCategory::AuthFailed);
+    }
+
+    #[test]
+    fn missing_passphrase_classifies_as_missing_credential() {
+        let record = connection_failure_classify(&Error::MissingPassphrase);
+        assert_eq!(record.category, FailureCategory::MissingCredential);
+    }
+
+    #[test]
+    fn credential_protection_key_required_classifies_as_missing_credential() {
+        let record = connection_failure_classify(&Error::CredentialProtectionKeyRequired);
+        assert_eq!(record.category, FailureCategory::MissingCredential);
+    }
+
+    #[test]
+    fn credential_unlock_failed_classifies_as_missing_credential() {
+        let record = connection_failure_classify(&Error::CredentialUnlockFailed);
+        assert_eq!(record.category, FailureCategory::MissingCredential);
+    }
+
+    #[test]
+    fn invalid_credential_file_classifies_as_missing_credential() {
+        let record = connection_failure_classify(&Error::InvalidCredentialFile);
+        assert_eq!(record.category, FailureCategory::MissingCredential);
+    }
+
+    #[test]
+    fn host_key_mismatch_classifies_as_host_key_mismatch() {
+        let error = Error::HostKeyMismatch {
+            host: "example.com:22".into(),
+            stored_fingerprint: "SHA256:aaa".into(),
+            presented_fingerprint: "SHA256:bbb".into(),
+        };
+        let record = connection_failure_classify(&error);
+        assert_eq!(record.category, FailureCategory::HostKeyMismatch);
+        assert!(record.detail.contains("example.com"));
+        assert!(record.detail.contains("SHA256:aaa"));
+        assert!(record.detail.contains("SHA256:bbb"));
+    }
+
+    #[test]
+    fn other_error_classifies_as_other() {
+        let error = Error::Other("something went wrong".into());
+        let record = connection_failure_classify(&error);
+        assert_eq!(record.category, FailureCategory::Other);
+        assert!(record.detail.contains("something went wrong"));
+    }
+
+    #[test]
+    fn io_error_classifies_as_other() {
+        let error = Error::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk fail"));
+        let record = connection_failure_classify(&error);
+        assert_eq!(record.category, FailureCategory::Other);
+    }
+
+    #[test]
+    fn shell_session_closed_classifies_as_other() {
+        let record = connection_failure_classify(&Error::ShellSessionClosed);
+        assert_eq!(record.category, FailureCategory::Other);
+    }
+
+    #[test]
+    fn cancelled_classifies_as_other() {
+        let record = connection_failure_classify(&Error::Cancelled);
+        assert_eq!(record.category, FailureCategory::Other);
+    }
+
+    #[test]
+    fn unknown_host_key_classifies_as_other() {
+        let error = Error::UnknownHostKey {
+            host: "example.com".into(),
+            presented: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:abc".into(),
+        };
+        let record = connection_failure_classify(&error);
+        assert_eq!(record.category, FailureCategory::Other);
+        assert!(record.title.contains("未知主机密钥"));
     }
 }

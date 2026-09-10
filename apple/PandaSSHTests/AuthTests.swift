@@ -84,6 +84,57 @@ final class AuthTests: XCTestCase {
         XCTAssertEqual(resolver.resolve(for: host, manualSecret: "phrase"), .available("phrase"))
     }
 
+    // MARK: - connectionSecrets 组合场景
+
+    func testConnectionSecretsPasswordAuthReturnsPasswordOnly() {
+        let resolver = CredentialResolver(readSecret: { ref in
+            ref == "host.h1.password" ? "pw123" : nil
+        })
+        let host = makeHost(auth: .password, saved: true)
+
+        let secrets = resolver.connectionSecrets(for: host)
+        XCTAssertEqual(secrets?.password, "pw123")
+        XCTAssertNil(secrets?.passphrase)
+    }
+
+    func testConnectionSecretsPublicKeyAuthReturnsPassphraseOnly() {
+        let resolver = CredentialResolver(readSecret: { ref in
+            ref == "host.h1.passphrase" ? "pp456" : nil
+        })
+        let host = makeHost(auth: .publicKey, saved: true, keyPath: "~/.ssh/id")
+
+        let secrets = resolver.connectionSecrets(for: host)
+        XCTAssertNil(secrets?.password)
+        XCTAssertEqual(secrets?.passphrase, "pp456")
+    }
+
+    func testConnectionSecretsPublicKeyWithEmptyPassphraseReturnsNilTuple() {
+        let resolver = CredentialResolver(readSecret: { _ in nil })
+        let host = makeHost(auth: .publicKey, saved: false, keyPath: "~/.ssh/id")
+
+        let secrets = resolver.connectionSecrets(for: host)
+        XCTAssertNil(secrets?.password)
+        XCTAssertNil(secrets?.passphrase)
+    }
+
+    func testConnectionSecretsManualOverridesSaved() {
+        let resolver = CredentialResolver(readSecret: { ref in
+            ref == "host.h1.password" ? "saved" : nil
+        })
+        let host = makeHost(auth: .password, saved: true)
+
+        let secrets = resolver.connectionSecrets(for: host, manualSecret: "manual")
+        XCTAssertEqual(secrets?.password, "manual")
+        XCTAssertNil(secrets?.passphrase)
+    }
+
+    func testConnectionSecretsReturnsNilWhenCredentialMissing() {
+        let resolver = CredentialResolver(readSecret: { _ in nil })
+        let host = makeHost(auth: .password, saved: false)
+
+        XCTAssertNil(resolver.connectionSecrets(for: host))
+    }
+
     // MARK: - KeyPicker fake
 
     func testFakeKeyPickerReturnsConfiguredPath() async {

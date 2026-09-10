@@ -1,0 +1,424 @@
+//! 配置导入导出：将配置目录打包为 ZIP 归档，或从归档恢复。
+
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// 导出归档的 manifest。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportManifest {
+    pub version: u32,
+    pub timestamp: String,
+    pub device_name: String,
+    pub file_count: u32,
+}
+
+/// 导入结果。
+#[derive(Debug, Clone)]
+pub struct ImportResult {
+    pub backup_files: Vec<String>,
+    pub host_count: u32,
+    pub group_count: u32,
+    pub snippet_count: u32,
+}
+
+/// 导入错误。
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("archive is missing manifest.json")]
+    MissingManifest,
+    #[error("manifest version {0} is not supported (expected 1)")]
+    VersionMismatch(u32),
+    #[error("archive is missing required file: {0}")]
+    MissingRequiredFile(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("zip error: {0}")]
+    Zip(#[from] zip::result::ZipError),
+}
+
+const CURRENT_VERSION: u32 = 1;
+const REQUIRED_FILES: &[&str] = &["hosts.toml", "groups.toml"];
+
+/// 将配置目录导出为 ZIP 归档。
+///
+/// `config_dir` 是配置根目录（包含 hosts.toml、groups.toml、known_hosts、snippets/）。
+/// `output_path` 是输出 ZIP 文件路径。
+pub fn config_export(config_dir: &Path, output_path: &Path) -> Result<ExportManifest, ImportError> {
+    let file = fs::File::create(output_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut file_count = 0u32;
+
+    // 写入必需配置文件
+    for name in &["hosts.toml", "groups.toml", "known_hosts"] {
+        let path = config_dir.join(name);
+        if path.exists() {
+            zip.start_file(name, options)?;
+            let mut content = Vec::new();
+            fs::File::open(&path)?.read_to_end(&mut content)?;
+            zip.write_all(&content)?;
+            file_count += 1;
+        }
+    }
+
+    // 写入 snippets 目录
+    let snippets_dir = config_dir.join("snippets");
+    if snippets_dir.is_dir() {
+        for entry in fs::read_dir(&snippets_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let name = format!("snippets/{}", path.file_name().unwrap().to_string_lossy());
+                zip.start_file(&name, options)?;
+                let mut content = Vec::new();
+                fs::File::open(&path)?.read_to_end(&mut content)?;
+                zip.write_all(&content)?;
+                file_count += 1;
+            }
+        }
+    }
+
+    // 生成并写入 manifest
+    let device_name = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let timestamp = chrono_now();
+    let manifest = ExportManifest {
+        version: CURRENT_VERSION,
+        timestamp,
+        device_name,
+        file_count,
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    zip.start_file("manifest.json", options)?;
+    zip.write_all(manifest_json.as_bytes())?;
+
+    zip.finish()?;
+    Ok(manifest)
+}
+
+/// 从 ZIP 归档导入配置到配置目录。
+///
+/// 导入前会对已有文件进行带时间戳的备份。
+pub fn config_import(config_dir: &Path, archive_path: &Path) -> Result<ImportResult, ImportError> {
+    let file = fs::File::open(archive_path)?;
+    let mut zip = zip::ZipArchive::new(file)?;
+
+    // 读取并校验 manifest
+    let manifest: ExportManifest = {
+        let mut manifest_file = zip
+            .by_name("manifest.json")
+            .map_err(|_| ImportError::MissingManifest)?;
+        let mut json = String::new();
+        manifest_file.read_to_string(&mut json)?;
+        serde_json::from_str(&json)
+            .map_err(|_| ImportError::MissingManifest)
+            .and_then(|m: ExportManifest| {
+                if m.version != CURRENT_VERSION {
+                    Err(ImportError::VersionMismatch(m.version))
+                } else {
+                    Ok(m)
+                }
+            })?
+    };
+
+    // 校验必需文件
+    let has_required = REQUIRED_FILES.iter().all(|req| zip.file_names().any(|n| n == *req));
+    if !has_required {
+        let missing = REQUIRED_FILES
+            .iter()
+            .find(|req| !zip.file_names().any(|n| n == **req))
+            .unwrap();
+        return Err(ImportError::MissingRequiredFile(missing.to_string()));
+    }
+
+    fs::create_dir_all(config_dir)?;
+
+    let mut backup_files = Vec::new();
+    let mut snippet_count = 0u32;
+    let timestamp = backup_timestamp();
+
+    // 提取所有文件
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        let name = entry.name().to_string();
+
+        // 跳过 manifest
+        if name == "manifest.json" {
+            continue;
+        }
+
+        let target_path = config_dir.join(&name);
+
+        // 备份已有文件
+        if target_path.exists() {
+            let backup_name = format!(
+                "{}.bak.{}",
+                target_path.file_name().unwrap().to_string_lossy(),
+                timestamp
+            );
+            let backup_path = config_dir.join(&backup_name);
+            fs::rename(&target_path, &backup_path)?;
+            backup_files.push(backup_name);
+        }
+
+        // 创建父目录
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // 写入文件
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content)?;
+        fs::write(&target_path, &content)?;
+
+        if name.starts_with("snippets/") {
+            snippet_count += 1;
+        }
+    }
+
+    // 统计主机和分组数量（简单计数）
+    let host_count = count_toml_entries(config_dir.join("hosts.toml"), "id");
+    let group_count = count_toml_entries(config_dir.join("groups.toml"), "id");
+
+    let _ = manifest; // manifest 已校验
+    Ok(ImportResult {
+        backup_files,
+        host_count,
+        group_count,
+        snippet_count,
+    })
+}
+
+/// 简单时间戳（不依赖 chrono crate）。
+fn chrono_now() -> String {
+    use std::time::SystemTime;
+    let dur = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    // 简单 ISO 8601 格式（UTC）
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // 从 Unix epoch (1970-01-01) 计算年月日
+    let (year, month, day) = days_to_ymd(days as i64);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+fn backup_timestamp() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}", secs)
+}
+
+/// 将 Unix 天数转换为 (year, month, day)。
+fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
+    // 简化算法
+    let mut year = 1970;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap_year(year);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u32;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days as u32 + 1)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// 简单统计 TOML 文件中某个键出现的次数（用于估算主机/分组数量）。
+fn count_toml_entries(path: PathBuf, key: &str) -> u32 {
+    match fs::read_to_string(&path) {
+        Ok(content) => content.matches(&format!("\n{} = ", key)).count() as u32
+            + if content.starts_with(&format!("{} = ", key)) { 1 } else { 0 },
+        Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn setup_config_dir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("hosts.toml"),
+            "[[hosts]]\nid = \"h1\"\nname = \"test\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("groups.toml"),
+            "[[groups]]\nid = \"g1\"\nname = \"prod\"\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("known_hosts"), "example.com ssh-ed25519 AAAA\n").unwrap();
+        let snippets = dir.path().join("snippets");
+        fs::create_dir(&snippets).unwrap();
+        fs::write(snippets.join("test.md"), "---\ntitle: Test\n---\nHello\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn export_creates_valid_zip() {
+        let dir = setup_config_dir();
+        let output = dir.path().join("export.zip");
+        let manifest = config_export(dir.path(), &output).unwrap();
+        assert_eq!(manifest.version, 1);
+        assert!(manifest.file_count >= 4); // hosts + groups + known_hosts + 1 snippet
+        assert!(!manifest.device_name.is_empty());
+        assert!(!manifest.timestamp.is_empty());
+
+        // 验证 ZIP 内容
+        let file = fs::File::open(&output).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert!(zip.by_name("manifest.json").is_ok());
+        assert!(zip.by_name("hosts.toml").is_ok());
+        assert!(zip.by_name("groups.toml").is_ok());
+        assert!(zip.by_name("known_hosts").is_ok());
+        assert!(zip.by_name("snippets/test.md").is_ok());
+    }
+
+    #[test]
+    fn import_restores_files() {
+        let src = setup_config_dir();
+        let zip_path = src.path().join("export.zip");
+        config_export(src.path(), &zip_path).unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let result = config_import(dst.path(), &zip_path).unwrap();
+        assert!(dst.path().join("hosts.toml").exists());
+        assert!(dst.path().join("groups.toml").exists());
+        assert!(dst.path().join("known_hosts").exists());
+        assert!(dst.path().join("snippets/test.md").exists());
+        assert_eq!(result.snippet_count, 1);
+    }
+
+    #[test]
+    fn import_backs_up_existing_files() {
+        let src = setup_config_dir();
+        let zip_path = src.path().join("export.zip");
+        config_export(src.path(), &zip_path).unwrap();
+
+        let dst = setup_config_dir(); // 已有文件
+        let result = config_import(dst.path(), &zip_path).unwrap();
+        assert!(!result.backup_files.is_empty());
+    }
+
+    #[test]
+    fn import_rejects_version_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("bad.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(b"{\"version\": 99, \"timestamp\": \"\", \"device_name\": \"\", \"file_count\": 0}")
+            .unwrap();
+        zip.start_file("hosts.toml", options).unwrap();
+        zip.write_all(b"").unwrap();
+        zip.start_file("groups.toml", options).unwrap();
+        zip.write_all(b"").unwrap();
+        zip.finish().unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let err = config_import(dst.path(), &zip_path).unwrap_err();
+        assert!(matches!(err, ImportError::VersionMismatch(99)));
+    }
+
+    #[test]
+    fn import_rejects_missing_required_file() {
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("incomplete.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(b"{\"version\": 1, \"timestamp\": \"\", \"device_name\": \"\", \"file_count\": 0}")
+            .unwrap();
+        zip.start_file("hosts.toml", options).unwrap();
+        zip.write_all(b"").unwrap();
+        // 缺少 groups.toml
+        zip.finish().unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let err = config_import(dst.path(), &zip_path).unwrap_err();
+        assert!(matches!(err, ImportError::MissingRequiredFile(_)));
+    }
+
+    #[test]
+    fn import_rejects_missing_manifest() {
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("no_manifest.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("hosts.toml", options).unwrap();
+        zip.write_all(b"").unwrap();
+        zip.finish().unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let err = config_import(dst.path(), &zip_path).unwrap_err();
+        assert!(matches!(err, ImportError::MissingManifest));
+    }
+
+    #[test]
+    fn non_ascii_filenames_survive_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("hosts.toml"), "").unwrap();
+        fs::write(dir.path().join("groups.toml"), "").unwrap();
+        let snippets = dir.path().join("snippets");
+        fs::create_dir(&snippets).unwrap();
+        fs::write(snippets.join("笔记.md"), "# 测试\n").unwrap();
+
+        let zip_path = dir.path().join("unicode.zip");
+        config_export(dir.path(), &zip_path).unwrap();
+
+        let dst = TempDir::new().unwrap();
+        config_import(dst.path(), &zip_path).unwrap();
+        let content = fs::read_to_string(dst.path().join("snippets/笔记.md")).unwrap();
+        assert_eq!(content, "# 测试\n");
+    }
+
+    #[test]
+    fn days_to_ymd_known_dates() {
+        // 1970-01-01 = day 0
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+        // 2000-01-01 = day 10957
+        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
+        // 2026-09-09
+        assert_eq!(days_to_ymd(20705), (2026, 9, 9));
+    }
+}

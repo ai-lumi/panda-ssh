@@ -327,4 +327,31 @@ final class LoggerFileTests: XCTestCase {
         }
         wait(for: [exp], timeout: 2)
     }
+
+    func testConcurrentWritesDoNotCrashOrLoseEntries() {
+        let logger = Logger(configDirectory: nil)
+        let count = 100
+        let queue = DispatchQueue(label: "logger-concurrent", attributes: .concurrent)
+        let group = DispatchGroup()
+
+        for i in 0..<count {
+            group.enter()
+            queue.async {
+                logger.info("msg-\(i)", module: "Test")
+                group.leave()
+            }
+        }
+        group.wait()
+
+        // @Published entries 通过 DispatchQueue.main.async 更新,等待主线程处理
+        let exp = expectation(description: "entries updated on main thread")
+        DispatchQueue.main.async {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2)
+
+        XCTAssertEqual(logger.entries.count, count)
+        let messages = Set(logger.entries.map(\.message))
+        XCTAssertEqual(messages.count, count, "并发写入不应丢失条目")
+    }
 }

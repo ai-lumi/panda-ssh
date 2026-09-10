@@ -20,30 +20,17 @@ struct SidebarNode: Identifiable {
     }
 }
 
-/// 由分组与主机构建侧栏节点树:根级分组在前(保持数组顺序)、根级主机在后;
-/// 分组内先子分组后主机。悬空引用(分组指向不存在的 parent、主机指向不存在的
-/// 分组)一律按根级降级,与 GroupTree 的防御语义一致。
-enum SidebarTree {
-    static func build(hosts: [HostEntry], groups: [HostGroup]) -> [SidebarNode] {
-        func hostNode(_ host: HostEntry) -> SidebarNode {
-            SidebarNode(id: SidebarNode.hostID(host.id), group: nil, host: host, children: nil)
-        }
-        func groupNode(_ group: HostGroup) -> SidebarNode {
-            let subgroups = GroupTree.children(of: group.id, in: groups).map(groupNode)
-            let members = hosts.filter { $0.groupID == group.id }.map(hostNode)
-            let kids = subgroups + members
-            return SidebarNode(
-                id: SidebarNode.groupID(group.id), group: group, host: nil,
-                children: kids.isEmpty ? nil : kids
-            )
-        }
-        let rootGroups = GroupTree.roots(of: groups).map(groupNode)
-        let rootHosts = hosts
-            .filter { host in
-                guard let gid = host.groupID else { return true }
-                return !groups.contains { $0.id == gid }
-            }
-            .map(hostNode)
-        return rootGroups + rootHosts
+/// 从 FFI 返回的侧栏树记录转换为 UI 节点。
+extension SidebarNode {
+    static func from(ffiRecord: SidebarNodeFfiRecord) -> SidebarNode {
+        let host = ffiRecord.host.map { HostEntry(record: $0) }
+        let group = ffiRecord.group.map { HostGroup(record: $0) }
+        let children = ffiRecord.children?.map { SidebarNode.from(ffiRecord: $0) }
+        return SidebarNode(
+            id: ffiRecord.id,
+            group: group,
+            host: host,
+            children: children
+        )
     }
 }

@@ -820,7 +820,8 @@ private final class ControlledTransferSource: TransferSource {
 
     func enqueueTransfer(
         direction: TransferDirection, hostID: String, localPath: String,
-        remotePath: String, size: UInt64, password: String?, passphrase: String?
+        remotePath: String, size: UInt64, password: String?, passphrase: String?,
+        groupID: String?, groupName: String?
     ) -> String { UUID().uuidString }
 
     func cancelTransfer(id: String) {}

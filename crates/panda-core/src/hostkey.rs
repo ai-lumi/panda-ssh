@@ -599,4 +599,48 @@ mod tests {
         assert!(!line_matches_host("", "example.com"));
         assert!(!line_matches_host("# comment", "example.com"));
     }
+
+    #[test]
+    fn empty_file_yields_no_entries_and_unknown_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, "").unwrap();
+        let kh = KnownHosts::new(path);
+        assert!(kh.load().unwrap().is_empty());
+        assert_eq!(
+            kh.status("example.com", 22).unwrap(),
+            KnownHostStatus::Unknown
+        );
+        assert_eq!(
+            kh.check("example.com", 22, KEY_A).unwrap(),
+            HostKeyStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn file_with_only_comments_and_blank_lines_yields_no_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, "# comment 1\n\n# comment 2\n  \n").unwrap();
+        let kh = KnownHosts::new(path);
+        assert!(kh.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nonexistent_file_is_unknown_and_store_creates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let kh = KnownHosts::new(path.clone());
+        assert!(!path.exists());
+        assert_eq!(
+            kh.status("example.com", 22).unwrap(),
+            KnownHostStatus::Unknown
+        );
+        kh.store("example.com", 22, KEY_A).unwrap();
+        assert!(path.exists());
+        assert!(matches!(
+            kh.status("example.com", 22).unwrap(),
+            KnownHostStatus::Known { .. }
+        ));
+    }
 }

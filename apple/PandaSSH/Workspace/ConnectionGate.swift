@@ -28,7 +28,7 @@ final class PreconnectGate: ObservableObject {
     private var evaluated = false
 
     /// 凭据解析器；生产环境读取本地凭据文件，测试可注入内存 fake。
-    var credentialResolver = CredentialResolver.localStore()
+    var credentialResolver = CredentialResolver()
 
     /// 打开标签时评估一次;重复调用为 no-op。返回决策结果(便于测试与日志)。
     /// 供 Mock 模式使用;真实模式调用 `evaluateAsync`。
@@ -189,21 +189,37 @@ enum ConnectionFailure: Equatable {
     case other(String)
 
     init(error: Error) {
-        guard let panda = error as? PandaError else {
-            self = .other(error.localizedDescription)
+        // 未知主机密钥需要特殊处理（携带呈现的密钥信息）
+        if let panda = error as? PandaError,
+           case .UnknownHostKey(_, let presented, let fingerprint) = panda {
+            self = .unknownHostKey(PresentedHostKey(key: presented, fingerprint: fingerprint))
             return
         }
-        switch panda {
-        case .Timeout:
-            self = .timeout
-        case .AuthFailed:
-            self = .authenticationFailed
-        case .MissingPassword, .MissingPassphrase:
-            self = .missingCredential
-        case .UnknownHostKey(_, let presented, let fingerprint):
-            self = .unknownHostKey(PresentedHostKey(key: presented, fingerprint: fingerprint))
-        default:
-            self = .other(error.localizedDescription)
+        // 其他错误通过 Rust 后端分类
+        let errorCode: String
+        if let panda = error as? PandaError {
+            switch panda {
+            case .Timeout: errorCode = "Timeout"
+            case .AuthFailed: errorCode = "AuthFailed"
+            case .MissingPassword: errorCode = "MissingPassword"
+            case .MissingPassphrase: errorCode = "MissingPassphrase"
+            case .CredentialProtectionKeyRequired: errorCode = "CredentialProtectionKeyRequired"
+            case .CredentialUnlockFailed: errorCode = "CredentialUnlockFailed"
+            case .InvalidCredentialFile: errorCode = "InvalidCredentialFile"
+            case .Cancelled: errorCode = "Cancelled"
+            case .ShellSessionClosed: errorCode = "ShellSessionClosed"
+            default: errorCode = "Other"
+            }
+        } else {
+            errorCode = "Other"
+        }
+        let record = connectionFailureClassify(errorCode: errorCode)
+        switch record.category {
+        case .timeout: self = .timeout
+        case .authFailed: self = .authenticationFailed
+        case .missingCredential: self = .missingCredential
+        case .hostKeyMismatch: self = .other(record.detail)
+        case .other: self = .other(record.detail)
         }
     }
 

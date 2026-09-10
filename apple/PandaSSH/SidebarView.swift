@@ -88,7 +88,8 @@ struct SidebarView: View {
     }
 
     private var matchedHosts: [HostEntry] {
-        HostSearch.filter(hosts: model.hosts, groups: model.groups, query: searchText)
+        let records = (try? searchHosts(query: searchText)) ?? []
+        return records.map { HostEntry(record: $0) }
     }
 
     var body: some View {
@@ -183,9 +184,9 @@ struct SidebarView: View {
 
     // MARK: 分组树
 
-    /// 节点树(分组 + 主机),由 SidebarTree 纯函数构建,OutlineGroup 渲染。
+    /// 节点树(分组 + 主机),由 Rust 后端组装,OutlineGroup 渲染。
     private var treeNodes: [SidebarNode] {
-        SidebarTree.build(hosts: model.hosts, groups: model.groups)
+        ((try? sidebarTree()) ?? []).map { SidebarNode.from(ffiRecord: $0) }
     }
 
     /// List 选中态与 AppModel 的双向映射:节点 id 带 group-/host- 前缀,
@@ -410,7 +411,7 @@ struct HostRowView: View {
         Menu("移至分组") {
             Button("根级（无分组）") { model.moveHost(host.id, toGroup: nil) }
             ForEach(model.groups) { group in
-                Button(GroupTree.path(of: group.id, in: model.groups)) {
+                Button((try? groupPath(groupId: group.id)) ?? group.name) {
                     model.moveHost(host.id, toGroup: group.id)
                 }
             }

@@ -148,30 +148,41 @@ final class AppModel: ObservableObject {
         snippets = backend.allSnippets()
         lastError = backend.startupError
         Logger.shared.info("配置加载完成; 主机数=\(hosts.count)", module: LogModule.config)
+        // 同步主机名到 Rust 工作区,确保标签标题消歧使用最新名称
+        let mappings = hosts.map { HostNameMapping(hostId: $0.id, name: $0.name) }
+        workspaceSetHostNames(hostNames: mappings)
     }
 
     // MARK: 选中与页面切换
 
     /// 选中主机并切回主机页(选中片段/设置入口后再点主机时回到工作区)。
     func selectHost(_ id: String) {
-        selectedHostID = id
-        selectedGroupID = nil
-        sidebarPage = .hosts
-        workspacePresentation = .hostDetail(hostID: id)
+        // 延迟到下一个 runloop:调用方可能是 List selection Binding 的 setter,
+        // 在视图更新期间修改 @Published 会触发 "Publishing changes from within view updates" 警告。
+        DispatchQueue.main.async {
+            self.selectedHostID = id
+            self.selectedGroupID = nil
+            self.sidebarPage = .hosts
+            self.workspacePresentation = .hostDetail(hostID: id)
+        }
     }
 
     /// 选中分组并切回主机页。展开/折叠由 OutlineGroup 内部管理,不在模型层。
     func selectGroup(_ id: String) {
-        selectedGroupID = id
-        selectedHostID = nil
-        sidebarPage = .hosts
-        workspacePresentation = .empty
+        DispatchQueue.main.async {
+            self.selectedGroupID = id
+            self.selectedHostID = nil
+            self.sidebarPage = .hosts
+            self.workspacePresentation = .empty
+        }
     }
 
     /// 显示指定页签。页签有效性由 WorkspaceView 按 WorkspaceStore 归一化。
     func presentTab(_ id: UUID) {
-        workspacePresentation = .tab(tabID: id)
-        sidebarPage = .hosts
+        DispatchQueue.main.async {
+            self.workspacePresentation = .tab(tabID: id)
+            self.sidebarPage = .hosts
+        }
     }
 
     /// 新建主机的默认归属分组:优先取当前选中的分组,

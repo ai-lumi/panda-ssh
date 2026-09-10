@@ -307,6 +307,12 @@ final class SftpSessionStore: ObservableObject {
     @Published private(set) var remotePane: FilePaneNavigator {
         didSet { observePaneChanges() }
     }
+    // TODO: 以下选择逻辑（selectLocal/Remote、selectRange、anchor、toggleMultiSelect）
+    // 应替换为 SwiftUI 原生 `List(selection:)` + `Set<String>` 绑定。
+    // 当前 SftpTabView 包含复杂的拖拽框选、Shift/Command 修饰键处理、右键菜单等交互，
+    // 与这些选择方法深度耦合，无法在未编译验证的情况下安全移除。
+    // 待视图层重构为原生选择后再删除以下属性和方法。
+
     /// 本地栏选中集合;单选模式下大小为 0 或 1,多选模式下可包含多个条目。
     @Published var selectedLocalSet: Set<String> = []
     /// 远程栏选中集合;单选模式下大小为 0 或 1,多选模式下可包含多个条目。
@@ -353,6 +359,8 @@ final class SftpSessionStore: ObservableObject {
     var scanLocalHandler: (([String], String) -> [BatchItemRecord])?
     /// 测试注入点:覆盖远程目录扫描行为。
     var scanRemoteHandler: (([String], String) -> [BatchItemRecord])?
+    /// 测试注入点:覆盖 Rust 任务聚合行为。
+    var aggregationHandler: (([String], [TaskItemRecord], TransferDirection) -> AggregationResultRecord)?
     /// 测试注入点:覆盖远程文件删除行为。参数为 (name, isDirectory),返回 nil 表示成功。
     var deleteRemoteHandler: ((String, Bool) -> String?)?
     /// 测试注入点:覆盖 home 目录解析行为。参数为 (hostID, password, passphrase)。
@@ -775,63 +783,69 @@ final class SftpSessionStore: ObservableObject {
         return await downloadSingleFile(name: name, size: entry.size)
     }
 
-    /// 批量上传本地路径(文件或目录),按目录边界生成任务组。
-    /// 仅单个文件时生成独立任务;多个文件时每个文件独立;目录单独成组。
+    /// 批量上传本地路径(文件或目录)。
+    /// 目录走批量传输路径(单 SSH 连接复用),文件走独立任务。
     /// 目录扫描（可能耗时）在后台执行。
     @discardableResult
     func upload(localPaths: [String]) async -> [TransferTask] {
         guard !localPaths.isEmpty else { return [] }
         let destinationDirectory = remotePane.path
-        // 先用 Rust 扫描结果识别目录(测试 handler 也走这里),
-        // 回退到 FileManager 判断真实本地路径。
-        let scannedDirPaths = Set((await scanLocalItems(paths: localPaths, destDir: destinationDirectory)).filter { $0.isDir }.map { $0.source })
-        let dirs = localPaths.filter { scannedDirPaths.contains($0) || isDirectory(at: $0) }
-        let files = localPaths.filter { !dirs.contains($0) }
+        let allItems = await scanLocalItems(paths: localPaths, destDir: destinationDirectory)
 
         var tasks: [TransferTask] = []
 
         // 仅单个文件:走独立任务,与单选文件行为一致。
-        if dirs.isEmpty, files.count == 1, let file = files.first {
-            let name = (file as NSString).lastPathComponent
-            if let size = fileSize(at: file),
-               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(destinationDirectory, name)) {
+        if allItems.count == 1, let item = allItems.first, !item.isDir {
+            let name = (item.source as NSString).lastPathComponent
+            let size = fileSize(at: item.source) ?? item.size
+            if let task = enqueueSingle(direction: .upload, name: name, size: size, source: item.source, destination: joinPath(destinationDirectory, name)) {
                 tasks.append(task)
             }
             return tasks
         }
 
-        // 多个文件:每个文件独立任务,不组成任务组;扫描结果可提供大小回退(便于测试)。
-        for file in files {
-            let name = (file as NSString).lastPathComponent
-            let scannedSize = (await scanLocalItems(paths: [file], destDir: destinationDirectory)).first { $0.source == file }?.size
-            if let size = fileSize(at: file) ?? scannedSize,
-               let task = enqueueSingle(direction: .upload, name: name, size: size, source: file, destination: joinPath(destinationDirectory, name)) {
-                tasks.append(task)
+        // 通过 Rust 聚合模块确定分组。
+        let ffiItems = allItems.map { TaskItemRecord(source: $0.source, destination: $0.destination, size: $0.size, name: ($0.source as NSString).lastPathComponent, isDir: $0.isDir) }
+        let aggregation = aggregateItems(selectedPaths: localPaths, allItems: ffiItems, direction: .upload)
+
+        // 独立文件:每个一个任务。
+        for item in aggregation.standaloneItems {
+            let name = (item.source as NSString).lastPathComponent
+            let scannedSize = allItems.first { $0.source == item.source }?.size
+            if let size = fileSize(at: item.source) ?? scannedSize {
+                if let task = enqueueSingle(direction: .upload, name: name, size: size, source: item.source, destination: joinPath(destinationDirectory, name)) {
+                    tasks.append(task)
+                }
             }
         }
 
-        // 每个目录生成一个任务组,组内每个文件为独立任务。
-        for dir in dirs {
-            let name = (dir as NSString).lastPathComponent
-            let items = await scanLocalItems(paths: [dir], destDir: destinationDirectory)
-            tasks += enqueueGroup(direction: .upload, groupName: name, items: items)
+        // 目录组:走批量传输路径(单 SSH 连接复用)。
+        let dirSources = aggregation.groups.compactMap { group -> String? in
+            // 从原始扫描结果中找到对应的目录源路径
+            localPaths.first { path in
+                (path as NSString).lastPathComponent == group.name
+                    && allItems.contains { $0.source == path && $0.isDir }
+            }
+        }
+        if !dirSources.isEmpty {
+            _ = transfers.addBatchUpload(
+                sources: dirSources,
+                destDir: destinationDirectory,
+                hostID: host.id,
+                password: connectionSecrets?.password,
+                passphrase: connectionSecrets?.passphrase
+            )
         }
 
         return tasks
     }
 
-    /// 批量下载远程路径(文件或目录),按目录边界生成任务组。
+    /// 批量下载远程路径(文件或目录),通过 Rust 聚合模块按目录边界生成任务组。
     /// 远程扫描（SSH/SFTP 网络往返）在后台执行。
     @discardableResult
     func download(remotePaths: [String]) async -> [TransferTask] {
         guard !remotePaths.isEmpty else { return [] }
-        // 远程路径类型需通过 Rust 扫描结果中的 isDir 判断;先全部交给扫描器。
         let items = await scanRemoteItems(paths: remotePaths, destDir: localPane.path)
-        let allDirs = items.filter { $0.isDir }.map { $0.source }
-        // 只取真正的顶层目录：不是其他目录的前缀，避免嵌套子目录被重复建组。
-        let topLevelDirs = Set(allDirs.filter { dir in
-            !allDirs.contains(where: { $0 != dir && dir.hasPrefix($0 + "/") })
-        })
 
         var tasks: [TransferTask] = []
 
@@ -840,21 +854,37 @@ final class SftpSessionStore: ObservableObject {
             return enqueueSingle(direction: .download, name: (item.source as NSString).lastPathComponent, size: item.size, source: item.source, destination: item.destination).map { [$0] } ?? []
         }
 
-        // 顶层文件:独立任务(不属于任何顶层目录的后代)。
-        let topLevelFiles = items.filter { item in
-            !item.isDir && !topLevelDirs.contains(where: { item.source.hasPrefix($0 + "/") })
-        }
-        for item in topLevelFiles {
+        // 通过 Rust 聚合模块确定分组。
+        let ffiItems = items.map { TaskItemRecord(source: $0.source, destination: $0.destination, size: $0.size, name: ($0.source as NSString).lastPathComponent, isDir: $0.isDir) }
+        let aggregation = aggregateItems(selectedPaths: remotePaths, allItems: ffiItems, direction: .download)
+
+        // 独立文件:每个一个任务。
+        for item in aggregation.standaloneItems {
             if let task = enqueueSingle(direction: .download, name: (item.source as NSString).lastPathComponent, size: item.size, source: item.source, destination: item.destination) {
                 tasks.append(task)
             }
         }
 
-        // 每个顶层目录一个任务组。
-        for dirSource in topLevelDirs {
-            let groupName = (dirSource as NSString).lastPathComponent
-            let groupItems = items.filter { $0.source == dirSource || $0.source.hasPrefix(dirSource + "/") }
-            tasks += enqueueGroup(direction: .download, groupName: groupName, items: groupItems)
+        // 任务组:组内每个文件一个任务,共享 groupID。
+        for group in aggregation.groups {
+            guard let groupID = UUID(uuidString: group.id) else { continue }
+            for item in group.items {
+                let id = transfers.add(
+                    direction: .download,
+                    name: (item.source as NSString).lastPathComponent,
+                    size: item.size,
+                    source: item.source,
+                    destination: item.destination,
+                    hostID: host.id,
+                    groupID: groupID,
+                    groupName: group.name,
+                    password: connectionSecrets?.password,
+                    passphrase: connectionSecrets?.passphrase
+                )
+                if let task = transfers.tasks.first(where: { $0.id == id }) {
+                    tasks.append(task)
+                }
+            }
         }
 
         return tasks
@@ -922,35 +952,6 @@ final class SftpSessionStore: ObservableObject {
         return transfers.tasks.first { $0.id == id }
     }
 
-    private func enqueueGroup(
-        direction: TransferDirection,
-        groupName: String,
-        items: [BatchItemRecord]
-    ) -> [TransferTask] {
-        let fileItems = items.filter { !$0.isDir }
-        guard !fileItems.isEmpty else { return [] }
-        let groupID = UUID()
-        var tasks: [TransferTask] = []
-        for item in fileItems {
-            let id = transfers.add(
-                direction: direction,
-                name: (item.source as NSString).lastPathComponent,
-                size: item.size,
-                source: item.source,
-                destination: item.destination,
-                hostID: host.id,
-                groupID: groupID,
-                groupName: groupName,
-                password: connectionSecrets?.password,
-                passphrase: connectionSecrets?.passphrase
-            )
-            if let task = transfers.tasks.first(where: { $0.id == id }) {
-                tasks.append(task)
-            }
-        }
-        return tasks
-    }
-
     private func scanLocalItems(paths: [String], destDir: String) async -> [BatchItemRecord] {
         let handler = scanLocalHandler
         // 本地递归扫描可能在主线程耗时数百 ms，放后台执行（测试 handler 亦同）。
@@ -981,6 +982,19 @@ final class SftpSessionStore: ObservableObject {
                 passphrase: secrets.passphrase
             )
         }) ?? []
+    }
+
+    /// 通过 Rust 聚合模块（或测试注入 handler）将扁平扫描结果分组为任务组。
+    private func aggregateItems(
+        selectedPaths: [String],
+        allItems: [TaskItemRecord],
+        direction: TransferDirection
+    ) -> AggregationResultRecord {
+        if let handler = aggregationHandler {
+            return handler(selectedPaths, allItems, direction)
+        }
+        let ffiDirection: BatchTransferDirectionEnum = direction == .upload ? .upload : .download
+        return aggregateTaskGroupsFfi(selectedPaths: selectedPaths, allItems: allItems, direction: ffiDirection)
     }
 
     private func fileSize(at path: String) -> UInt64? {

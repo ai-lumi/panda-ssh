@@ -711,7 +711,9 @@ private final class TransferSourceSpy: TransferSource {
         remotePath: String,
         size: UInt64,
         password: String?,
-        passphrase: String?
+        passphrase: String?,
+        groupID: String?,
+        groupName: String?
     ) -> String {
         calls.append(Call(direction: direction, hostID: hostID, localPath: localPath, remotePath: remotePath, size: size))
         return UUID().uuidString
@@ -727,6 +729,11 @@ private final class TransferSourceSpy: TransferSource {
 
 /// 批量传输源 spy,用于验证 Swift 侧批量任务映射与生命周期。
 private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource {
+    var revision: UInt64? = nil
+    var listReads = 0
+    var afterList: (() -> Void)?
+    func changeRevision() -> UInt64? { revision }
+
     struct BatchCall {
         let hostID: String
         let sources: [String]
@@ -746,7 +753,9 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
         remotePath: String,
         size: UInt64,
         password: String?,
-        passphrase: String?
+        passphrase: String?,
+        groupID: String?,
+        groupName: String?
     ) -> String {
         UUID().uuidString
     }
@@ -792,7 +801,12 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
         }
     }
 
-    func listBatchTransfers() -> [BatchTransferRecord] { tasks }
+    func listBatchTransfers() -> [BatchTransferRecord] {
+        listReads += 1
+        let result = tasks
+        afterList?()
+        return result
+    }
 
     func setBatchTask(id: UUID, totalSize: UInt64, transferred: UInt64, status: TransferStatus, pendingConflict: PendingConflict? = nil) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -903,5 +917,57 @@ final class TransferTaskPresentationTests: XCTestCase {
         XCTAssertEqual(TransferTaskPresentation(task: value, hostName: nil).progress, 1)
         let longName = String(repeating: "中文", count: 2000)
         XCTAssertEqual(TransferTaskPresentation(task: value, hostName: longName).destinationEndpoint, longName)
+    }
+}
+
+
+@MainActor
+final class TaskRevisionTests: XCTestCase {
+    func test不变修订跳过快照并持续读取新的字节进度() {
+        let source = BatchTransferSourceSpy()
+        source.revision = 1
+        let store = TransferStore(source: source, batchSource: source)
+        let id = store.addBatchUpload(sources: ["/fixture/a"], destDir: "/remote")
+        let reads = source.listReads
+        store.tick()
+        XCTAssertEqual(source.listReads, reads)
+        for count: UInt64 in [1, 50, 100] {
+            source.setBatchTask(id: id, totalSize: 100, transferred: count, status: .running)
+            source.revision! += 1
+            store.tick()
+            XCTAssertEqual(store.tasks.first?.transferred, count)
+        }
+    }
+
+    func test读取快照期间更新留给下一拍() {
+        let source = BatchTransferSourceSpy()
+        source.revision = 1
+        let store = TransferStore(source: source, batchSource: source)
+        let id = store.addBatchUpload(sources: ["/fixture/a"], destDir: "/remote")
+        source.afterList = {
+            source.afterList = nil
+            source.setBatchTask(id: id, totalSize: 100, transferred: 70, status: .running)
+            source.revision! += 1
+        }
+        // add 的主动刷新也必须在读取列表之前捕获修订。
+        _ = store.addBatchUpload(sources: ["/fixture/b"], destDir: "/remote")
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.transferred, 70)
+    }
+
+    func test等待冲突与失败仅依赖注入源修订() {
+        let source = BatchTransferSourceSpy()
+        source.revision = 1
+        let store = TransferStore(source: source, batchSource: source)
+        let id = store.addBatchUpload(sources: ["/fixture/a"], destDir: "/remote")
+        let conflict = PendingConflict(name: "a", sourceSize: 10, sourceDate: nil, targetSize: 5, targetDate: nil)
+        source.setBatchTask(id: id, totalSize: 10, transferred: 0, status: .queued, pendingConflict: conflict)
+        source.revision! += 1
+        store.tick()
+        XCTAssertEqual(store.tasks.first?.pendingConflict, conflict)
+        source.setBatchTask(id: id, totalSize: 10, transferred: 1, status: .failed)
+        source.revision! += 1
+        store.tick()
+        XCTAssertEqual(store.tasks.first?.status, .failed)
     }
 }

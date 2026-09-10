@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::Error;
+use crate::groups::{Group, group_path};
 
 /// How to authenticate against a host.
 ///
@@ -97,6 +98,11 @@ impl TomlConfigStore {
         }
     }
 
+    /// 返回存储文件的路径。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     fn read(&self) -> Result<Vec<HostConfig>, Error> {
         {
             let guard = self.cache.lock().unwrap();
@@ -175,6 +181,31 @@ pub(crate) async fn write_atomic_async(path: &Path, bytes: &[u8]) -> Result<(), 
     })
     .await
     .map_err(|e| Error::Other(format!("spawn_blocking failed: {e}")))?
+}
+
+/// 在主机列表中按关键字做大小写不敏感的模糊搜索。
+///
+/// 匹配字段:name、host(地址)、username、分组路径。
+/// 空查询返回全部主机。
+pub fn search_hosts(hosts: &[HostConfig], groups: &[Group], query: &str) -> Vec<HostConfig> {
+    let query = query.trim();
+    if query.is_empty() {
+        return hosts.to_vec();
+    }
+    let q = query.to_lowercase();
+    hosts
+        .iter()
+        .filter(|h| {
+            h.name.to_lowercase().contains(&q)
+                || h.host.to_lowercase().contains(&q)
+                || h.username.to_lowercase().contains(&q)
+                || h.group_id
+                    .as_deref()
+                    .map(|gid| group_path(groups, gid).to_lowercase().contains(&q))
+                    .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -352,5 +383,136 @@ mod tests {
         assert!(write_atomic_async(&blocked.join("config.toml"), b"x")
             .await
             .is_err());
+    }
+
+    #[test]
+    fn group_id_none_is_omitted_from_toml_output() {
+        let host = password_host();
+        assert!(host.group_id.is_none());
+        let text = toml::to_string_pretty(&host).unwrap();
+        // group_id 为 None 时 serde 序列化为空值或缺省;
+        // 无论哪种方式,反序列化后必须恢复为 None。
+        assert!(!text.contains("group_id = \""));
+        let back: HostConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.group_id, None);
+    }
+
+    #[test]
+    fn empty_file_yields_empty_list_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, "").unwrap();
+        let store = TomlConfigStore::new(path);
+        // 空文件 serde 反序列化 HostsFile 默认字段 → 空列表
+        assert_eq!(store.list().unwrap(), Vec::<HostConfig>::new());
+    }
+
+    #[test]
+    fn corrupted_toml_returns_error_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, "[[host\nbroken").unwrap();
+        let store = TomlConfigStore::new(path);
+        assert!(store.list().is_err());
+    }
+
+    #[test]
+    fn write_atomic_does_not_leave_temp_file_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.toml");
+        write_atomic(&path, b"data").unwrap();
+        assert!(path.exists());
+        assert!(!dir.path().join("hosts.tmp").exists());
+    }
+
+    // --- search_hosts ---
+
+    fn make_host(id: &str, name: &str, host: &str, user: &str, group_id: Option<&str>) -> HostConfig {
+        let mut h = HostConfig::new(name, host, user, AuthMethod::Password { password_ref: None });
+        h.id = id.into();
+        h.group_id = group_id.map(str::to_string);
+        h
+    }
+
+    fn test_groups() -> Vec<crate::groups::Group> {
+        vec![
+            crate::groups::Group { id: "g1".into(), name: "生产环境".into(), parent_id: None },
+            crate::groups::Group { id: "g2".into(), name: "华东".into(), parent_id: Some("g1".into()) },
+        ]
+    }
+
+    #[test]
+    fn search_hosts_matches_name() {
+        let hosts = vec![
+            make_host("h1", "web-server", "10.0.0.1", "root", None),
+            make_host("h2", "db-server", "10.0.0.2", "admin", None),
+        ];
+        let result = search_hosts(&hosts, &[], "web");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "h1");
+    }
+
+    #[test]
+    fn search_hosts_matches_address() {
+        let hosts = vec![
+            make_host("h1", "server", "10.0.0.1", "root", None),
+            make_host("h2", "server", "192.168.1.1", "root", None),
+        ];
+        let result = search_hosts(&hosts, &[], "192.168");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "h2");
+    }
+
+    #[test]
+    fn search_hosts_matches_username() {
+        let hosts = vec![
+            make_host("h1", "server", "10.0.0.1", "deploy", None),
+            make_host("h2", "server", "10.0.0.2", "admin", None),
+        ];
+        let result = search_hosts(&hosts, &[], "deploy");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "h1");
+    }
+
+    #[test]
+    fn search_hosts_matches_group_path() {
+        let groups = test_groups();
+        let hosts = vec![
+            make_host("h1", "server", "10.0.0.1", "root", Some("g2")),
+            make_host("h2", "server", "10.0.0.2", "root", None),
+        ];
+        let result = search_hosts(&hosts, &groups, "华东");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "h1");
+    }
+
+    #[test]
+    fn search_hosts_empty_query_returns_all() {
+        let hosts = vec![
+            make_host("h1", "a", "1.1.1.1", "u", None),
+            make_host("h2", "b", "2.2.2.2", "u", None),
+        ];
+        let result = search_hosts(&hosts, &[], "");
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn search_hosts_case_insensitive() {
+        let hosts = vec![
+            make_host("h1", "WebServer", "10.0.0.1", "Root", None),
+        ];
+        let result = search_hosts(&hosts, &[], "webserver");
+        assert_eq!(result.len(), 1);
+        let result2 = search_hosts(&hosts, &[], "ROOT");
+        assert_eq!(result2.len(), 1);
+    }
+
+    #[test]
+    fn search_hosts_no_match_returns_empty() {
+        let hosts = vec![
+            make_host("h1", "server", "10.0.0.1", "root", None),
+        ];
+        let result = search_hosts(&hosts, &[], "nonexistent");
+        assert!(result.is_empty());
     }
 }

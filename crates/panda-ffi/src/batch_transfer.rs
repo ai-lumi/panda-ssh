@@ -15,7 +15,7 @@ use panda_core::{
 };
 use uuid::Uuid;
 
-use crate::{load_host, runtime, stores, PandaError};
+use crate::{load_host, notify_transfer_changed, runtime, stores, PandaError};
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -98,7 +98,7 @@ struct BatchTransferTask {
     /// 等待覆盖确认时对外暴露的冲突信息。
     pending_conflict: Arc<Mutex<Option<BatchConflictRecord>>>,
     /// 冲突决策回传通道：Swift 调用 `batch_transfer_resolve_conflict` 时经此发送。
-    conflict_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<ConflictResolution>>>>,
+    conflict_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<ConflictResolution>>>>,
 }
 
 impl BatchTransferTask {
@@ -173,20 +173,29 @@ pub fn scan_local_batch(
     sources: Vec<String>,
     dest_dir: String,
 ) -> Result<Vec<BatchItemRecord>, PandaError> {
-    runtime().block_on(async {
-        let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
-        let plan = scan_local_sources(&paths, &dest_dir, &Default::default()).await?;
-        Ok(plan
-            .items
-            .into_iter()
-            .map(|item| BatchItemRecord {
-                source: item.source,
-                destination: item.destination,
-                size: item.size,
-                is_dir: item.is_dir,
-            })
-            .collect())
-    })
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runtime().spawn(async move {
+        let result = async {
+            let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+            let plan = scan_local_sources(&paths, &dest_dir, &Default::default()).await?;
+            Ok(plan
+                .items
+                .into_iter()
+                .map(|item| BatchItemRecord {
+                    source: item.source,
+                    destination: item.destination,
+                    size: item.size,
+                    is_dir: item.is_dir,
+                })
+                .collect())
+        }
+        .await;
+        let _ = tx.send(result);
+    });
+    // FFI 线程仅等待 oneshot 结果；实际 I/O 在 spawn 的 tokio 任务中执行，
+    // 不占住调用线程对应的 worker slot。
+    rx.blocking_recv()
+        .map_err(|_| PandaError::Core("scan_local_batch: task dropped".into()))?
 }
 
 /// Scan remote sources and return the flattened list of items (files and directories)
@@ -200,33 +209,41 @@ pub fn scan_remote_batch(
     passphrase: Option<String>,
 ) -> Result<Vec<BatchItemRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let creds = credentials_for(&cfg, password.clone(), passphrase.clone())
-            .map_err(|e| PandaError::Core(e))?;
-        let store_path = stores()?.known_hosts.path().to_path_buf();
-        let mut known_hosts = KnownHosts::new(store_path);
-        let session = SshSession::connect_shared(
-            &cfg,
-            creds,
-            &mut known_hosts,
-            UnknownHostKeyPolicy::AcceptAndStore,
-        )
-        .await?;
-        session.set_owner("批量扫描", host_id.clone());
-        let sftp = SftpClient::new(&session).await?;
-        let plan = scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
-        let _ = sftp.close().await;
-        Ok(plan
-            .items
-            .into_iter()
-            .map(|item| BatchItemRecord {
-                source: item.source,
-                destination: item.destination,
-                size: item.size,
-                is_dir: item.is_dir,
-            })
-            .collect())
-    })
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runtime().spawn(async move {
+        let result = async {
+            let creds = credentials_for(&cfg, password.clone(), passphrase.clone())
+                .map_err(|e| PandaError::Core(e))?;
+            let store_path = stores()?.known_hosts.path().to_path_buf();
+            let mut known_hosts = KnownHosts::new(store_path);
+            let session = SshSession::connect_shared(
+                &cfg,
+                creds,
+                &mut known_hosts,
+                UnknownHostKeyPolicy::AcceptAndStore,
+            )
+            .await?;
+            session.set_owner("批量扫描", host_id.clone());
+            let sftp = SftpClient::new(&session).await?;
+            let plan =
+                scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
+            let _ = sftp.close().await;
+            Ok(plan
+                .items
+                .into_iter()
+                .map(|item| BatchItemRecord {
+                    source: item.source,
+                    destination: item.destination,
+                    size: item.size,
+                    is_dir: item.is_dir,
+                })
+                .collect())
+        }
+        .await;
+        let _ = tx.send(result);
+    });
+    rx.blocking_recv()
+        .map_err(|_| PandaError::Core("scan_remote_batch: task dropped".into()))?
 }
 
 fn start_batch_transfer(
@@ -259,6 +276,7 @@ fn start_batch_transfer(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, task.clone());
+    notify_transfer_changed();
 
     runtime().spawn(async move {
         run_batch_transfer_task(task, cfg).await;
@@ -274,12 +292,14 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
         }
         *status = BatchTransferStatusEnum::Running;
     }
+    notify_transfer_changed();
 
     let creds = match credentials_for(&cfg, task.password.clone(), task.passphrase.clone()) {
         Ok(c) => c,
         Err(e) => {
             *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
             *task.error.lock().unwrap() = Some(e);
+            notify_transfer_changed();
             return;
         }
     };
@@ -289,6 +309,7 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
         Err(e) => {
             *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
             *task.error.lock().unwrap() = Some(e.to_string());
+            notify_transfer_changed();
             return;
         }
     };
@@ -305,6 +326,7 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
         Err(e) => {
             *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
             *task.error.lock().unwrap() = Some(e.to_string());
+            notify_transfer_changed();
             return;
         }
     };
@@ -314,6 +336,7 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
         Err(e) => {
             *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
             *task.error.lock().unwrap() = Some(e.to_string());
+            notify_transfer_changed();
             return;
         }
     };
@@ -339,15 +362,29 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
 
             // 创建一次性决策通道；batch_transfer_resolve_conflict / cancel 经此回传。
             let rx = {
-                let (tx, rx) = std::sync::mpsc::channel();
+                let (tx, rx) = tokio::sync::oneshot::channel();
                 *conflict_tx.lock().unwrap() = Some(tx);
                 rx
             };
-            // 同步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
-            match rx.recv_timeout(Duration::from_secs(300)) {
-                Ok(ConflictResolution::Overwrite) => ConflictResolution::Overwrite,
-                Ok(ConflictResolution::Skip) | Err(_) => ConflictResolution::Skip,
-            }
+            notify_transfer_changed();
+            // 使用 block_in_place 将当前 worker 线程标记为阻塞线程，
+            // tokio 会补充新的 worker，避免线程饥饿。
+            // 异步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
+            let resolution = tokio::task::block_in_place(|| {
+                match tokio::runtime::Handle::current()
+                    .block_on(tokio::time::timeout(Duration::from_secs(300), rx))
+                {
+                    Ok(Ok(ConflictResolution::Overwrite)) => ConflictResolution::Overwrite,
+                    Ok(Ok(ConflictResolution::Skip)) | Ok(Err(_)) | Err(_) => {
+                        ConflictResolution::Skip
+                    }
+                }
+            });
+            // 超时或取消也清除待决策快照；由执行循环决定最终状态。
+            *pending_conflict.lock().unwrap() = None;
+            *task_status.lock().unwrap() = BatchTransferStatusEnum::Running;
+            notify_transfer_changed();
+            resolution
         },
     );
 
@@ -364,11 +401,13 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
     let plan = match scan_result {
         Ok(plan) => {
             task.total_size.store(plan.total_size, Ordering::Relaxed);
+            notify_transfer_changed();
             plan
         }
         Err(e) => {
             *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
             *task.error.lock().unwrap() = Some(e.to_string());
+            notify_transfer_changed();
             let _ = sftp.close().await;
             return;
         }
@@ -377,6 +416,7 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
     let transferred = task.transferred.clone();
     let progress = Arc::new(move |done: u64, _total: u64| {
         transferred.store(done, Ordering::Relaxed);
+        notify_transfer_changed();
     });
 
     let outcome = match task.direction {
@@ -426,9 +466,12 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
             } else {
                 *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
                 *task.error.lock().unwrap() = Some(e.to_string());
+            notify_transfer_changed();
             }
         }
     }
+    *task.pending_conflict.lock().unwrap() = None;
+    notify_transfer_changed();
 }
 
 fn credentials_for(
@@ -477,6 +520,7 @@ pub fn batch_transfer_cancel(task_id: String) -> Result<(), PandaError> {
     if status == BatchTransferStatusEnum::Queued {
         *task.status.lock().unwrap() = BatchTransferStatusEnum::Cancelled;
     }
+    notify_transfer_changed();
     Ok(())
 }
 
@@ -513,10 +557,11 @@ pub fn batch_transfer_resolve_conflict(task_id: String, overwrite: bool) -> Resu
     } else {
         ConflictResolution::Skip
     };
-    tx.send(decision)
-        .map_err(|_| PandaError::Core("conflict decision channel closed".to_string()))?;
-    // 清空待确认信息并回到 Running，任务继续执行。
+    // 唤醒执行者前更新快照，避免覆盖执行者刚写入的下一个冲突或终态。
     *task.pending_conflict.lock().unwrap() = None;
     *task.status.lock().unwrap() = BatchTransferStatusEnum::Running;
+    notify_transfer_changed();
+    tx.send(decision)
+        .map_err(|_| PandaError::Core("conflict decision channel closed".to_string()))?;
     Ok(())
 }

@@ -77,6 +77,18 @@ struct HostGroup: Identifiable, Equatable {
     var id: String
     var name: String
     var parentID: String?
+
+    init(id: String, name: String, parentID: String? = nil) {
+        self.id = id
+        self.name = name
+        self.parentID = parentID
+    }
+
+    init(record: GroupRecord) {
+        self.id = record.id
+        self.name = record.name
+        self.parentID = record.parentId
+    }
 }
 
 /// 代码片段(规划中功能,当前仅存内存)。
@@ -131,21 +143,5 @@ enum GroupTree {
             }
         }
         return ids
-    }
-}
-
-/// 侧栏搜索过滤:匹配主机名/地址/用户名(大小写不敏感);
-/// 分组路径命中时,该分组(含祖先分组命中时的子分组)下的主机一并显示。
-enum HostSearch {
-    static func filter(hosts: [HostEntry], groups: [HostGroup], query: String) -> [HostEntry] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return hosts }
-        return hosts.filter { host in
-            host.name.lowercased().contains(q)
-                || host.address.lowercased().contains(q)
-                || host.username.lowercased().contains(q)
-                || (host.groupID != nil
-                    && GroupTree.path(of: host.groupID, in: groups).lowercased().contains(q))
-        }
     }
 }

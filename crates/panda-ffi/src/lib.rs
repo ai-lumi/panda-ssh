@@ -3,7 +3,7 @@
 //! All exported functions are synchronous from the caller's perspective;
 //! async work runs on a lazily created global tokio runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use panda_core::{
     AuthMethod, ConfigStore, CredentialStore, Credentials, Group, GroupStore, HostConfig,
     KnownHosts, SftpClient, ShellSession, SshSession, TomlConfigStore, TomlGroupStore,
-    UnknownHostKeyPolicy,
+    TransferSpeedTracker, UnknownHostKeyPolicy,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -37,6 +37,11 @@ pub use batch_transfer::{
     batch_transfer_status, scan_local_batch, scan_remote_batch, start_batch_download,
     start_batch_upload, BatchConflictRecord, BatchItemRecord, BatchTransferDirectionEnum,
     BatchTransferStatusEnum, BatchTransferStatusRecord,
+};
+
+mod task_aggregation;
+pub use task_aggregation::{
+    aggregate_task_groups_ffi, AggregationResultRecord, TaskGroupRecord, TaskItemRecord,
 };
 
 // ---------------------------------------------------------------------------
@@ -548,6 +553,18 @@ pub fn list_hosts() -> Result<Vec<HostConfigRecord>, PandaError> {
     Ok(hosts.into_iter().map(HostConfigRecord::from).collect())
 }
 
+/// 按关键字模糊搜索主机。匹配字段：名称、地址、用户名、分组路径。空查询返回全部。
+#[uniffi::export]
+pub fn search_hosts(query: String) -> Result<Vec<HostConfigRecord>, PandaError> {
+    let s = stores()?;
+    let hosts = s.config.list()?;
+    let groups = s.groups.list()?;
+    Ok(panda_core::search_hosts(&hosts, &groups, &query)
+        .into_iter()
+        .map(HostConfigRecord::from)
+        .collect())
+}
+
 /// Insert or update a host. An empty `id` generates a fresh UUID.
 #[uniffi::export]
 pub fn save_host(host: HostConfigRecord) -> Result<(), PandaError> {
@@ -623,6 +640,82 @@ pub fn credential_protection_enabled() -> Result<bool, PandaError> {
     Ok(stores()?.credentials.is_protected()?)
 }
 
+/// 凭据解析结果（FFI 友好枚举）。
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ResolvedCredentialEnum {
+    /// 凭据就绪，可直接连接。
+    Available {
+        password: Option<String>,
+        passphrase: Option<String>,
+    },
+    /// 需要用户输入密码。
+    NeedsPassword,
+    /// 需要用户输入私钥口令。
+    NeedsPassphrase,
+}
+
+/// 解析主机凭据状态：已保存 → Available；未保存 → NeedsPassword/NeedsPassphrase。
+#[uniffi::export]
+pub fn credential_resolve(host_id: String) -> Result<ResolvedCredentialEnum, PandaError> {
+    let s = stores()?;
+    let host = s.config.get(&host_id)?
+        .ok_or_else(|| PandaError::Core(format!("host not found: {host_id}")))?;
+    match panda_core::credential_resolve(&s.credentials, &host)? {
+        panda_core::ResolvedCredential::Available { password, passphrase } => {
+            Ok(ResolvedCredentialEnum::Available { password, passphrase })
+        }
+        panda_core::ResolvedCredential::NeedsPassword => Ok(ResolvedCredentialEnum::NeedsPassword),
+        panda_core::ResolvedCredential::NeedsPassphrase => Ok(ResolvedCredentialEnum::NeedsPassphrase),
+    }
+}
+
+/// 连接失败分类（FFI 友好枚举）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FailureCategoryEnum {
+    Timeout,
+    AuthFailed,
+    MissingCredential,
+    HostKeyMismatch,
+    Other,
+}
+
+/// 连接失败的结构化记录（FFI 友好版本）。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ConnectionFailureFFIRecord {
+    pub category: FailureCategoryEnum,
+    pub title: String,
+    pub detail: String,
+}
+
+/// 将错误码分类为连接失败记录。
+#[uniffi::export]
+pub fn connection_failure_classify(error_code: String) -> ConnectionFailureFFIRecord {
+    let error = match error_code.as_str() {
+        "Timeout" => panda_core::Error::Timeout,
+        "AuthFailed" => panda_core::Error::AuthFailed,
+        "MissingPassphrase" => panda_core::Error::MissingPassphrase,
+        "CredentialProtectionKeyRequired" => panda_core::Error::CredentialProtectionKeyRequired,
+        "CredentialUnlockFailed" => panda_core::Error::CredentialUnlockFailed,
+        "InvalidCredentialFile" => panda_core::Error::InvalidCredentialFile,
+        "Cancelled" => panda_core::Error::Cancelled,
+        "ShellSessionClosed" => panda_core::Error::ShellSessionClosed,
+        other => panda_core::Error::Other(other.to_string()),
+    };
+    let record = panda_core::connection_failure_classify(&error);
+    let category = match record.category {
+        panda_core::FailureCategory::Timeout => FailureCategoryEnum::Timeout,
+        panda_core::FailureCategory::AuthFailed => FailureCategoryEnum::AuthFailed,
+        panda_core::FailureCategory::MissingCredential => FailureCategoryEnum::MissingCredential,
+        panda_core::FailureCategory::HostKeyMismatch => FailureCategoryEnum::HostKeyMismatch,
+        panda_core::FailureCategory::Other => FailureCategoryEnum::Other,
+    };
+    ConnectionFailureFFIRecord {
+        category,
+        title: record.title,
+        detail: record.detail,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Host key API
 // ---------------------------------------------------------------------------
@@ -652,6 +745,103 @@ pub fn host_key_status(host: String, port: u16) -> Result<KnownHostStatusEnum, P
 #[uniffi::export]
 pub fn accept_unknown_host_key(host: String, port: u16, key: String) -> Result<(), PandaError> {
     Ok(stores()?.known_hosts.accept(&host, port, &key)?)
+}
+
+// ---------------------------------------------------------------------------
+// Preconnect API
+// ---------------------------------------------------------------------------
+
+/// 连接前评估结果（FFI 友好枚举）。
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum PreconnectActionEnum {
+    /// 密钥已知且凭据就绪，可直接连接。
+    Proceed,
+    /// 未知主机，需用户确认密钥指纹（TOFU）。
+    ConfirmTofu,
+    /// 密钥与已知记录不匹配，应阻断连接并展示告警。
+    KeyMismatch {
+        stored_fingerprint: String,
+        presented_fingerprint: String,
+    },
+    /// 需要用户输入密码。
+    AskPassword,
+    /// 需要用户输入私钥口令。
+    AskPassphrase,
+}
+
+/// 连接前评估：综合主机密钥状态和凭据可用性，返回前端应执行的动作。
+///
+/// 评估顺序：先检查主机密钥状态，再检查凭据可用性。
+#[uniffi::export]
+pub fn preconnect_evaluate(host_id: String) -> Result<PreconnectActionEnum, PandaError> {
+    let s = stores()?;
+    let host = s.config.get(&host_id)?
+        .ok_or_else(|| PandaError::Core(format!("host not found: {host_id}")))?;
+
+    // 检查主机密钥状态
+    let key_status = s.known_hosts.status(&host.host, host.port)?;
+
+    // 检查凭据状态
+    let cred_status = panda_core::credential_resolve(&s.credentials, &host)?;
+
+    // 综合评估
+    let action = panda_core::preconnect_evaluate(&host, &key_status, &cred_status);
+    Ok(match action {
+        panda_core::PreconnectAction::Proceed => PreconnectActionEnum::Proceed,
+        panda_core::PreconnectAction::ConfirmTofu => PreconnectActionEnum::ConfirmTofu,
+        panda_core::PreconnectAction::KeyMismatch {
+            stored_fingerprint,
+            presented_fingerprint,
+        } => PreconnectActionEnum::KeyMismatch {
+            stored_fingerprint,
+            presented_fingerprint,
+        },
+        panda_core::PreconnectAction::AskPassword => PreconnectActionEnum::AskPassword,
+        panda_core::PreconnectAction::AskPassphrase => PreconnectActionEnum::AskPassphrase,
+    })
+}
+
+/// TOFU 并发序列化：注册等待者。
+///
+/// 返回 `true` 表示调用者是第一个请求，应执行探测并展示确认框。
+/// 返回 `false` 表示已有探测在进行中，调用者应等待结果（通过轮询或回调）。
+///
+/// 该方法管理内部状态：第一个调用者标记为"探测中"，后续调用者只注册等待。
+#[uniffi::export]
+pub fn preconnect_tofu_register_waiter(host_id: String) -> bool {
+    let mut state = workspace_state().lock().unwrap();
+    if state.tofu_probing.contains(&host_id) {
+        // 已有探测在进行中，调用者应等待
+        false
+    } else {
+        // 第一个调用者，标记为探测中
+        state.tofu_probing.insert(host_id);
+        true
+    }
+}
+
+/// TOFU 并发序列化：广播确认结果给所有等待者，并清理状态。
+///
+/// `trusted` 为 `true` 表示用户信任了该主机密钥，`false` 表示取消。
+#[uniffi::export]
+pub fn preconnect_tofu_resolve(host_id: String, trusted: bool) {
+    let mut state = workspace_state().lock().unwrap();
+    // 广播结果给所有等待者
+    if let Some(waiters) = state.tofu_waiters.remove(&host_id) {
+        for sender in waiters {
+            let _ = sender.send(trusted);
+        }
+    }
+    // 清理探测状态
+    state.tofu_probing.remove(&host_id);
+}
+
+/// TOFU 并发序列化：重置所有状态（仅用于测试）。
+#[uniffi::export]
+pub fn preconnect_tofu_reset() {
+    let mut state = workspace_state().lock().unwrap();
+    state.tofu_waiters.clear();
+    state.tofu_probing.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -695,6 +885,47 @@ pub fn move_group(id: String, new_parent_id: Option<String>) -> Result<(), Panda
         &id,
         new_parent_id.as_deref(),
     )?)
+}
+
+/// 返回分组的完整层级路径，如 "生产 / 华东 / 上海"。未知或空 id 返回 "根级"。
+#[uniffi::export]
+pub fn group_path(group_id: String) -> Result<String, PandaError> {
+    let groups = stores()?.groups.list()?;
+    Ok(panda_core::group_path(&groups, &group_id))
+}
+
+/// 侧栏树节点（FFI 友好版本）。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SidebarNodeFFIRecord {
+    pub id: String,
+    pub is_group: bool,
+    pub name: String,
+    pub host: Option<HostConfigRecord>,
+    pub group: Option<GroupRecord>,
+    pub children: Option<Vec<SidebarNodeFFIRecord>>,
+}
+
+fn convert_sidebar_node(node: panda_core::SidebarNodeRecord) -> SidebarNodeFFIRecord {
+    SidebarNodeFFIRecord {
+        id: node.id,
+        is_group: node.is_group,
+        name: node.name,
+        host: node.host.map(HostConfigRecord::from),
+        group: node.group.map(GroupRecord::from),
+        children: node.children.map(|cs| cs.into_iter().map(convert_sidebar_node).collect()),
+    }
+}
+
+/// 返回已组装好的侧栏树。根级分组在前、根级主机在后；分组内先子分组后主机。
+#[uniffi::export]
+pub fn sidebar_tree() -> Result<Vec<SidebarNodeFFIRecord>, PandaError> {
+    let s = stores()?;
+    let hosts = s.config.list()?;
+    let groups = s.groups.list()?;
+    Ok(panda_core::sidebar_tree(&hosts, &groups)
+        .into_iter()
+        .map(convert_sidebar_node)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,7 +1513,7 @@ pub enum TransferDirectionEnum {
 }
 
 /// Lifecycle state of a transfer task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum TransferStatusEnum {
     Queued,
     Running,
@@ -1306,6 +1537,16 @@ pub struct TransferStatusRecord {
     pub error: Option<String>,
     /// 单调递增版本号；任何状态/进度/错误变更时自动递增。
     pub version: u64,
+    /// 实时传输速率（字节/秒），基于 2 秒滑动窗口。
+    pub speed: f64,
+    /// 从开始到现在的平均速率（字节/秒）。
+    pub total_speed: f64,
+    /// 预估剩余秒数；无法计算时为 None。
+    pub eta_seconds: Option<f64>,
+    /// 所属任务组 id；None 表示不属于任何组。
+    pub group_id: Option<String>,
+    /// 所属任务组名称。
+    pub group_name: Option<String>,
 }
 
 /// Internal task record, shared between the registry and the async worker.
@@ -1326,10 +1567,14 @@ struct TransferTask {
     paused: Arc<AtomicBool>,
     resume_notify: Arc<tokio::sync::Notify>,
     version: Arc<AtomicU64>,
+    speed_tracker: Arc<Mutex<TransferSpeedTracker>>,
+    group_id: Option<String>,
+    group_name: Option<String>,
 }
 
 impl TransferTask {
     fn snapshot(&self) -> TransferStatusRecord {
+        let tracker = self.speed_tracker.lock().unwrap();
         TransferStatusRecord {
             id: self.id.to_string(),
             direction: self.direction.clone(),
@@ -1341,7 +1586,23 @@ impl TransferTask {
             status: *self.status.lock().unwrap(),
             error: self.error.lock().unwrap().clone(),
             version: self.version.load(Ordering::Relaxed),
+            speed: tracker.live_speed(),
+            total_speed: tracker.total_speed(),
+            eta_seconds: tracker.eta_seconds(),
+            group_id: self.group_id.clone(),
+            group_name: self.group_name.clone(),
         }
+    }
+
+    /// 上传与下载共用进度通知，保证仅字节变化时也刷新 UI。
+    fn progress_callback(&self) -> Arc<dyn Fn(u64, u64) + Send + Sync> {
+        let task = self.clone();
+        Arc::new(move |done, _total| {
+            task.transferred.store(done, Ordering::Relaxed);
+            task.speed_tracker.lock().unwrap().update(done);
+            task.bump_version();
+            notify_transfer_changed();
+        })
     }
 
     /// 递增版本号，在状态/进度/错误变更后调用。
@@ -1352,6 +1613,9 @@ impl TransferTask {
 
 static TRANSFER_TASKS: OnceLock<Mutex<HashMap<Uuid, TransferTask>>> = OnceLock::new();
 static TRANSFER_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+/// 全局传输变更计数器；每次任务状态转换时递增。
+/// Swift 侧可低频轮询此值，仅在变化时调用 `transfer_list()` 获取完整快照。
+static TRANSFER_CHANGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn transfer_tasks() -> &'static Mutex<HashMap<Uuid, TransferTask>> {
     TRANSFER_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1359,6 +1623,11 @@ fn transfer_tasks() -> &'static Mutex<HashMap<Uuid, TransferTask>> {
 
 fn transfer_semaphore() -> &'static tokio::sync::Semaphore {
     TRANSFER_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(TRANSFER_CONCURRENCY))
+}
+
+/// 状态变更时调用：递增全局变更计数器。
+fn notify_transfer_changed() {
+    TRANSFER_CHANGE_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
 fn total_size(local: &std::path::Path) -> u64 {
@@ -1377,6 +1646,8 @@ pub fn start_transfer(
     size: u64,
     password: Option<String>,
     passphrase: Option<String>,
+    group_id: Option<String>,
+    group_name: Option<String>,
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
     // 上传时若 Swift 未提供大小(传 0),则从本地文件系统计算;
@@ -1404,11 +1675,15 @@ pub fn start_transfer(
         paused: Arc::new(AtomicBool::new(false)),
         resume_notify: Arc::new(tokio::sync::Notify::new()),
         version: Arc::new(AtomicU64::new(1)),
+        speed_tracker: Arc::new(Mutex::new(TransferSpeedTracker::new(size))),
+        group_id,
+        group_name,
     };
     transfer_tasks()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, task.clone());
+    notify_transfer_changed();
 
     runtime().spawn(async move {
         run_transfer_task(task, cfg).await;
@@ -1431,6 +1706,8 @@ async fn wait_while_paused(task: &TransferTask) {
                 return;
             }
             *status = TransferStatusEnum::Paused;
+            drop(status);
+            notify_transfer_changed();
         }
         // 先注册等待再检查,避免 resume 通知在 await 前丢失。
         let notified = task.resume_notify.notified();
@@ -1446,6 +1723,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
     wait_while_paused(&task).await;
     if task.cancel.load(Ordering::Relaxed) {
         *task.status.lock().unwrap() = TransferStatusEnum::Cancelled;
+        notify_transfer_changed();
         return;
     }
 
@@ -1455,6 +1733,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
         Err(_) => {
             *task.status.lock().unwrap() = TransferStatusEnum::Failed;
             *task.error.lock().unwrap() = Some("semaphore closed".to_string());
+            notify_transfer_changed();
             return;
         }
     };
@@ -1470,6 +1749,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
         *status = TransferStatusEnum::Running;
     }
     task.bump_version();
+    notify_transfer_changed();
 
     let result = match task.direction {
         TransferDirectionEnum::Upload => run_upload(&task, &cfg).await,
@@ -1483,6 +1763,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
                 task.transferred.store(task.size, Ordering::Relaxed);
             }
             task.bump_version();
+            notify_transfer_changed();
         }
         Err(e) => {
             if task.cancel.load(Ordering::Relaxed) {
@@ -1493,6 +1774,7 @@ async fn run_transfer_task(task: TransferTask, cfg: panda_core::HostConfig) {
                 *task.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
             }
             task.bump_version();
+            notify_transfer_changed();
         }
     }
 }
@@ -1519,12 +1801,7 @@ async fn run_upload(
     let sftp = SftpClient::new(&session).await?;
 
     let local = PathBuf::from(&task.local_path);
-    let transferred = task.transferred.clone();
-    let version = task.version.clone();
-    let progress = Arc::new(move |sent: u64, _total: u64| {
-        transferred.store(sent, Ordering::Relaxed);
-        version.fetch_add(1, Ordering::Relaxed);
-    });
+    let progress = task.progress_callback();
     let result = sftp
         .upload_with_pause(
             local.as_path(),
@@ -1561,12 +1838,7 @@ async fn run_download(
     let sftp = SftpClient::new(&session).await?;
 
     let local = PathBuf::from(&task.local_path);
-    let transferred = task.transferred.clone();
-    let version = task.version.clone();
-    let progress = Arc::new(move |received: u64, _total: u64| {
-        transferred.store(received, Ordering::Relaxed);
-        version.fetch_add(1, Ordering::Relaxed);
-    });
+    let progress = task.progress_callback();
     let result = sftp
         .download_with_pause(
             &task.remote_path,
@@ -1602,6 +1874,97 @@ pub fn transfer_list() -> Result<Vec<TransferStatusRecord>, PandaError> {
     Ok(records)
 }
 
+/// 聚合状态优先级：running > paused > queued > failed > cancelled > completed。
+fn group_status_priority(statuses: &[TransferStatusEnum]) -> TransferStatusEnum {
+    let set: std::collections::HashSet<_> = statuses.iter().copied().collect();
+    if set.contains(&TransferStatusEnum::Running) {
+        TransferStatusEnum::Running
+    } else if set.contains(&TransferStatusEnum::Paused) {
+        TransferStatusEnum::Paused
+    } else if set.contains(&TransferStatusEnum::Queued) {
+        TransferStatusEnum::Queued
+    } else if set.contains(&TransferStatusEnum::Failed) {
+        TransferStatusEnum::Failed
+    } else if set.contains(&TransferStatusEnum::Cancelled) {
+        TransferStatusEnum::Cancelled
+    } else {
+        TransferStatusEnum::Completed
+    }
+}
+
+/// 任务组聚合记录。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TransferGroupRecord {
+    pub group_id: String,
+    pub group_name: String,
+    pub direction: TransferDirectionEnum,
+    pub total_count: u32,
+    pub completed_count: u32,
+    pub total_bytes: u64,
+    pub transferred_bytes: u64,
+    pub status: TransferStatusEnum,
+}
+
+/// 返回按 group_id 聚合的任务组列表。无分组任务不出现在结果中。
+#[uniffi::export]
+pub fn transfer_groups() -> Result<Vec<TransferGroupRecord>, PandaError> {
+    let tasks = transfer_tasks().lock().unwrap();
+    let mut groups: std::collections::HashMap<
+        String,
+        (String, TransferDirectionEnum, Vec<TransferStatusEnum>, u64, u64, u32),
+    > = std::collections::HashMap::new();
+
+    for task in tasks.values() {
+        if let (Some(gid), Some(gname)) = (&task.group_id, &task.group_name) {
+            let entry = groups.entry(gid.clone()).or_insert_with(|| {
+                (gname.clone(), task.direction, Vec::new(), 0, 0, 0)
+            });
+            let status = *task.status.lock().unwrap();
+            entry.2.push(status);
+            entry.3 += task.size;
+            entry.4 += task.transferred.load(Ordering::Relaxed);
+            entry.5 += 1;
+            if matches!(
+                status,
+                TransferStatusEnum::Completed
+                    | TransferStatusEnum::Failed
+                    | TransferStatusEnum::Cancelled
+            ) {
+                // completed_count 在下方计算
+            }
+        }
+    }
+
+    let mut result: Vec<TransferGroupRecord> = groups
+        .into_iter()
+        .map(|(gid, (gname, dir, statuses, total_bytes, transferred_bytes, total_count))| {
+            let completed_count = statuses
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s,
+                        TransferStatusEnum::Completed
+                            | TransferStatusEnum::Failed
+                            | TransferStatusEnum::Cancelled
+                    )
+                })
+                .count() as u32;
+            TransferGroupRecord {
+                group_id: gid,
+                group_name: gname,
+                direction: dir,
+                total_count,
+                completed_count,
+                total_bytes,
+                transferred_bytes,
+                status: group_status_priority(&statuses),
+            }
+        })
+        .collect();
+    result.sort_by(|a, b| a.group_name.cmp(&b.group_name));
+    Ok(result)
+}
+
 /// Cancel a queued, paused or running task. Idempotent for already-terminal tasks.
 #[uniffi::export]
 pub fn transfer_cancel(task_id: String) -> Result<(), PandaError> {
@@ -1619,6 +1982,7 @@ pub fn transfer_cancel(task_id: String) -> Result<(), PandaError> {
     ) {
         *task.status.lock().unwrap() = TransferStatusEnum::Cancelled;
         task.bump_version();
+        notify_transfer_changed();
     }
     Ok(())
 }
@@ -1656,8 +2020,10 @@ pub fn transfer_retry(task_id: String) -> Result<String, PandaError> {
     *task.error.lock().unwrap() = None;
     task.cancel.store(false, Ordering::Relaxed);
     task.paused.store(false, Ordering::Relaxed);
+    *task.speed_tracker.lock().unwrap() = TransferSpeedTracker::new(task.size);
     task.resume_notify.notify_waiters();
     task.bump_version();
+    notify_transfer_changed();
 
     runtime().spawn(async move {
         run_transfer_task(task, cfg).await;
@@ -1682,12 +2048,14 @@ pub fn transfer_pause(task_id: String) -> Result<(), PandaError> {
         return Err(PandaError::Core("task is already terminal".to_string()));
     }
     task.paused.store(true, Ordering::Relaxed);
+    task.speed_tracker.lock().unwrap().on_pause();
     if matches!(
         status,
         TransferStatusEnum::Queued | TransferStatusEnum::Running
     ) {
         *task.status.lock().unwrap() = TransferStatusEnum::Paused;
         task.bump_version();
+        notify_transfer_changed();
     }
     Ok(())
 }
@@ -1702,13 +2070,89 @@ pub fn transfer_resume(task_id: String) -> Result<(), PandaError> {
         .get_mut(&id)
         .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
     task.paused.store(false, Ordering::Relaxed);
+    task.speed_tracker.lock().unwrap().on_resume();
     let status = *task.status.lock().unwrap();
     if status == TransferStatusEnum::Paused {
         *task.status.lock().unwrap() = TransferStatusEnum::Queued;
         task.bump_version();
+        notify_transfer_changed();
     }
     task.resume_notify.notify_waiters();
     Ok(())
+}
+
+/// 返回全局传输变更计数器。
+/// Swift 侧低频轮询此值（如每 100ms），仅在返回值变化时调用 `transfer_list()` 获取完整快照，
+/// 替代原先基于 Combine Timer 的无差别轮询。
+#[uniffi::export]
+pub fn transfer_change_counter() -> u64 {
+    TRANSFER_CHANGE_COUNTER.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// Config Archive API
+// ---------------------------------------------------------------------------
+
+/// 配置导出结果。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ExportManifestRecord {
+    pub version: u32,
+    pub timestamp: String,
+    pub device_name: String,
+    pub file_count: u32,
+}
+
+/// 配置导入结果。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ImportResultRecord {
+    pub backup_files: Vec<String>,
+    pub host_count: u32,
+    pub group_count: u32,
+    pub snippet_count: u32,
+}
+
+/// 将配置目录导出为 ZIP 归档。
+#[uniffi::export]
+pub fn config_export(output_path: String) -> Result<ExportManifestRecord, PandaError> {
+    let config_dir = config_dir()?;
+    let manifest = panda_core::config_archive::config_export(
+        &config_dir,
+        PathBuf::from(&output_path).as_path(),
+    )
+    .map_err(|e| PandaError::Core(e.to_string()))?;
+    Ok(ExportManifestRecord {
+        version: manifest.version,
+        timestamp: manifest.timestamp,
+        device_name: manifest.device_name,
+        file_count: manifest.file_count,
+    })
+}
+
+/// 从 ZIP 归档导入配置到配置目录。
+#[uniffi::export]
+pub fn config_import(archive_path: String) -> Result<ImportResultRecord, PandaError> {
+    let config_dir = config_dir()?;
+    let result = panda_core::config_archive::config_import(
+        &config_dir,
+        PathBuf::from(&archive_path).as_path(),
+    )
+    .map_err(|e| PandaError::Core(e.to_string()))?;
+    Ok(ImportResultRecord {
+        backup_files: result.backup_files,
+        host_count: result.host_count,
+        group_count: result.group_count,
+        snippet_count: result.snippet_count,
+    })
+}
+
+fn config_dir() -> Result<PathBuf, PandaError> {
+    let s = stores()?;
+    // stores 的 config 路径在 config_dir/hosts.toml，取父目录即为 config_dir
+    Ok(s.config
+        .path()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf())
 }
 
 // ---------------------------------------------------------------------------
@@ -1784,6 +2228,782 @@ pub fn save_snippet(snippet: SnippetRecord) -> Result<(), PandaError> {
 #[uniffi::export]
 pub fn delete_snippet(name: String) -> Result<(), PandaError> {
     Ok(snippet_store()?.delete(&name)?)
+}
+
+// ---------------------------------------------------------------------------
+// Logger API
+// ---------------------------------------------------------------------------
+
+static LOGGER: OnceLock<panda_core::logger::Logger> = OnceLock::new();
+
+fn global_logger() -> &'static panda_core::logger::Logger {
+    LOGGER.get_or_init(|| {
+        let log_path = stores()
+            .ok()
+            .map(|s| s.config.path().parent().unwrap_or_else(|| std::path::Path::new(".")).join("panda.log"));
+        panda_core::logger::Logger::new(log_path)
+    })
+}
+
+/// 日志级别（FFI 枚举）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LogLevelEnum {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+/// 日志条目（FFI 记录）。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LogEntryRecord {
+    pub timestamp: String,
+    pub level: LogLevelEnum,
+    pub module: String,
+    pub message: String,
+}
+
+/// 写入一条日志。
+#[uniffi::export]
+pub fn log_write(level: LogLevelEnum, module: String, message: String) {
+    let core_level = match level {
+        LogLevelEnum::Debug => panda_core::logger::LogLevel::Debug,
+        LogLevelEnum::Info => panda_core::logger::LogLevel::Info,
+        LogLevelEnum::Warning => panda_core::logger::LogLevel::Warning,
+        LogLevelEnum::Error => panda_core::logger::LogLevel::Error,
+    };
+    global_logger().log(core_level, &module, &message);
+}
+
+/// 获取最近的日志条目（按时间倒序）。
+#[uniffi::export]
+pub fn log_entries(limit: u32) -> Vec<LogEntryRecord> {
+    global_logger()
+        .entries(limit as usize)
+        .into_iter()
+        .map(|e| LogEntryRecord {
+            timestamp: e.timestamp,
+            level: match e.level {
+                panda_core::logger::LogLevel::Debug => LogLevelEnum::Debug,
+                panda_core::logger::LogLevel::Info => LogLevelEnum::Info,
+                panda_core::logger::LogLevel::Warning => LogLevelEnum::Warning,
+                panda_core::logger::LogLevel::Error => LogLevelEnum::Error,
+            },
+            module: e.module,
+            message: e.message,
+        })
+        .collect()
+}
+
+/// 清空日志缓冲。
+#[uniffi::export]
+pub fn log_clear() {
+    global_logger().clear();
+}
+
+// ---------------------------------------------------------------------------
+// Workspace API
+// ---------------------------------------------------------------------------
+
+/// 标签页类型（FFI 枚举）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TabKindEnum {
+    Terminal,
+    Sftp,
+}
+
+impl From<TabKindEnum> for panda_core::TabKind {
+    fn from(k: TabKindEnum) -> Self {
+        match k {
+            TabKindEnum::Terminal => panda_core::TabKind::Terminal,
+            TabKindEnum::Sftp => panda_core::TabKind::Sftp,
+        }
+    }
+}
+
+impl From<panda_core::TabKind> for TabKindEnum {
+    fn from(k: panda_core::TabKind) -> Self {
+        match k {
+            panda_core::TabKind::Terminal => TabKindEnum::Terminal,
+            panda_core::TabKind::Sftp => TabKindEnum::Sftp,
+        }
+    }
+}
+
+/// 连接状态（FFI 枚举）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConnectionStatusEnum {
+    Inactive,
+    Connecting,
+    Connected,
+    Failed,
+}
+
+impl From<ConnectionStatusEnum> for panda_core::ConnectionStatus {
+    fn from(s: ConnectionStatusEnum) -> Self {
+        match s {
+            ConnectionStatusEnum::Inactive => panda_core::ConnectionStatus::Inactive,
+            ConnectionStatusEnum::Connecting => panda_core::ConnectionStatus::Connecting,
+            ConnectionStatusEnum::Connected => panda_core::ConnectionStatus::Connected,
+            ConnectionStatusEnum::Failed => panda_core::ConnectionStatus::Failed,
+        }
+    }
+}
+
+impl From<panda_core::ConnectionStatus> for ConnectionStatusEnum {
+    fn from(s: panda_core::ConnectionStatus) -> Self {
+        match s {
+            panda_core::ConnectionStatus::Inactive => ConnectionStatusEnum::Inactive,
+            panda_core::ConnectionStatus::Connecting => ConnectionStatusEnum::Connecting,
+            panda_core::ConnectionStatus::Connected => ConnectionStatusEnum::Connected,
+            panda_core::ConnectionStatus::Failed => ConnectionStatusEnum::Failed,
+        }
+    }
+}
+
+/// 标签页记录（FFI 友好版本）。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct WorkspaceTabRecord {
+    pub id: String,
+    pub host_id: String,
+    pub kind: TabKindEnum,
+    pub title: String,
+    pub connection_status: ConnectionStatusEnum,
+}
+
+/// 关闭确认记录（FFI 友好版本）。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CloseConfirmationRecord {
+    pub tab_ids: Vec<String>,
+    pub connected_terminal_count: u32,
+}
+
+/// 终端会话阶段（FFI 枚举）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TerminalPhaseEnum {
+    Connecting,
+    Shell,
+    Failed,
+}
+
+impl From<TerminalPhaseEnum> for panda_core::TerminalPhase {
+    fn from(p: TerminalPhaseEnum) -> Self {
+        match p {
+            TerminalPhaseEnum::Connecting => panda_core::TerminalPhase::Connecting,
+            TerminalPhaseEnum::Shell => panda_core::TerminalPhase::Shell,
+            TerminalPhaseEnum::Failed => panda_core::TerminalPhase::Failed,
+        }
+    }
+}
+
+impl From<panda_core::TerminalPhase> for TerminalPhaseEnum {
+    fn from(p: panda_core::TerminalPhase) -> Self {
+        match p {
+            panda_core::TerminalPhase::Connecting => TerminalPhaseEnum::Connecting,
+            panda_core::TerminalPhase::Shell => TerminalPhaseEnum::Shell,
+            panda_core::TerminalPhase::Failed => TerminalPhaseEnum::Failed,
+        }
+    }
+}
+
+/// 终端会话失败分类（FFI 枚举）。
+/// 复用已有的 FailureCategoryEnum 映射。
+impl From<TerminalFailureCategoryEnum> for panda_core::TerminalFailureCategory {
+    fn from(c: TerminalFailureCategoryEnum) -> Self {
+        match c {
+            TerminalFailureCategoryEnum::Timeout => panda_core::TerminalFailureCategory::Timeout,
+            TerminalFailureCategoryEnum::AuthFailed => panda_core::TerminalFailureCategory::AuthFailed,
+            TerminalFailureCategoryEnum::MissingCredential => panda_core::TerminalFailureCategory::MissingCredential,
+            TerminalFailureCategoryEnum::HostKeyMismatch => panda_core::TerminalFailureCategory::HostKeyMismatch,
+            TerminalFailureCategoryEnum::Other => panda_core::TerminalFailureCategory::Other,
+        }
+    }
+}
+
+impl From<panda_core::TerminalFailureCategory> for TerminalFailureCategoryEnum {
+    fn from(c: panda_core::TerminalFailureCategory) -> Self {
+        match c {
+            panda_core::TerminalFailureCategory::Timeout => TerminalFailureCategoryEnum::Timeout,
+            panda_core::TerminalFailureCategory::AuthFailed => TerminalFailureCategoryEnum::AuthFailed,
+            panda_core::TerminalFailureCategory::MissingCredential => TerminalFailureCategoryEnum::MissingCredential,
+            panda_core::TerminalFailureCategory::HostKeyMismatch => TerminalFailureCategoryEnum::HostKeyMismatch,
+            panda_core::TerminalFailureCategory::Other => TerminalFailureCategoryEnum::Other,
+        }
+    }
+}
+
+/// 终端会话失败分类（FFI 枚举）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TerminalFailureCategoryEnum {
+    Timeout,
+    AuthFailed,
+    MissingCredential,
+    HostKeyMismatch,
+    Other,
+}
+
+/// 终端会话记录（FFI 友好版本）。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TerminalSessionRecord {
+    pub id: String,
+    pub host_id: String,
+    pub phase: TerminalPhaseEnum,
+    pub failure_category: Option<TerminalFailureCategoryEnum>,
+    pub failure_message: Option<String>,
+    pub attempt: u32,
+}
+
+impl From<panda_core::TerminalSessionState> for TerminalSessionRecord {
+    fn from(s: panda_core::TerminalSessionState) -> Self {
+        TerminalSessionRecord {
+            id: s.id,
+            host_id: s.host_id,
+            phase: s.phase.into(),
+            failure_category: s.failure_category.map(|c| c.into()),
+            failure_message: s.failure_message,
+            attempt: s.attempt,
+        }
+    }
+}
+
+/// 工作区内部标签页状态。
+#[derive(Debug, Clone)]
+struct InternalTab {
+    id: String,
+    host_id: String,
+    kind: panda_core::TabKind,
+    connection_status: panda_core::ConnectionStatus,
+    /// 终端标签页是否已连接（用于关闭确认判断）。
+    terminal_connected: bool,
+}
+
+impl InternalTab {
+    fn to_workspace_tab(&self, title: String) -> panda_core::WorkspaceTab {
+        panda_core::WorkspaceTab {
+            id: self.id.clone(),
+            host_id: self.host_id.clone(),
+            kind: self.kind,
+            title,
+            connection_status: self.connection_status,
+        }
+    }
+}
+
+/// 批量关闭待确认。
+#[derive(Debug, Clone)]
+enum PendingClose {
+    /// 单标签关闭确认。
+    Single(String),
+    /// 批量关闭确认。
+    Batch {
+        scope: panda_core::workspace::BatchCloseScope,
+        connected_terminal_count: u32,
+    },
+}
+
+/// 工作区全局状态管理器。
+struct WorkspaceState {
+    tabs: Vec<InternalTab>,
+    active_tab_id: Option<String>,
+    pending_close: Option<PendingClose>,
+    /// 主机名查询函数：host_id -> Option<name>
+    host_name_provider: Box<dyn Fn(&str) -> Option<String> + Send>,
+    /// 终端会话状态机：tab_id -> TerminalSessionState
+    terminal_sessions: HashMap<String, panda_core::TerminalSessionState>,
+    /// TOFU 并发序列化：host_id → 等待该主机确认结果的 oneshot sender 列表。
+    tofu_waiters: HashMap<String, Vec<tokio::sync::oneshot::Sender<bool>>>,
+    /// TOFU 并发序列化：host_id → 是否已有探测在进行中。
+    tofu_probing: HashSet<String>,
+}
+
+impl WorkspaceState {
+    fn new() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active_tab_id: None,
+            pending_close: None,
+            host_name_provider: Box::new(|id: &str| Some(id.to_string())),
+            terminal_sessions: HashMap::new(),
+            tofu_waiters: HashMap::new(),
+            tofu_probing: HashSet::new(),
+        }
+    }
+
+    /// 设置主机名查询函数。
+    fn set_host_name_provider(&mut self, provider: Box<dyn Fn(&str) -> Option<String> + Send>) {
+        self.host_name_provider = provider;
+    }
+
+    /// 计算当前标签页列表（含消歧标题）。
+    fn tab_list(&self) -> Vec<panda_core::WorkspaceTab> {
+        let workspace_tabs: Vec<panda_core::WorkspaceTab> = self
+            .tabs
+            .iter()
+            .map(|t| t.to_workspace_tab(String::new()))
+            .collect();
+        let titles = panda_core::compute_disambiguated_titles(
+            &workspace_tabs,
+            &|host_id| (self.host_name_provider)(host_id),
+        );
+        self.tabs
+            .iter()
+            .zip(titles.into_iter())
+            .map(|(t, title)| t.to_workspace_tab(title))
+            .collect()
+    }
+
+    /// 打开新标签页，返回标签页 id。
+    fn open_tab(&mut self, host_id: String, kind: panda_core::TabKind) -> String {
+        let id = Uuid::new_v4().to_string();
+        self.tabs.push(InternalTab {
+            id: id.clone(),
+            host_id,
+            kind,
+            connection_status: panda_core::ConnectionStatus::Connecting,
+            terminal_connected: false,
+        });
+        self.active_tab_id = Some(id.clone());
+        id
+    }
+
+    /// 更新标签页连接状态。
+    fn report_connection_status(
+        &mut self,
+        tab_id: &str,
+        status: panda_core::ConnectionStatus,
+    ) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.connection_status = status;
+            if tab.kind == panda_core::TabKind::Terminal {
+                match status {
+                    panda_core::ConnectionStatus::Connected => {
+                        tab.terminal_connected = true;
+                    }
+                    panda_core::ConnectionStatus::Failed
+                    | panda_core::ConnectionStatus::Inactive => {
+                        tab.terminal_connected = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// 聚合同一主机的连接状态。
+    fn host_connection_status(&self, host_id: &str) -> panda_core::ConnectionStatus {
+        let statuses: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|t| t.host_id == host_id)
+            .map(|t| t.connection_status)
+            .collect();
+        panda_core::aggregate_connection_status(&statuses)
+    }
+
+    /// 内部关闭标签页（无确认检查）。
+    fn close_tab_internal(&mut self, tab_id: &str) {
+        if let Some(index) = self.tabs.iter().position(|t| t.id == tab_id) {
+            self.tabs.remove(index);
+            self.terminal_sessions.remove(tab_id);
+            if self.active_tab_id.as_deref() == Some(tab_id) {
+                let remaining_ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
+                self.active_tab_id =
+                    panda_core::next_active_tab_after_close(&remaining_ids, index);
+            }
+        }
+    }
+
+    /// 请求关闭标签页。若为已连接终端标签页，设置待确认；否则直接关闭。
+    /// 返回是否需要确认。
+    fn request_close(&mut self, tab_id: &str) -> bool {
+        let tab = match self.tabs.iter().find(|t| t.id == tab_id) {
+            Some(t) => t,
+            None => return false,
+        };
+        if tab.kind == panda_core::TabKind::Terminal && tab.terminal_connected {
+            self.pending_close = Some(PendingClose::Single(tab_id.to_string()));
+            true
+        } else {
+            self.close_tab_internal(tab_id);
+            false
+        }
+    }
+
+    /// 确认单标签关闭。
+    fn confirm_close(&mut self) {
+        if let Some(PendingClose::Single(tab_id)) = self.pending_close.take() {
+            self.close_tab_internal(&tab_id);
+        }
+    }
+
+    /// 取消关闭。
+    fn cancel_close(&mut self) {
+        self.pending_close = None;
+    }
+
+    /// 获取待确认信息。
+    fn pending_close_info(&self) -> Option<CloseConfirmationRecord> {
+        match &self.pending_close {
+            Some(PendingClose::Single(tab_id)) => {
+                let tab = self.tabs.iter().find(|t| &t.id == tab_id)?;
+                Some(CloseConfirmationRecord {
+                    tab_ids: vec![tab_id.clone()],
+                    connected_terminal_count: if tab.terminal_connected { 1 } else { 0 },
+                })
+            }
+            Some(PendingClose::Batch {
+                scope,
+                connected_terminal_count,
+            }) => {
+                let tab_ids = match scope {
+                    panda_core::workspace::BatchCloseScope::Others { keeping } => self
+                        .tabs
+                        .iter()
+                        .filter(|t| &t.id != keeping)
+                        .map(|t| t.id.clone())
+                        .collect(),
+                    panda_core::workspace::BatchCloseScope::All => {
+                        self.tabs.iter().map(|t| t.id.clone()).collect()
+                    }
+                };
+                Some(CloseConfirmationRecord {
+                    tab_ids,
+                    connected_terminal_count: *connected_terminal_count,
+                })
+            }
+            None => None,
+        }
+    }
+
+    /// 请求关闭其他标签页。
+    fn request_close_others(&mut self, keeping: &str) {
+        let others: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != keeping)
+            .collect();
+        let connected_count = others
+            .iter()
+            .filter(|t| t.kind == panda_core::TabKind::Terminal && t.terminal_connected)
+            .count() as u32;
+        if connected_count > 0 {
+            self.pending_close = Some(PendingClose::Batch {
+                scope: panda_core::workspace::BatchCloseScope::Others {
+                    keeping: keeping.to_string(),
+                },
+                connected_terminal_count: connected_count,
+            });
+        } else {
+            self.close_others_internal(keeping);
+        }
+    }
+
+    /// 请求关闭全部标签页。
+    fn request_close_all(&mut self) {
+        let connected_count = self
+            .tabs
+            .iter()
+            .filter(|t| t.kind == panda_core::TabKind::Terminal && t.terminal_connected)
+            .count() as u32;
+        if connected_count > 0 {
+            self.pending_close = Some(PendingClose::Batch {
+                scope: panda_core::workspace::BatchCloseScope::All,
+                connected_terminal_count: connected_count,
+            });
+        } else {
+            self.close_all_internal();
+        }
+    }
+
+    /// 确认批量关闭。
+    fn confirm_batch_close(&mut self) {
+        if let Some(PendingClose::Batch { scope, .. }) = self.pending_close.take() {
+            match scope {
+                panda_core::workspace::BatchCloseScope::Others { keeping } => {
+                    self.close_others_internal(&keeping);
+                }
+                panda_core::workspace::BatchCloseScope::All => {
+                    self.close_all_internal();
+                }
+            }
+        }
+    }
+
+    /// 内部关闭其他标签页。
+    fn close_others_internal(&mut self, keeping: &str) {
+        let to_remove: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != keeping)
+            .map(|t| t.id.clone())
+            .collect();
+        for id in to_remove {
+            self.close_tab_internal(&id);
+        }
+        if self.tabs.iter().any(|t| t.id == keeping) {
+            self.active_tab_id = Some(keeping.to_string());
+        }
+    }
+
+    /// 内部关闭全部标签页。
+    fn close_all_internal(&mut self) {
+        let ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
+        for id in ids {
+            self.close_tab_internal(&id);
+        }
+    }
+}
+
+static WORKSPACE_STATE: OnceLock<Mutex<WorkspaceState>> = OnceLock::new();
+
+fn workspace_state() -> &'static Mutex<WorkspaceState> {
+    WORKSPACE_STATE.get_or_init(|| Mutex::new(WorkspaceState::new()))
+}
+
+/// 设置主机名查询函数（由 Swift 侧在初始化时调用）。
+/// 该函数接受一个闭包，将 host_id 映射为显示名称。
+/// 注意：由于 FFI 限制，这里提供一个简化版本：直接传入 host_id -> name 的映射表。
+#[uniffi::export]
+pub fn workspace_set_host_names(host_names: Vec<HostNameMapping>) {
+    let map: std::collections::HashMap<String, String> = host_names
+        .into_iter()
+        .map(|m| (m.host_id, m.name))
+        .collect();
+    let mut state = workspace_state().lock().unwrap();
+    state.set_host_name_provider(Box::new(move |id: &str| map.get(id).cloned()));
+}
+
+/// 主机名映射记录。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HostNameMapping {
+    pub host_id: String,
+    pub name: String,
+}
+
+/// 打开标签页。
+#[uniffi::export]
+pub fn workspace_open_tab(host_id: String, kind: TabKindEnum) -> WorkspaceTabRecord {
+    let mut state = workspace_state().lock().unwrap();
+    let tab_id = state.open_tab(host_id, kind.into());
+    // 返回刚创建的标签页记录
+    let tabs = state.tab_list();
+    tabs.into_iter()
+        .find(|t| t.id == tab_id)
+        .map(|t| WorkspaceTabRecord {
+            id: t.id,
+            host_id: t.host_id,
+            kind: t.kind.into(),
+            title: t.title,
+            connection_status: t.connection_status.into(),
+        })
+        .expect("just created tab should exist")
+}
+
+/// 关闭标签页（请求式，可能需要确认）。
+#[uniffi::export]
+pub fn workspace_close_tab(tab_id: String) {
+    let mut state = workspace_state().lock().unwrap();
+    state.request_close(&tab_id);
+}
+
+/// 获取标签页列表（含消歧标题）。
+#[uniffi::export]
+pub fn workspace_tab_list() -> Vec<WorkspaceTabRecord> {
+    let state = workspace_state().lock().unwrap();
+    state
+        .tab_list()
+        .into_iter()
+        .map(|t| WorkspaceTabRecord {
+            id: t.id,
+            host_id: t.host_id,
+            kind: t.kind.into(),
+            title: t.title,
+            connection_status: t.connection_status.into(),
+        })
+        .collect()
+}
+
+/// 获取主机连接状态（聚合）。
+#[uniffi::export]
+pub fn workspace_host_connection_status(host_id: String) -> ConnectionStatusEnum {
+    let state = workspace_state().lock().unwrap();
+    state.host_connection_status(&host_id).into()
+}
+
+/// 更新标签页连接状态（由 Swift 侧在连接状态变化时调用）。
+#[uniffi::export]
+pub fn workspace_report_connection_status(tab_id: String, status: ConnectionStatusEnum) {
+    let mut state = workspace_state().lock().unwrap();
+    state.report_connection_status(&tab_id, status.into());
+}
+
+/// 关闭其他标签页（保留指定标签页）。
+#[uniffi::export]
+pub fn workspace_close_other_tabs(keeping_tab_id: String) {
+    let mut state = workspace_state().lock().unwrap();
+    state.request_close_others(&keeping_tab_id);
+}
+
+/// 关闭全部标签页。
+#[uniffi::export]
+pub fn workspace_close_all_tabs() {
+    let mut state = workspace_state().lock().unwrap();
+    state.request_close_all();
+}
+
+/// 确认关闭。
+#[uniffi::export]
+pub fn workspace_confirm_close() {
+    let mut state = workspace_state().lock().unwrap();
+    // 先检查是单标签还是批量
+    let is_batch = matches!(&state.pending_close, Some(PendingClose::Batch { .. }));
+    if is_batch {
+        state.confirm_batch_close();
+    } else {
+        state.confirm_close();
+    }
+}
+
+/// 取消关闭。
+#[uniffi::export]
+pub fn workspace_cancel_close() {
+    let mut state = workspace_state().lock().unwrap();
+    state.cancel_close();
+}
+
+/// 获取待关闭确认信息。
+#[uniffi::export]
+pub fn workspace_pending_close() -> Option<CloseConfirmationRecord> {
+    let state = workspace_state().lock().unwrap();
+    state.pending_close_info()
+}
+
+/// 选择标签页（设为活动标签）。
+#[uniffi::export]
+pub fn workspace_select_tab(tab_id: String) {
+    let mut state = workspace_state().lock().unwrap();
+    if state.tabs.iter().any(|t| t.id == tab_id) {
+        state.active_tab_id = Some(tab_id);
+    }
+}
+
+/// 获取活动标签页 id。
+#[uniffi::export]
+pub fn workspace_active_tab_id() -> Option<String> {
+    let state = workspace_state().lock().unwrap();
+    state.active_tab_id.clone()
+}
+
+/// 重置工作区状态（用于测试）。
+#[uniffi::export]
+pub fn workspace_reset() {
+    let mut state = workspace_state().lock().unwrap();
+    state.tabs.clear();
+    state.active_tab_id = None;
+    state.pending_close = None;
+    state.terminal_sessions.clear();
+}
+
+// ---------------------------------------------------------------------------
+// 终端会话状态机 API
+// ---------------------------------------------------------------------------
+
+/// 注册/创建终端会话。
+///
+/// 为指定标签页创建新的终端会话状态，初始阶段为 `Connecting`，代次为 0。
+/// 若该标签页已有会话，则覆盖之。
+#[uniffi::export]
+pub fn terminal_session_register(host_id: String, tab_id: String) -> TerminalSessionRecord {
+    let mut state = workspace_state().lock().unwrap();
+    let session = panda_core::TerminalSessionState::new(tab_id.clone(), host_id);
+    state.terminal_sessions.insert(tab_id, session.clone());
+    session.into()
+}
+
+/// 获取终端会话当前阶段。
+///
+/// 若标签页无会话记录，返回 `None`。
+#[uniffi::export]
+pub fn terminal_session_phase(tab_id: String) -> Option<TerminalPhaseEnum> {
+    let state = workspace_state().lock().unwrap();
+    state.terminal_sessions.get(&tab_id).map(|s| s.phase.into())
+}
+
+/// 状态转换：connecting → shell。
+///
+/// 握手成功，将会话推进到 shell 阶段。
+/// 若当前阶段不是 `Connecting` 或标签页无会话，不做任何操作。
+#[uniffi::export]
+pub fn terminal_session_transition_to_shell(tab_id: String) {
+    let mut state = workspace_state().lock().unwrap();
+    if let Some(session) = state.terminal_sessions.get(&tab_id).cloned() {
+        if let Some(new_session) = panda_core::transition_to_shell(&session) {
+            state.terminal_sessions.insert(tab_id, new_session);
+        }
+    }
+}
+
+/// 状态转换：任意阶段 → failed。
+///
+/// 连接失败或异常断开，将会话推进到失败阶段。
+/// 若标签页无会话，不做任何操作。
+#[uniffi::export]
+pub fn terminal_session_transition_to_failed(
+    tab_id: String,
+    category: TerminalFailureCategoryEnum,
+    message: String,
+) {
+    let mut state = workspace_state().lock().unwrap();
+    if let Some(session) = state.terminal_sessions.get(&tab_id).cloned() {
+        let new_session = panda_core::transition_to_failed(&session, category.into(), message);
+        state.terminal_sessions.insert(tab_id, new_session);
+    }
+}
+
+/// 重试：failed → connecting，代次递增。
+///
+/// 返回更新后的会话记录（包含新的代次）。
+/// 若当前阶段不是 `Failed` 或标签页无会话，返回 `None`。
+#[uniffi::export]
+pub fn terminal_session_retry(tab_id: String) -> Option<TerminalSessionRecord> {
+    let mut state = workspace_state().lock().unwrap();
+    if let Some(session) = state.terminal_sessions.get(&tab_id).cloned() {
+        if let Some(new_session) = panda_core::transition_to_connecting(&session) {
+            state.terminal_sessions.insert(tab_id, new_session.clone());
+            return Some(new_session.into());
+        }
+    }
+    None
+}
+
+/// 关闭终端会话，从状态管理器中移除。
+#[uniffi::export]
+pub fn terminal_session_close(tab_id: String) {
+    let mut state = workspace_state().lock().unwrap();
+    state.terminal_sessions.remove(&tab_id);
+}
+
+/// 检测握手结果是否已过期。
+///
+/// 用发起握手时的代次 `request_generation` 与当前会话的代次比较。
+/// 若不相等，说明在握手期间用户已重试或关闭，该结果应被丢弃。
+/// 若标签页无会话，返回 `true`（视为过期）。
+#[uniffi::export]
+pub fn terminal_session_is_stale(tab_id: String, request_generation: u32) -> bool {
+    let state = workspace_state().lock().unwrap();
+    match state.terminal_sessions.get(&tab_id) {
+        Some(session) => panda_core::is_stale(session, request_generation),
+        None => true, // 无会话视为过期
+    }
+}
+
+/// 获取终端会话当前状态记录。
+///
+/// 若标签页无会话，返回 `None`。
+#[uniffi::export]
+pub fn terminal_session_get(tab_id: String) -> Option<TerminalSessionRecord> {
+    let state = workspace_state().lock().unwrap();
+    state.terminal_sessions.get(&tab_id).map(|s| s.clone().into())
 }
 
 #[cfg(test)]
@@ -1905,5 +3125,755 @@ mod tests {
             Err(PandaError::UnknownConnection(id)) if id == u64::MAX
         ));
         assert!(connection_telemetry_list().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace API tests
+    // -----------------------------------------------------------------------
+
+    /// 辅助：创建带主机名映射的 WorkspaceState。
+    fn make_state(names: &[(&str, &str)]) -> WorkspaceState {
+        let map: std::collections::HashMap<String, String> = names
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect();
+        let mut state = WorkspaceState::new();
+        state.set_host_name_provider(Box::new(move |id: &str| map.get(id).cloned()));
+        state
+    }
+
+    #[test]
+    fn workspace_open_tab_creates_tab_with_disambiguated_title() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        let list = state.tab_list();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].title, "server");
+        assert_eq!(list[1].title, "server(2)");
+        assert_eq!(list[2].title, "server(3)");
+        assert_eq!(list[0].id, id1);
+        assert_eq!(list[1].id, id2);
+        assert_eq!(list[2].id, id3);
+        assert_eq!(list[0].kind, panda_core::TabKind::Terminal);
+        assert_eq!(list[0].connection_status, panda_core::ConnectionStatus::Connecting);
+    }
+
+    #[test]
+    fn workspace_close_tab_renumbers_remaining() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        // 关闭第一个标签页（非已连接终端，直接关闭）
+        state.request_close(&id1);
+
+        let list = state.tab_list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].title, "server");
+        assert_eq!(list[1].title, "server(2)");
+        assert!(list.iter().any(|t| t.id == id3));
+    }
+
+    #[test]
+    fn workspace_close_active_tab_selects_neighbor() {
+        let mut state = make_state(&[("h1", "server")]);
+        let _id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        // id3 是活动标签（最后打开的）
+        assert_eq!(state.active_tab_id, Some(id3.clone()));
+
+        // 关闭活动标签 id3
+        state.request_close(&id3);
+        // 应选左侧相邻 id2
+        assert_eq!(state.active_tab_id, Some(id2.clone()));
+    }
+
+    #[test]
+    fn workspace_host_connection_status_aggregates_with_priority() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        // 初始都是 Connecting
+        assert_eq!(
+            state.host_connection_status("h1"),
+            panda_core::ConnectionStatus::Connecting
+        );
+
+        // id1 connected, id2 failed → Connected (优先级最高)
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+        state.report_connection_status(&id2, panda_core::ConnectionStatus::Failed);
+        assert_eq!(
+            state.host_connection_status("h1"),
+            panda_core::ConnectionStatus::Connected
+        );
+
+        // 两个都 failed → Failed
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Failed);
+        assert_eq!(
+            state.host_connection_status("h1"),
+            panda_core::ConnectionStatus::Failed
+        );
+
+        // 无标签页 → Inactive
+        state.close_tab_internal(&id1);
+        state.close_tab_internal(&id2);
+        assert_eq!(
+            state.host_connection_status("h1"),
+            panda_core::ConnectionStatus::Inactive
+        );
+    }
+
+    #[test]
+    fn workspace_close_connected_terminal_triggers_confirmation() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+
+        // 请求关闭应触发确认
+        state.request_close(&id1);
+
+        // 标签页应该还在
+        assert_eq!(state.tab_list().len(), 1);
+
+        // 应有待确认
+        let pending = state.pending_close_info();
+        assert!(pending.is_some());
+        let pending = pending.unwrap();
+        assert_eq!(pending.tab_ids, vec![id1.clone()]);
+        assert_eq!(pending.connected_terminal_count, 1);
+
+        // 确认关闭
+        state.confirm_close();
+        assert!(state.tab_list().is_empty());
+        assert!(state.pending_close_info().is_none());
+    }
+
+    #[test]
+    fn workspace_cancel_close_preserves_tab() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+
+        state.request_close(&id1);
+        assert!(state.pending_close_info().is_some());
+
+        state.cancel_close();
+        assert!(state.pending_close_info().is_none());
+
+        // 标签页应该还在
+        assert_eq!(state.tab_list().len(), 1);
+        assert_eq!(state.tab_list()[0].id, id1);
+    }
+
+    #[test]
+    fn workspace_close_sftp_tab_does_not_require_confirmation() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+
+        // SFTP 标签页直接关闭，不需要确认
+        state.request_close(&id1);
+        assert!(state.pending_close_info().is_none());
+        assert!(state.tab_list().is_empty());
+    }
+
+    #[test]
+    fn workspace_close_all_with_connected_terminals_triggers_batch_confirmation() {
+        let mut state = make_state(&[("h1", "server"), ("h2", "other")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id3 = state.open_tab("h2".into(), panda_core::TabKind::Sftp);
+
+        // 标记 id1 为已连接终端
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+
+        state.request_close_all();
+
+        // 应有批量确认
+        let pending = state.pending_close_info();
+        assert!(pending.is_some());
+        let pending = pending.unwrap();
+        assert_eq!(pending.connected_terminal_count, 1);
+        assert_eq!(pending.tab_ids.len(), 3);
+
+        // 确认关闭
+        state.confirm_batch_close();
+        assert!(state.tab_list().is_empty());
+    }
+
+    #[test]
+    fn workspace_close_all_without_connected_terminals_closes_immediately() {
+        let mut state = make_state(&[("h1", "server")]);
+        let _id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+
+        // 没有已连接的终端
+        state.request_close_all();
+
+        // 不应有待确认
+        assert!(state.pending_close_info().is_none());
+        assert!(state.tab_list().is_empty());
+    }
+
+    #[test]
+    fn workspace_close_others_with_connected_terminals_triggers_confirmation() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        // 标记 id2 为已连接终端
+        state.report_connection_status(&id2, panda_core::ConnectionStatus::Connected);
+
+        // 关闭其他（保留 id1）
+        state.request_close_others(&id1);
+
+        // 应有确认
+        let pending = state.pending_close_info();
+        assert!(pending.is_some());
+        let pending = pending.unwrap();
+        assert_eq!(pending.connected_terminal_count, 1);
+        assert!(pending.tab_ids.contains(&id2));
+        assert!(pending.tab_ids.contains(&id3));
+        assert!(!pending.tab_ids.contains(&id1));
+
+        // 确认关闭
+        state.confirm_batch_close();
+        assert_eq!(state.tab_list().len(), 1);
+        assert_eq!(state.tab_list()[0].id, id1);
+    }
+
+    #[test]
+    fn workspace_close_others_without_connected_closes_immediately() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+
+        // 没有已连接的终端
+        state.request_close_others(&id1);
+
+        assert!(state.pending_close_info().is_none());
+        assert_eq!(state.tab_list().len(), 1);
+        assert_eq!(state.tab_list()[0].id, id1);
+    }
+
+    #[test]
+    fn workspace_select_tab_updates_active() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        // id2 是活动标签
+        assert_eq!(state.active_tab_id, Some(id2.clone()));
+
+        state.active_tab_id = Some(id1.clone());
+        assert_eq!(state.active_tab_id, Some(id1.clone()));
+    }
+
+    #[test]
+    fn workspace_disconnected_terminal_closes_without_confirmation() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Failed);
+
+        // 已断开的终端标签页不需要确认
+        state.request_close(&id1);
+        assert!(state.pending_close_info().is_none());
+        assert!(state.tab_list().is_empty());
+    }
+
+    #[test]
+    fn workspace_unknown_host_uses_host_id_as_title() {
+        let mut state = make_state(&[]); // 不设置任何主机名
+        let _id1 = state.open_tab("unknown-host-id".into(), panda_core::TabKind::Terminal);
+        let list = state.tab_list();
+        assert_eq!(list[0].title, "unknown-host-id");
+    }
+
+    #[test]
+    fn workspace_close_first_tab_selects_right_neighbor() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        // 活动标签是 id3，手动设为 id1
+        state.active_tab_id = Some(id1.clone());
+        // 关闭 id1（第一个标签）
+        state.request_close(&id1);
+        // 应选右侧邻居（索引 0 位置），即 id2
+        assert_eq!(state.active_tab_id, Some(id2.clone()));
+    }
+
+    #[test]
+    fn workspace_batch_close_confirmed_by_confirm_close() {
+        let mut state = make_state(&[("h1", "server")]);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
+
+        state.request_close_all();
+        assert!(state.pending_close_info().is_some());
+
+        // workspace_confirm_close 应该也能处理批量关闭
+        // 在 FFI 层通过 is_batch 判断
+        let is_batch = matches!(&state.pending_close, Some(PendingClose::Batch { .. }));
+        assert!(is_batch);
+
+        if is_batch {
+            state.confirm_batch_close();
+        } else {
+            state.confirm_close();
+        }
+        assert!(state.tab_list().is_empty());
+    }
+
+    #[test]
+    fn workspace_multiple_hosts_independent_numbering() {
+        let mut state = make_state(&[("h1", "alpha"), ("h2", "beta")]);
+        let _t1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _t2 = state.open_tab("h2".into(), panda_core::TabKind::Terminal);
+        let _t3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+
+        let list = state.tab_list();
+        assert_eq!(list[0].title, "alpha");
+        assert_eq!(list[1].title, "beta");
+        assert_eq!(list[2].title, "alpha(2)");
+    }
+
+    // -----------------------------------------------------------------------
+    // 终端会话状态机 FFI
+    // -----------------------------------------------------------------------
+
+    fn unique_tab_id(prefix: &str) -> String {
+        format!("{}-{}", prefix, Uuid::new_v4())
+    }
+
+    #[test]
+    fn terminal_session_register_creates_connecting_session() {
+        let tab_id = unique_tab_id("register");
+        let record = terminal_session_register("host-1".into(), tab_id.clone());
+        assert_eq!(record.id, tab_id);
+        assert_eq!(record.host_id, "host-1");
+        assert_eq!(record.phase, TerminalPhaseEnum::Connecting);
+        assert_eq!(record.attempt, 0);
+        assert_eq!(record.failure_category, None);
+        assert_eq!(record.failure_message, None);
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_phase_returns_current_phase() {
+        let tab_id = unique_tab_id("phase");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        assert_eq!(terminal_session_phase(tab_id.clone()), Some(TerminalPhaseEnum::Connecting));
+
+        terminal_session_transition_to_shell(tab_id.clone());
+        assert_eq!(terminal_session_phase(tab_id.clone()), Some(TerminalPhaseEnum::Shell));
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_phase_returns_none_for_unknown_tab() {
+        assert_eq!(terminal_session_phase(unique_tab_id("nonexistent")), None);
+    }
+
+    #[test]
+    fn terminal_session_transition_to_shell_from_connecting() {
+        let tab_id = unique_tab_id("to-shell");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        terminal_session_transition_to_shell(tab_id.clone());
+
+        let record = terminal_session_get(tab_id.clone()).unwrap();
+        assert_eq!(record.phase, TerminalPhaseEnum::Shell);
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_transition_to_shell_from_shell_is_noop() {
+        let tab_id = unique_tab_id("noop-shell");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        terminal_session_transition_to_shell(tab_id.clone());
+        // 再次调用，应无效果
+        terminal_session_transition_to_shell(tab_id.clone());
+
+        let record = terminal_session_get(tab_id.clone()).unwrap();
+        assert_eq!(record.phase, TerminalPhaseEnum::Shell);
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_transition_to_failed_records_error() {
+        let tab_id = unique_tab_id("fail");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        terminal_session_transition_to_failed(
+            tab_id.clone(),
+            TerminalFailureCategoryEnum::Timeout,
+            "连接超时".into(),
+        );
+
+        let record = terminal_session_get(tab_id.clone()).unwrap();
+        assert_eq!(record.phase, TerminalPhaseEnum::Failed);
+        assert_eq!(record.failure_category, Some(TerminalFailureCategoryEnum::Timeout));
+        assert_eq!(record.failure_message, Some("连接超时".into()));
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_retry_increments_attempt() {
+        let tab_id = unique_tab_id("retry");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        terminal_session_transition_to_failed(
+            tab_id.clone(),
+            TerminalFailureCategoryEnum::AuthFailed,
+            "认证失败".into(),
+        );
+
+        let retry = terminal_session_retry(tab_id.clone()).unwrap();
+        assert_eq!(retry.phase, TerminalPhaseEnum::Connecting);
+        assert_eq!(retry.attempt, 1);
+        assert_eq!(retry.failure_category, None);
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_retry_from_connecting_returns_none() {
+        let tab_id = unique_tab_id("retry-connecting");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        // 当前是 Connecting，重试应返回 None
+        assert!(terminal_session_retry(tab_id.clone()).is_none());
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_close_removes_session() {
+        let tab_id = unique_tab_id("close");
+        terminal_session_register("host-1".into(), tab_id.clone());
+        assert!(terminal_session_get(tab_id.clone()).is_some());
+
+        terminal_session_close(tab_id.clone());
+        assert!(terminal_session_get(tab_id.clone()).is_none());
+    }
+
+    #[test]
+    fn terminal_session_is_stale_detects_outdated_generation() {
+        let tab_id = unique_tab_id("stale");
+        let record = terminal_session_register("host-1".into(), tab_id.clone());
+        let gen0 = record.attempt;
+
+        // 代次 0 有效
+        assert!(!terminal_session_is_stale(tab_id.clone(), gen0));
+
+        // 失败并重试后代次变为 1
+        terminal_session_transition_to_failed(
+            tab_id.clone(),
+            TerminalFailureCategoryEnum::Timeout,
+            "超时".into(),
+        );
+        terminal_session_retry(tab_id.clone());
+
+        // 代次 0 现在已过期
+        assert!(terminal_session_is_stale(tab_id.clone(), gen0));
+        // 代次 1 有效
+        assert!(!terminal_session_is_stale(tab_id.clone(), 1));
+        terminal_session_close(tab_id);
+    }
+
+    #[test]
+    fn terminal_session_is_stale_returns_true_for_unknown_tab() {
+        assert!(terminal_session_is_stale(unique_tab_id("nonexistent-stale"), 0));
+    }
+
+    #[test]
+    fn terminal_session_full_lifecycle_via_ffi() {
+        let tab_id = unique_tab_id("lifecycle");
+
+        // 注册
+        let record = terminal_session_register("host-1".into(), tab_id.clone());
+        assert_eq!(record.phase, TerminalPhaseEnum::Connecting);
+        assert_eq!(record.attempt, 0);
+
+        // 连接失败
+        terminal_session_transition_to_failed(
+            tab_id.clone(),
+            TerminalFailureCategoryEnum::Timeout,
+            "超时".into(),
+        );
+        let failed = terminal_session_get(tab_id.clone()).unwrap();
+        assert_eq!(failed.phase, TerminalPhaseEnum::Failed);
+        assert_eq!(failed.attempt, 0);
+
+        // 重试
+        let retry = terminal_session_retry(tab_id.clone()).unwrap();
+        assert_eq!(retry.phase, TerminalPhaseEnum::Connecting);
+        assert_eq!(retry.attempt, 1);
+
+        // 旧代次过期
+        assert!(terminal_session_is_stale(tab_id.clone(), 0));
+        assert!(!terminal_session_is_stale(tab_id.clone(), 1));
+
+        // 连接成功
+        terminal_session_transition_to_shell(tab_id.clone());
+        let shell = terminal_session_get(tab_id.clone()).unwrap();
+        assert_eq!(shell.phase, TerminalPhaseEnum::Shell);
+        assert_eq!(shell.attempt, 1);
+
+        // 关闭
+        terminal_session_close(tab_id.clone());
+        assert!(terminal_session_get(tab_id.clone()).is_none());
+    }
+
+    #[test]
+    fn terminal_session_close_via_tab_close() {
+        let mut state = workspace_state().lock().unwrap();
+        // 打开标签页
+        let tab_id = state.open_tab("host-1".into(), panda_core::TabKind::Terminal);
+        state.terminal_sessions.insert(
+            tab_id.clone(),
+            panda_core::TerminalSessionState::new(tab_id.clone(), "host-1".into()),
+        );
+        assert!(state.terminal_sessions.contains_key(&tab_id));
+
+        // 关闭标签页应同时清理终端会话
+        state.close_tab_internal(&tab_id);
+        assert!(!state.terminal_sessions.contains_key(&tab_id));
+    }
+
+    // -----------------------------------------------------------------------
+    // TOFU waiter management tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tofu_first_waiter_gets_probe_true() {
+        preconnect_tofu_reset();
+        assert!(preconnect_tofu_register_waiter("host-1".into()));
+        preconnect_tofu_resolve("host-1".into(), true);
+    }
+
+    #[test]
+    fn tofu_second_waiter_gets_probe_false() {
+        preconnect_tofu_reset();
+        assert!(preconnect_tofu_register_waiter("host-2".into()));
+        // 第二个等待者应返回 false
+        assert!(!preconnect_tofu_register_waiter("host-2".into()));
+        preconnect_tofu_resolve("host-2".into(), true);
+    }
+
+    #[test]
+    fn tofu_resolve_clears_probing_state() {
+        preconnect_tofu_reset();
+        assert!(preconnect_tofu_register_waiter("host-3".into()));
+        preconnect_tofu_resolve("host-3".into(), true);
+        // 清理后可以再次注册
+        assert!(preconnect_tofu_register_waiter("host-3".into()));
+        preconnect_tofu_resolve("host-3".into(), false);
+    }
+
+    #[test]
+    fn tofu_different_hosts_are_independent() {
+        preconnect_tofu_reset();
+        assert!(preconnect_tofu_register_waiter("host-a".into()));
+        assert!(preconnect_tofu_register_waiter("host-b".into()));
+        // 不同主机互不影响
+        assert!(!preconnect_tofu_register_waiter("host-a".into()));
+        assert!(!preconnect_tofu_register_waiter("host-b".into()));
+        preconnect_tofu_resolve("host-a".into(), true);
+        preconnect_tofu_resolve("host-b".into(), false);
+    }
+
+    #[test]
+    fn tofu_resolve_without_waiters_is_noop() {
+        preconnect_tofu_reset();
+        // 没有等待者时 resolve 不应 panic
+        preconnect_tofu_resolve("nonexistent".into(), true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Transfer change counter tests
+    // -----------------------------------------------------------------------
+
+    /// 构造一个假的 TransferTask 用于测试（不启动异步工作线程）。
+    fn make_test_task(id: Uuid) -> TransferTask {
+        TransferTask {
+            id,
+            direction: TransferDirectionEnum::Upload,
+            host_id: "test-host".into(),
+            local_path: "/tmp/test".into(),
+            remote_path: "/remote/test".into(),
+            password: None,
+            passphrase: None,
+            size: 1024,
+            status: Arc::new(std::sync::Mutex::new(TransferStatusEnum::Queued)),
+            transferred: Arc::new(AtomicU64::new(0)),
+            error: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_notify: Arc::new(tokio::sync::Notify::new()),
+            version: Arc::new(AtomicU64::new(1)),
+            speed_tracker: Arc::new(Mutex::new(TransferSpeedTracker::new(1024))),
+            group_id: None,
+            group_name: None,
+        }
+    }
+
+    /// 将测试任务插入全局注册表。
+    fn insert_test_task(task: &TransferTask) {
+        transfer_tasks()
+            .lock()
+            .unwrap()
+            .insert(task.id, task.clone());
+    }
+
+    /// 从全局注册表移除测试任务。
+    fn remove_test_task(id: &Uuid) {
+        transfer_tasks().lock().unwrap().remove(id);
+    }
+
+    #[test]
+    fn progress_alone_advances_revision_and_snapshot() {
+        let task = make_test_task(Uuid::new_v4());
+        let progress = task.progress_callback();
+        for done in [1, 512, 1024] {
+            let before = transfer_change_counter();
+            progress(done, 1024);
+            assert!(transfer_change_counter() > before, "仅字节进度也必须通知订阅方");
+            assert_eq!(task.snapshot().transferred, done);
+        }
+    }
+
+    #[test]
+    fn change_counter_increments_on_notify() {
+        let before = transfer_change_counter();
+        notify_transfer_changed();
+        let after = transfer_change_counter();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn change_counter_does_not_increment_on_read() {
+        // 读取计数器本身不改变它的值
+        let v1 = transfer_change_counter();
+        let v2 = transfer_change_counter();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn change_counter_increments_on_cancel() {
+        let id = Uuid::new_v4();
+        let task = make_test_task(id);
+        insert_test_task(&task);
+
+        let before = transfer_change_counter();
+        let _ = transfer_cancel(id.to_string());
+        let after = transfer_change_counter();
+        assert!(after > before, "cancel should bump change counter");
+
+        remove_test_task(&id);
+    }
+
+    #[test]
+    fn change_counter_increments_on_pause() {
+        let id = Uuid::new_v4();
+        let task = make_test_task(id);
+        insert_test_task(&task);
+
+        let before = transfer_change_counter();
+        let _ = transfer_pause(id.to_string());
+        let after = transfer_change_counter();
+        assert!(after > before, "pause should bump change counter");
+
+        remove_test_task(&id);
+    }
+
+    #[test]
+    fn change_counter_increments_on_resume() {
+        let id = Uuid::new_v4();
+        let task = make_test_task(id);
+        // 先暂停
+        *task.status.lock().unwrap() = TransferStatusEnum::Paused;
+        insert_test_task(&task);
+
+        let before = transfer_change_counter();
+        let _ = transfer_resume(id.to_string());
+        let after = transfer_change_counter();
+        assert!(after > before, "resume should bump change counter");
+
+        remove_test_task(&id);
+    }
+
+    #[test]
+    fn change_counter_multiple_transitions_accumulate() {
+        let id = Uuid::new_v4();
+        let task = make_test_task(id);
+        insert_test_task(&task);
+
+        let c0 = transfer_change_counter();
+
+        // Queued → Paused
+        let _ = transfer_pause(id.to_string());
+        let c1 = transfer_change_counter();
+        assert!(c1 >= c0 + 1, "pause should bump counter by at least 1");
+
+        // Paused → Queued (resume)
+        let _ = transfer_resume(id.to_string());
+        let c2 = transfer_change_counter();
+        assert!(c2 >= c1 + 1, "resume should bump counter by at least 1");
+
+        // Queued → Cancelled
+        let _ = transfer_cancel(id.to_string());
+        let c3 = transfer_change_counter();
+        assert!(c3 >= c2 + 1, "cancel should bump counter by at least 1");
+
+        // 总共至少递增了 3 次
+        assert!(c3 >= c0 + 3, "three transitions should bump counter by at least 3");
+
+        remove_test_task(&id);
+    }
+
+    #[test]
+    fn change_counter_no_increment_for_noop_cancel() {
+        // 已完成的任务 cancel 是 no-op，任务状态不应改变
+        let id = Uuid::new_v4();
+        let task = make_test_task(id);
+        *task.status.lock().unwrap() = TransferStatusEnum::Completed;
+        insert_test_task(&task);
+
+        let _ = transfer_cancel(id.to_string());
+        // 状态应保持 Completed，不应被改为 Cancelled
+        assert_eq!(
+            *task.status.lock().unwrap(),
+            TransferStatusEnum::Completed,
+            "cancelling a completed task should not change its status"
+        );
+
+        remove_test_task(&id);
+    }
+
+    #[test]
+    fn change_counter_no_increment_for_noop_pause() {
+        // 已暂停的任务再次 pause 是 no-op，任务状态不应改变
+        let id = Uuid::new_v4();
+        let task = make_test_task(id);
+        *task.status.lock().unwrap() = TransferStatusEnum::Paused;
+        insert_test_task(&task);
+
+        let _ = transfer_pause(id.to_string());
+        // 状态应保持 Paused（不会重复触发 notify）
+        assert_eq!(
+            *task.status.lock().unwrap(),
+            TransferStatusEnum::Paused,
+            "pausing an already paused task should not change its status"
+        );
+
+        remove_test_task(&id);
     }
 }

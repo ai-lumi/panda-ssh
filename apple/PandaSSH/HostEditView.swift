@@ -62,7 +62,7 @@ struct HostEditView: View {
                     Picker("所属分组", selection: $groupID) {
                         Text("根级（无分组）").tag(String?.none)
                         ForEach(model.groups) { group in
-                            Text(GroupTree.path(of: group.id, in: model.groups))
+                            Text((try? groupPath(groupId: group.id)) ?? group.name)
                                 .tag(String?.some(group.id))
                         }
                     }

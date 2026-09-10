@@ -658,11 +658,11 @@ final class FilePaneNavigatorTests: XCTestCase {
         session.selectLocal("Documents")
         _ = await session.uploadSelected()
 
-        let uploadGroup = transfers.taskGroups.first { $0.name == "Documents" }
-        XCTAssertNotNil(uploadGroup)
-        XCTAssertEqual(uploadGroup?.tasks.count, 1)
-        XCTAssertEqual(uploadGroup?.tasks.first?.direction, .upload)
-        XCTAssertEqual(uploadGroup?.tasks.first?.source, DemoFileSystem.localRoot + "/Documents/a.txt")
+        // 目录上传走批量传输路径。
+        let batchRecords = transfers.listBatchTransfers()
+        XCTAssertEqual(batchRecords.count, 1)
+        XCTAssertEqual(batchRecords.first?.direction, .upload)
+        XCTAssertTrue(batchRecords.first?.sources.first?.contains("Documents") ?? false)
 
         _ = await session.remotePane.reload()
         session.selectRemote("logs")
@@ -699,12 +699,13 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         let tasks = await session.upload(localPaths: [localDirectory])
 
-        XCTAssertEqual(tasks.count, 1)
-        XCTAssertEqual(transfers.taskGroups.first?.name, "报销-20260706")
-        XCTAssertEqual(
-            tasks.first?.destination,
-            "/share/CACHEDEV1_DATA/homes/lwq/报销-20260706/上海到广州机票-20260706-发票-保险.pdf"
-        )
+        // 目录走批量传输路径,不生成独立 TransferTask。
+        XCTAssertTrue(tasks.isEmpty, "目录上传应走批量路径,不返回独立任务")
+        let batchRecords = transfers.listBatchTransfers()
+        XCTAssertEqual(batchRecords.count, 1)
+        XCTAssertEqual(batchRecords.first?.sources, [localDirectory])
+        XCTAssertEqual(batchRecords.first?.destDir, remoteDirectory)
+        XCTAssertEqual(batchRecords.first?.direction, .upload)
     }
 
     func testDirectoryUploadWithEmptyScanDoesNotCreateTransferTasks() async {
@@ -719,7 +720,7 @@ final class FilePaneNavigatorTests: XCTestCase {
     }
 
     func testDirectoryUploadToRootUsesOneTopLevelDirectoryAndSingleSeparator() async {
-        let (session, _) = makeSession()
+        let (session, transfers) = makeSession()
         let localDirectory = "/tmp/project"
         let fileName = "README.md"
         _ = await session.navigateRemote(to: "/")
@@ -741,8 +742,12 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         let tasks = await session.upload(localPaths: [localDirectory])
 
-        XCTAssertEqual(tasks.map(\.destination), ["/project/README.md"])
-        XCTAssertFalse(tasks.contains { $0.destination.contains("//") })
+        // 目录走批量传输路径。
+        XCTAssertTrue(tasks.isEmpty)
+        let batchRecords = transfers.listBatchTransfers()
+        XCTAssertEqual(batchRecords.count, 1)
+        XCTAssertEqual(batchRecords.first?.destDir, "/")
+        XCTAssertFalse(batchRecords.first?.destDir.contains("//") ?? true)
     }
 
     func testUploadWithoutSelectionReturnsNil() async {
@@ -800,9 +805,11 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         _ = await session.uploadSelected()
 
-        XCTAssertEqual(transfers.taskGroups.count, 1)
-        XCTAssertEqual(transfers.taskGroups.first?.name, "Documents")
-        XCTAssertEqual(transfers.taskGroups.first?.tasks.count, 2)
+        // 目录走批量传输路径,文件走独立任务。
+        let batchRecords = transfers.listBatchTransfers()
+        XCTAssertEqual(batchRecords.count, 1, "目录应产生一个批量传输任务")
+        XCTAssertTrue(batchRecords.first?.sources.contains(where: { $0.contains("Documents") }) ?? false)
+        // 文件仍走独立任务。
         XCTAssertEqual(transfers.tasks.filter { $0.groupID == nil }.count, 1)
         XCTAssertEqual(transfers.tasks.filter { $0.groupID == nil }.first?.name, "deploy.tar.gz")
     }

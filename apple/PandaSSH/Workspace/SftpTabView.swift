@@ -847,7 +847,7 @@ struct SftpTabView: View {
             return
         }
         if gate.requestCredentialsIfNeeded(for: host) { return }
-        let secrets = CredentialResolver.localStore()
+        let secrets = CredentialResolver()
             .connectionSecrets(for: host, manualSecret: gate.manualSecret)
         guard let secrets else {
             _ = gate.requestCredentialsIfNeeded(for: host)

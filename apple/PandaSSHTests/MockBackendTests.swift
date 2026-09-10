@@ -177,6 +177,27 @@ final class MockBackendTests: XCTestCase {
         XCTAssertEqual(GroupTree.path(of: "ghost", in: backend.allGroups()), "根级")
     }
 
+    func testGroupPathRendersThreeOrMoreLevels() {
+        let groups = [
+            HostGroup(id: "l1", name: "生产", parentID: nil),
+            HostGroup(id: "l2", name: "华东", parentID: "l1"),
+            HostGroup(id: "l3", name: "上海", parentID: "l2"),
+            HostGroup(id: "l4", name: "机房A", parentID: "l3"),
+        ]
+        XCTAssertEqual(GroupTree.path(of: "l4", in: groups), "生产 / 华东 / 上海 / 机房A")
+        XCTAssertEqual(GroupTree.path(of: "l1", in: groups), "生产")
+    }
+
+    func testGroupPathWithCycleDoesNotInfiniteLoop() {
+        let groups = [
+            HostGroup(id: "a", name: "A", parentID: "b"),
+            HostGroup(id: "b", name: "B", parentID: "a"),
+        ]
+        // 环防御:visited 集合保证终止,不崩溃
+        let path = GroupTree.path(of: "a", in: groups)
+        XCTAssertFalse(path.isEmpty)
+    }
+
     func testDescendantIDsIncludesAllNestedLevels() {
         let backend = makeBackend()
         let deep = backend.createGroup(name: "深层", parentID: "g-east")

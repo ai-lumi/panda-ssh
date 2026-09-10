@@ -64,7 +64,7 @@ struct HostDetailView: View {
     /// 分组 / 认证方式 / 密钥状态 chips
     private var chips: some View {
         HStack(spacing: 6) {
-            Chip(text: "分组：\(GroupTree.path(of: host.groupID, in: model.groups))")
+            Chip(text: "分组：\((try? groupPath(groupId: host.groupID ?? "")) ?? "根级")")
             Chip(text: authLabel, systemImage: host.auth == .publicKey ? "key" : "lock")
             if host.demo == .mismatch {
                 Chip(text: "⚠ 主机密钥不匹配", tint: .red)

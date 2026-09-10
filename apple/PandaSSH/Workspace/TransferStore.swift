@@ -93,6 +93,9 @@ struct TransferTask: Identifiable, Equatable {
         self.groupID = record.groupID
         self.groupName = record.groupName
         self.pendingConflict = record.pendingConflict
+        self.liveSpeed = record.speed
+        self.totalSpeed = record.totalSpeed
+        self.estimatedTimeRemaining = record.etaSeconds
     }
 }
 
@@ -124,11 +127,26 @@ struct TransferRecord: Equatable {
     let groupName: String?
     /// 批量任务等待覆盖确认时的冲突信息；非 nil 表示任务暂停等待用户决策。
     let pendingConflict: PendingConflict?
+    /// 实时速度（字节/秒），由 Rust 后端计算。
+    var speed: Int64 = 0
+    /// 总速度（字节/秒），由 Rust 后端计算。
+    var totalSpeed: Int64 = 0
+    /// 预估剩余秒数，由 Rust 后端计算。
+    var etaSeconds: Double? = nil
 }
 
 /// 传输任务数据来源抽象。真实实现调用 Rust FFI;模拟实现保留原
 /// `TransferStore` 的 tick 驱动状态机,供 Preview 与单元测试使用。
-protocol TransferSource: AnyObject {
+/// 任务源的修订契约。nil 表示源不提供缓存提示，每拍直接读取快照。
+protocol TaskRevisionSource: AnyObject {
+    func changeRevision() -> UInt64?
+}
+
+extension TaskRevisionSource {
+    func changeRevision() -> UInt64? { nil }
+}
+
+protocol TransferSource: TaskRevisionSource {
     /// 启动传输并返回任务 id(UUID 字符串)。
     /// `size` 对下载为必需(远端已知大小);上传可由实现自行从本地文件计算。
     func enqueueTransfer(
@@ -138,7 +156,9 @@ protocol TransferSource: AnyObject {
         remotePath: String,
         size: UInt64,
         password: String?,
-        passphrase: String?
+        passphrase: String?,
+        groupID: String?,
+        groupName: String?
     ) -> String
 
     /// 取消指定任务。
@@ -165,7 +185,7 @@ extension TransferSource {
 }
 
 /// 批量传输源抽象。
-protocol BatchTransferSource: AnyObject {
+protocol BatchTransferSource: TaskRevisionSource {
     /// 启动批量上传并返回任务 id。
     func enqueueBatchUpload(
         hostID: String,
@@ -211,6 +231,8 @@ struct BatchTransferRecord: Equatable {
 
 /// 通过 UniFFI 调用 Rust 任务注册表。
 final class FFITransferSource: TransferSource, BatchTransferSource {
+    func changeRevision() -> UInt64? { transferChangeCounter() }
+
     func enqueueTransfer(
         direction: TransferDirection,
         hostID: String,
@@ -218,7 +240,9 @@ final class FFITransferSource: TransferSource, BatchTransferSource {
         remotePath: String,
         size: UInt64,
         password: String?,
-        passphrase: String?
+        passphrase: String?,
+        groupID: String?,
+        groupName: String?
     ) -> String {
         let ffiDirection: TransferDirectionEnum = direction == .upload ? .upload : .download
         return try! startTransfer(
@@ -228,7 +252,9 @@ final class FFITransferSource: TransferSource, BatchTransferSource {
             remotePath: remotePath,
             size: size,
             password: password,
-            passphrase: passphrase
+            passphrase: passphrase,
+            groupId: groupID,
+            groupName: groupName
         )
     }
 
@@ -348,7 +374,9 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
         remotePath: String,
         size: UInt64,
         password: String?,
-        passphrase: String?
+        passphrase: String?,
+        groupID: String?,
+        groupName: String?
     ) -> String {
         let index = addedCount
         addedCount += 1
@@ -552,14 +580,9 @@ private func mockBatchRecord(_ task: MockBatchTask) -> BatchTransferRecord {
 
 // MARK: - TransferStore
 
-/// 任务组注册信息：每个带 groupID 的任务在创建时登记，后续刷新时注入到 TransferTask。
-private struct GroupRegistration {
-    let groupID: UUID
-    let groupName: String
-}
-
 /// 传输任务队列。默认使用真实 FFI 源;Preview 与测试可注入 `MockTransferSource`。
-/// 真实源通过轮询 `listTransfers()` 刷新;模拟源由 tick 驱动。
+/// 真实源通过轮询 `transferChangeCounter()` 检测变化,仅在计数器变化时刷新任务列表;
+/// 模拟源由 tick 驱动状态机前进。
 @MainActor
 final class TransferStore: ObservableObject {
     static let maxConcurrent = 3
@@ -572,15 +595,10 @@ final class TransferStore: ObservableObject {
     private var hiddenIDs: Set<UUID> = []
     /// 进度轮询订阅;仅在存在活跃任务时启动,空转时取消以节省 CPU。
     private var polling: AnyCancellable?
-    /// 每个运行中任务的速度计算器，按任务 id 持久化。
-    private var speedCalculators: [UUID: TransferSpeedCalculator] = [:]
-    /// 上一次观察到的任务状态，用于检测暂停→运行的恢复过渡。
+    /// 上一次观察到的任务状态，用于终态转换日志。
     private var lastSeenStatuses: [UUID: TransferStatus] = [:]
-    /// 被用户显式暂停过的任务 id；FFI resume 后可能先回到 Queued 再进入 Running，
-    /// 该集合保证这种间接恢复也能触发速度窗口重置。
-    private var pausedTaskIDs: Set<UUID> = []
-    /// 任务 id 到任务组注册的映射;任务组由 Swift 侧在创建任务时注入。
-    private var groupRegistry: [UUID: GroupRegistration] = [:]
+    /// Rust 侧传输变更计数器;仅在值变化时重新读取任务列表,避免无变化时重复触发 UI。
+    private var lastRevisions: [UInt64?]?
 
     init(source: any TransferSource, batchSource: (any BatchTransferSource)? = nil) {
         self.source = source
@@ -644,12 +662,11 @@ final class TransferStore: ObservableObject {
             remotePath: remotePath,
             size: size,
             password: password,
-            passphrase: passphrase
+            passphrase: passphrase,
+            groupID: groupID?.uuidString,
+            groupName: groupName
         )
         let uuid = UUID(uuidString: id) ?? UUID()
-        if let groupID = groupID, let groupName = groupName {
-            groupRegistry[uuid] = GroupRegistration(groupID: groupID, groupName: groupName)
-        }
         refresh()
         startPollingIfNeeded()
         return uuid
@@ -699,19 +716,27 @@ final class TransferStore: ObservableObject {
         return UUID(uuidString: id) ?? UUID()
     }
 
-    /// 进度步进:真实源仅刷新列表,模拟源同时推进状态机。
+    /// 进度步进:真实源检查变更计数器,仅在变化时刷新;模拟源推进状态机并刷新。
     /// 每步都重新构造任务视图并与当前 tasks 比较,仅在真正变化时写入,
     /// 既保证模拟源进度被刷新,也避免 FFI 侧无变化时重复触发 UI。
     func tick(seconds dt: Double = 0.1) {
         source.tick()
-        let now = Date()
-        var records = source.listTransfers().map { injectGroup(into: $0) }
+        let revisions = readRevisions()
+        if revisions[0] != nil,
+           batchSource == nil || revisions[1] != nil,
+           revisions == lastRevisions {
+            adjustPollingFrequency()
+            return
+        }
+        // 捕获列表之前的修订；读取期间发生的新事件留给下一拍。
+        lastRevisions = revisions
+        var records = source.listTransfers()
         if let batchSource = batchSource {
             records += batchSource.listBatchTransfers()
-                .map { injectGroup(into: TransferRecord(batchRecord: $0)) }
+                .map { TransferRecord(batchRecord: $0) }
         }
         let next = records
-            .map { makeTask(from: $0, at: now) }
+            .map { makeTask(from: $0) }
             .filter { !hiddenIDs.contains($0.id) }
         if next != tasks {
             tasks = next
@@ -735,7 +760,6 @@ final class TransferStore: ObservableObject {
     /// 重试失败任务;非失败任务为 no-op。
     func retry(id: UUID) {
         _ = source.retryTransfer(id: id.uuidString)
-        speedCalculators.removeValue(forKey: id)
         refresh()
         startPollingIfNeeded()
     }
@@ -745,7 +769,6 @@ final class TransferStore: ObservableObject {
         if let task = tasks.first(where: { $0.id == id }), !task.isBatch,
            task.status == .running || task.status == .queued {
             source.pauseTransfer(id: id.uuidString)
-            pausedTaskIDs.insert(id)
         }
         refresh()
     }
@@ -810,55 +833,29 @@ final class TransferStore: ObservableObject {
                 liveIDs.formUnion(batchSource.listBatchTransfers().map(\.id))
             }
             hiddenIDs = hiddenIDs.intersection(liveIDs)
-            groupRegistry = groupRegistry.filter { liveIDs.contains($0.key) }
-            // 清理已完成/已移除任务的速度计算器与状态记录，避免内存泄漏。
-            speedCalculators = speedCalculators.filter { liveIDs.contains($0.key) }
-            lastSeenStatuses = lastSeenStatuses.filter { liveIDs.contains($0.key) }
-            pausedTaskIDs = pausedTaskIDs.intersection(liveIDs)
         }
         adjustPollingFrequency()
     }
 
+    private func readRevisions() -> [UInt64?] {
+        [source.changeRevision(), batchSource?.changeRevision()]
+    }
+
     private func refresh() {
-        var records = source.listTransfers().map { injectGroup(into: $0) }
+        lastRevisions = readRevisions()
+        var records = source.listTransfers()
         if let batchSource = batchSource {
-            records += batchSource.listBatchTransfers().map { injectGroup(into: TransferRecord(batchRecord: $0)) }
+            records += batchSource.listBatchTransfers().map { TransferRecord(batchRecord: $0) }
         }
         tasks = records
             .map { makeTask(from: $0) }
             .filter { !hiddenIDs.contains($0.id) }
     }
 
-    /// 将 groupRegistry 中记录的分组信息注入到 TransferRecord。
-    private func injectGroup(into record: TransferRecord) -> TransferRecord {
-        guard let registration = groupRegistry[record.id] else { return record }
-        return TransferRecord(
-            id: record.id,
-            direction: record.direction,
-            name: record.name,
-            size: record.size,
-            transferred: record.transferred,
-            status: record.status,
-            source: record.source,
-            destination: record.destination,
-            hostID: record.hostID,
-            error: record.error,
-            version: record.version,
-            failAt: record.failAt,
-            isBatch: record.isBatch,
-            batchSources: record.batchSources,
-            batchDestDir: record.batchDestDir,
-            groupID: registration.groupID,
-            groupName: registration.groupName,
-            pendingConflict: record.pendingConflict
-        )
-    }
-
-    /// 从 `TransferRecord` 构造 `TransferTask`，并注入速度信息。
-    /// `at` 不为 nil 时向对应计算器添加采样点（用于 tick 轮询）；
-    /// 为 nil 时仅读取现有计算器状态（用于 add/cancel/retry 后的刷新）。
-    private func makeTask(from record: TransferRecord, at date: Date? = nil) -> TransferTask {
-        var task = TransferTask(record: record)
+    /// 从 `TransferRecord` 构造 `TransferTask`。
+    /// 速度指标已由 Rust 后端计算并包含在 record 中，此处仅做终态转换日志。
+    private func makeTask(from record: TransferRecord) -> TransferTask {
+        let task = TransferTask(record: record)
         let id = task.id
         let previousStatus = lastSeenStatuses[id]
         lastSeenStatuses[id] = task.status
@@ -878,59 +875,17 @@ final class TransferStore: ObservableObject {
             }
         }
 
-        let shouldTrackSpeed = task.status == .running || task.status == .paused
-        // 恢复有两种形态：
-        // 1. 直接：previousStatus == .paused → running（模拟源 / 无 Queued 过渡）
-        // 2. 间接：FFI resume 先把状态置为 Queued，抢到槽位后才 Running，
-        //    此时 previousStatus 可能是 .queued；用 pausedTaskIDs 识别这种被暂停过的任务。
-        let isResuming = task.status == .running
-            && (previousStatus == .paused || pausedTaskIDs.contains(id))
-
-        if shouldTrackSpeed {
-            let now = date ?? Date()
-            var calculator = speedCalculators[id] ?? TransferSpeedCalculator(startTime: now, size: task.size)
-            if speedCalculators[id] == nil {
-                // 首次观察到任务运行：以当前时间为起点，并记录 0 字节基线，
-                // 使总速度与实时速度都从任务启动时刻开始计算。
-                calculator.addSample(transferred: 0, at: now)
-                speedCalculators[id] = calculator
-            }
-            if task.status == .running {
-                if isResuming {
-                    // 从暂停恢复后重置窗口，让实时速度立即反映当前真实速率。
-                    // refresh() 路径可能不带 date，仍要 reset；用当前时间作为新窗口起点。
-                    calculator.reset(at: date ?? Date(), transferred: task.transferred)
-                    pausedTaskIDs.remove(id)
-                    speedCalculators[id] = calculator
-                } else if let date = date {
-                    // 只有 tick() 带明确时间戳时才添加采样点，避免 refresh()
-                    // 用新的 Date() 把 totalSpeed 稀释。
-                    calculator.addSample(transferred: task.transferred, at: date)
-                    speedCalculators[id] = calculator
-                }
-            }
-            task.liveSpeed = task.status == .running ? calculator.liveSpeed : 0
-            task.totalSpeed = calculator.totalSpeed
-            task.estimatedTimeRemaining = task.status == .running ? calculator.estimatedTimeRemaining : nil
-        } else {
-            if let calculator = speedCalculators[id] {
-                task.liveSpeed = 0
-                task.totalSpeed = calculator.totalSpeed
-                task.estimatedTimeRemaining = nil
-            }
-            if task.status != .queued {
-                speedCalculators.removeValue(forKey: id)
-                lastSeenStatuses.removeValue(forKey: id)
-                pausedTaskIDs.remove(id)
-            }
+        // 终态任务清理状态记录，避免内存泄漏。
+        if task.status != .queued && task.status != .running && task.status != .paused {
+            lastSeenStatuses.removeValue(forKey: id)
         }
         return task
     }
 
     /// 从 `BatchTransferRecord` 构造 `TransferTask`。
-    /// 先转换为内部 `TransferRecord`，再复用单文件任务的速度计算逻辑。
-    private func makeTask(from record: BatchTransferRecord, at date: Date? = nil) -> TransferTask {
-        makeTask(from: TransferRecord(batchRecord: record), at: date)
+    /// 先转换为内部 `TransferRecord`，再复用单文件任务的构造逻辑。
+    private func makeTask(from record: BatchTransferRecord) -> TransferTask {
+        makeTask(from: TransferRecord(batchRecord: record))
     }
 
     /// 当前 Timer 的频率（秒）；nil 表示未启动。
@@ -995,9 +950,12 @@ private extension TransferRecord {
         self.source = isUpload ? ffiRecord.localPath : ffiRecord.remotePath
         self.destination = isUpload ? ffiRecord.remotePath : ffiRecord.localPath
         self.name = (source as NSString).lastPathComponent
-        self.groupID = nil
-        self.groupName = nil
         self.pendingConflict = nil
+        self.speed = Int64(ffiRecord.speed)
+        self.totalSpeed = Int64(ffiRecord.totalSpeed)
+        self.etaSeconds = ffiRecord.etaSeconds
+        self.groupID = ffiRecord.groupId.flatMap { UUID(uuidString: $0) }
+        self.groupName = ffiRecord.groupName
     }
 }
 

@@ -217,6 +217,152 @@ pub fn move_group(
     groups.upsert(group)
 }
 
+/// 返回分组的完整路径,格式为 "根 / 子 / 孙"。
+///
+/// - 未知或空 id 返回 "根级"。
+/// - 使用 visited 集合防御环。
+/// - 最大深度 = `MAX_GROUP_DEPTH`。
+pub fn group_path(groups: &[Group], id: &str) -> String {
+    if id.is_empty() {
+        return "根级".into();
+    }
+    // 找到目标分组
+    let group = match groups.iter().find(|g| g.id == id) {
+        Some(g) => g,
+        None => return "根级".into(),
+    };
+    // 从当前分组向上收集路径
+    let mut path_parts: Vec<&str> = vec![&group.name];
+    let mut visited = HashSet::new();
+    visited.insert(id.to_string());
+    let mut current_parent = &group.parent_id;
+    let mut depth = 0usize;
+    while let Some(ref pid) = *current_parent {
+        if depth >= MAX_GROUP_DEPTH || !visited.insert(pid.clone()) {
+            break;
+        }
+        match groups.iter().find(|g| &g.id == pid) {
+            Some(parent) => {
+                path_parts.push(&parent.name);
+                current_parent = &parent.parent_id;
+                depth += 1;
+            }
+            None => break,
+        }
+    }
+    // 反转:从根到叶
+    path_parts.reverse();
+    path_parts.join(" / ")
+}
+
+/// 侧边栏树节点:可以是分组或主机。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarNodeRecord {
+    /// 节点 id:"group-xxx" 或 "host-xxx"
+    pub id: String,
+    /// 是否为分组
+    pub is_group: bool,
+    /// 显示名称
+    pub name: String,
+    /// 主机配置(仅主机节点)
+    pub host: Option<crate::config::HostConfig>,
+    /// 分组配置(仅分组节点)
+    pub group: Option<Group>,
+    /// 子节点列表。`None` 表示叶子节点(空分组)。
+    pub children: Option<Vec<SidebarNodeRecord>>,
+}
+
+/// 从扁平的主机和分组列表构建侧边栏树。
+///
+/// 规则:
+/// - 根级分组在前(按存储顺序),根级主机在后
+/// - 分组内:子分组在前,成员主机在后
+/// - 孤儿主机(group_id 指向不存在的分组)降级到根级
+/// - 空分组 → children: None
+pub fn sidebar_tree(
+    hosts: &[crate::config::HostConfig],
+    groups: &[Group],
+) -> Vec<SidebarNodeRecord> {
+    use std::collections::HashSet;
+
+    let group_ids: HashSet<&str> = groups.iter().map(|g| g.id.as_str()).collect();
+
+    // 按分组 id 收集主机
+    let mut hosts_by_group: std::collections::BTreeMap<Option<&str>, Vec<&crate::config::HostConfig>> =
+        std::collections::BTreeMap::new();
+    for host in hosts {
+        let key = host.group_id.as_deref().filter(|gid| group_ids.contains(gid));
+        hosts_by_group.entry(key).or_default().push(host);
+    }
+
+    // 递归构建分组节点
+    fn build_group_node(
+        group: &Group,
+        groups: &[Group],
+        hosts_by_group: &std::collections::BTreeMap<Option<&str>, Vec<&crate::config::HostConfig>>,
+    ) -> SidebarNodeRecord {
+        let subgroups = children_of(groups, &group.id);
+        let member_hosts = hosts_by_group.get(&Some(group.id.as_str()));
+
+        let mut children: Vec<SidebarNodeRecord> = Vec::new();
+
+        // 子分组在前
+        for sg_id in &subgroups {
+            if let Some(sg) = groups.iter().find(|g| &g.id == sg_id) {
+                children.push(build_group_node(sg, groups, hosts_by_group));
+            }
+        }
+
+        // 成员主机在后
+        if let Some(hosts) = member_hosts {
+            for h in hosts {
+                children.push(SidebarNodeRecord {
+                    id: format!("host-{}", h.id),
+                    is_group: false,
+                    name: h.name.clone(),
+                    host: Some((*h).clone()),
+                    group: None,
+                    children: None,
+                });
+            }
+        }
+
+        SidebarNodeRecord {
+            id: format!("group-{}", group.id),
+            is_group: true,
+            name: group.name.clone(),
+            host: None,
+            group: Some(group.clone()),
+            children: if children.is_empty() { None } else { Some(children) },
+        }
+    }
+
+    let mut result: Vec<SidebarNodeRecord> = Vec::new();
+
+    // 根级分组在前
+    for root_id in roots_of(groups) {
+        if let Some(g) = groups.iter().find(|g| g.id == root_id) {
+            result.push(build_group_node(g, groups, &hosts_by_group));
+        }
+    }
+
+    // 根级主机在后(包括无 group_id 的和孤儿主机)
+    if let Some(root_hosts) = hosts_by_group.get(&None) {
+        for h in root_hosts {
+            result.push(SidebarNodeRecord {
+                id: format!("host-{}", h.id),
+                is_group: false,
+                name: h.name.clone(),
+                host: Some((*h).clone()),
+                group: None,
+                children: None,
+            });
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +711,161 @@ type = "password"
         let back: HostConfig = toml::from_str(&text).unwrap();
         assert_eq!(h, back);
         assert_eq!(back.group_id.as_deref(), Some("g1"));
+    }
+
+    // --- 空列表边界 ---
+
+    #[test]
+    fn roots_of_empty_list_returns_empty() {
+        assert_eq!(roots_of(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn children_of_empty_list_returns_empty() {
+        assert_eq!(children_of(&[], "any"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn descendant_ids_of_empty_list_returns_empty() {
+        assert_eq!(descendant_ids(&[], "any"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn delete_group_cascade_on_empty_stores_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = TomlGroupStore::new(dir.path().join("groups.toml"));
+        let hosts = TomlConfigStore::new(dir.path().join("hosts.toml"));
+        delete_group_cascade(&groups, &hosts, "ghost").unwrap();
+        assert!(groups.list().unwrap().is_empty());
+        assert!(hosts.list().unwrap().is_empty());
+    }
+
+    // --- group_path ---
+
+    #[test]
+    fn group_path_multi_level() {
+        let groups = vec![
+            group("a", "根组", None),
+            group("b", "子组", Some("a")),
+            group("c", "孙组", Some("b")),
+        ];
+        assert_eq!(group_path(&groups, "c"), "根组 / 子组 / 孙组");
+    }
+
+    #[test]
+    fn group_path_single_root() {
+        let groups = vec![group("a", "根组", None)];
+        assert_eq!(group_path(&groups, "a"), "根组");
+    }
+
+    #[test]
+    fn group_path_unknown_id_returns_root_level() {
+        let groups = vec![group("a", "根组", None)];
+        assert_eq!(group_path(&groups, "ghost"), "根级");
+    }
+
+    #[test]
+    fn group_path_empty_id_returns_root_level() {
+        let groups = vec![group("a", "根组", None)];
+        assert_eq!(group_path(&groups, ""), "根级");
+    }
+
+    #[test]
+    fn group_path_cycle_defense() {
+        // 脏数据环:a → b → a
+        let groups = vec![
+            group("a", "A", Some("b")),
+            group("b", "B", Some("a")),
+        ];
+        // 不应无限循环,结果应包含两个名称
+        let path = group_path(&groups, "b");
+        assert!(path.contains("A"));
+        assert!(path.contains("B"));
+    }
+
+    #[test]
+    fn group_path_empty_list_returns_root_level() {
+        assert_eq!(group_path(&[], "any"), "根级");
+    }
+
+    // --- sidebar_tree ---
+
+    fn sidebar_host(id: &str, name: &str, group_id: Option<&str>) -> HostConfig {
+        let mut h = HostConfig::new(
+            name,
+            "example.com",
+            "user",
+            AuthMethod::Password { password_ref: None },
+        );
+        h.id = id.into();
+        h.group_id = group_id.map(str::to_string);
+        h
+    }
+
+    #[test]
+    fn sidebar_tree_standard_with_groups_and_hosts() {
+        let groups = vec![
+            group("g1", "生产", None),
+            group("g2", "华东", Some("g1")),
+        ];
+        let hosts = vec![
+            sidebar_host("h1", "web", Some("g2")),
+            sidebar_host("h2", "db", Some("g1")),
+            sidebar_host("h3", "root-host", None),
+        ];
+        let tree = sidebar_tree(&hosts, &groups);
+        // 根级: g1(生产) 在前, h3(root-host) 在后
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].id, "group-g1");
+        assert!(tree[0].is_group);
+        assert_eq!(tree[1].id, "host-h3");
+        assert!(!tree[1].is_group);
+        // g1 的子节点: g2(华东) 在前, h2(db) 在后
+        let g1_children = tree[0].children.as_ref().unwrap();
+        assert_eq!(g1_children.len(), 2);
+        assert_eq!(g1_children[0].id, "group-g2");
+        assert_eq!(g1_children[1].id, "host-h2");
+        // g2 的子节点: h1(web)
+        let g2_children = g1_children[0].children.as_ref().unwrap();
+        assert_eq!(g2_children.len(), 1);
+        assert_eq!(g2_children[0].id, "host-h1");
+    }
+
+    #[test]
+    fn sidebar_tree_orphan_host_demoted_to_root() {
+        let groups = vec![group("g1", "生产", None)];
+        let hosts = vec![
+            sidebar_host("h1", "orphan", Some("ghost")),
+            sidebar_host("h2", "normal", Some("g1")),
+        ];
+        let tree = sidebar_tree(&hosts, &groups);
+        // g1 在前, orphan host 降级到根级在后
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].id, "group-g1");
+        assert_eq!(tree[1].id, "host-h1");
+        assert_eq!(tree[1].name, "orphan");
+    }
+
+    #[test]
+    fn sidebar_tree_empty_input_returns_empty() {
+        assert!(sidebar_tree(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn sidebar_tree_node_id_prefix_encoding() {
+        let groups = vec![group("g1", "组", None)];
+        let hosts = vec![sidebar_host("h1", "主机", Some("g1"))];
+        let tree = sidebar_tree(&hosts, &groups);
+        assert!(tree[0].id.starts_with("group-"));
+        let children = tree[0].children.as_ref().unwrap();
+        assert!(children[0].id.starts_with("host-"));
+    }
+
+    #[test]
+    fn sidebar_tree_empty_group_has_none_children() {
+        let groups = vec![group("g1", "空组", None)];
+        let tree = sidebar_tree(&[], &groups);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children, None);
     }
 }
