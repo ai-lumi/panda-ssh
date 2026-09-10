@@ -56,7 +56,10 @@ struct TabStripViewportState: Equatable {
     }
 
     /// 根据目标偏移在页签中选出最适合 scrollTo 的目标页签与归一化 anchorX。
-    /// 当选中页签宽度大于视口时，anchorX 在 [0,1] 之间线性插值；否则回退到前缘（0）。
+    /// 页签宽于视口时 anchorX 在 [0,1] 之间线性插值；窄于视口的页签回退到前缘（0）。
+    /// 目标偏移抵达内容末端时直接以最后页签为目标：scrollTo 以单个页签为锚点的实际落点
+    /// 不会超过该页签前缘，跨在最大偏移上的页签会卡住落点，导致最右页签永远无法完整显露；
+    /// 窄页签经 ScrollView 末端夹取精确抵达，宽页签用 trailing anchor 贴住视口右缘。
     func scrollTarget(
         for targetOffset: Double,
         among tabFrames: [UUID: CGRect]
@@ -65,6 +68,12 @@ struct TabStripViewportState: Equatable {
         let sorted = tabFrames.sorted { $0.value.minX < $1.value.minX }
         guard let candidate = sorted.first(where: { $0.value.maxX > targetOffset })
               ?? sorted.last else { return nil }
+
+        // 目标偏移已抵达内容末端：绕过骑跨页签，直达最后页签。
+        if targetOffset >= maximumOffset - 0.5, let last = sorted.last {
+            let lastWidth = Double(last.value.width)
+            return (last.key, lastWidth > viewportWidth ? 1 : 0)
+        }
 
         let frame = candidate.value
         let tabWidth = Double(frame.width)

@@ -190,4 +190,26 @@ final class TabStripViewportStateTests: XCTestCase {
         XCTAssertEqual(target?.tabID, tab)
         XCTAssertEqual(target?.anchorX ?? -1, 0, accuracy: 0.001)
     }
+
+    func test滚动到内容末端时以最后页签为目标完整显露最右页签() {
+        // 根因：scrollTo 以单个页签为锚点时，实际落点不会超过该页签前缘；
+        // 跨在最大偏移上的页签会把落点卡在 maximumOffset 之前，最右页签永远只显露一半。
+        // 期望：末端目标直接选最后页签，窄页签经 ScrollView 末端夹取精确抵达。
+        let last = UUID()
+        let frames = [last: CGRect(x: 400, y: 0, width: 120, height: 30)]
+        let viewport = TabStripViewportState.resolve(contentWidth: 528, viewportWidth: 300, offset: 0)
+        let target = viewport.scrollTarget(for: 228, among: frames) // 228 = 528 - 300
+        XCTAssertEqual(target?.tabID, last)
+        XCTAssertEqual(target?.anchorX ?? -1, 0, accuracy: 0.001)
+    }
+
+    func test滚动到内容末端时宽页签使用TrailingAnchor贴住视口右缘() {
+        // 最后一个页签宽于视口：以 trailing anchor 露出其右缘（受尾部 padding 限制差 8pt，但页签完整可见）。
+        let last = UUID()
+        let frames = [last: CGRect(x: 50, y: 0, width: 600, height: 30)]
+        let viewport = TabStripViewportState.resolve(contentWidth: 658, viewportWidth: 400, offset: 0)
+        let target = viewport.scrollTarget(for: 258, among: frames) // 258 = 658 - 400
+        XCTAssertEqual(target?.tabID, last)
+        XCTAssertEqual(target?.anchorX ?? -1, 1.0, accuracy: 0.001)
+    }
 }

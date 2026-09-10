@@ -16,6 +16,7 @@ struct UnifiedWorkspaceTabStrip: View {
 
     private static let documentCoordinateSpace = "unified-workspace-tab-document"
     private static let documentHorizontalPadding = TabStripViewportState.revealPadding
+    private static let browseButtonWidth = 28.0
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -32,25 +33,35 @@ struct UnifiedWorkspaceTabStrip: View {
                     .padding(.horizontal, 12)
                     .accessibilityLabel("暂无已打开页签")
                 } else {
-                    HStack(spacing: 0) {
-                        if currentViewport.needsScroll {
-                            browseButton(systemName: "chevron.left", direction: -1, proxy: proxy)
-                        }
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 4) {
-                                ForEach(workspace.tabs) { tab in
-                                    tabButton(tab)
-                                        .id(tab.id)
-                                        .background(tabFrameReporter(for: tab.id))
-                                }
+                    GeometryReader { containerProxy in
+                        let containerWidth = containerProxy.size.width
+                        let contentW = TabStripViewportState.contentWidth(from: tabFrames)
+                        // 内容能完整放进容器时无需滚动；超出时预留两侧浏览按钮宽度
+                        let needsScroll = containerWidth > 0 && (contentW - containerWidth) > 0.5
+                        let reservedWidth = needsScroll ? Self.browseButtonWidth * 2 : 0
+                        let scrollViewMaxWidth = max(0, containerWidth - reservedWidth)
+
+                        HStack(spacing: 0) {
+                            if needsScroll {
+                                browseButton(systemName: "chevron.left", direction: -1, proxy: proxy)
                             }
-                            .padding(.horizontal, Self.documentHorizontalPadding)
-                            .padding(.vertical, 5)
-                            .coordinateSpace(name: Self.documentCoordinateSpace)
-                        }
-                        .background(viewportWidthReporter)
-                        if currentViewport.needsScroll {
-                            browseButton(systemName: "chevron.right", direction: 1, proxy: proxy)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 4) {
+                                    ForEach(workspace.tabs) { tab in
+                                        tabButton(tab)
+                                            .id(tab.id)
+                                            .background(tabFrameReporter(for: tab.id))
+                                    }
+                                }
+                                .padding(.horizontal, Self.documentHorizontalPadding)
+                                .padding(.vertical, 5)
+                                .coordinateSpace(name: Self.documentCoordinateSpace)
+                            }
+                            .frame(maxWidth: scrollViewMaxWidth)
+                            .background(viewportWidthReporter)
+                            if needsScroll {
+                                browseButton(systemName: "chevron.right", direction: 1, proxy: proxy)
+                            }
                         }
                     }
                 }
@@ -82,7 +93,7 @@ struct UnifiedWorkspaceTabStrip: View {
         } label: {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .frame(width: Self.browseButtonWidth, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
