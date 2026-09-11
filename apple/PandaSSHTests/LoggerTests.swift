@@ -68,6 +68,13 @@ final class LogEntryTests: XCTestCase {
 
 /// 覆盖正常流程、边界条件(缓冲区满)、意外操作(clear 后继续记录)。
 final class LoggerBufferTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // Rust 侧 logger 为全局单例，测试间共享缓冲区；每次测试前清空
+        let logger = Logger(configDirectory: nil)
+        logger.clear()
+    }
+
     @MainActor
     func testConnectionLifecycleLogsIncludeOwnerAndDistinguishFailure() async throws {
         let logger = Logger(configDirectory: nil)
@@ -76,10 +83,11 @@ final class LoggerBufferTests: XCTestCase {
             ConnectionLifecycleRecord(connectionId: 43, address: "example.test:22", ownerKind: "SFTP 标签", ownerId: "8", reason: "SSH keepalive 失败", isError: true),
         ])
         try await Task.sleep(for: .milliseconds(50))
-        XCTAssertEqual(logger.entries.map(\.level), [.info, .error])
-        XCTAssertTrue(logger.entries[0].message.contains("connection=42"))
-        XCTAssertTrue(logger.entries[0].message.contains("终端标签#7"))
-        XCTAssertTrue(logger.entries[1].message.contains("keepalive"))
+        // Rust 侧返回逆序（最新在前）
+        XCTAssertEqual(logger.entries.map(\.level), [.error, .info])
+        XCTAssertTrue(logger.entries[1].message.contains("connection=42"))
+        XCTAssertTrue(logger.entries[1].message.contains("终端标签#7"))
+        XCTAssertTrue(logger.entries[0].message.contains("keepalive"))
         logger.logConnectionEvents([])
         XCTAssertEqual(logger.entries.count, 2)
     }
@@ -100,9 +108,9 @@ final class LoggerBufferTests: XCTestCase {
         let exp = expectation(description: "entries 更新")
         DispatchQueue.main.async {
             XCTAssertEqual(logger.entries.count, 500, "500 条日志后缓冲区应为 500")
-            // 顺序正确
-            XCTAssertEqual(logger.entries.first?.message, "消息 0")
-            XCTAssertEqual(logger.entries.last?.message, "消息 499")
+            // Rust 侧返回逆序（最新在前）
+            XCTAssertEqual(logger.entries.first?.message, "消息 499")
+            XCTAssertEqual(logger.entries.last?.message, "消息 0")
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2)
@@ -118,8 +126,8 @@ final class LoggerBufferTests: XCTestCase {
             XCTAssertEqual(logger.entries.count, 1000, "1001 条后缓冲区应为 1000")
             // 最旧条目(消息 0)被丢弃
             XCTAssertFalse(logger.entries.contains { $0.message == "消息 0" }, "最旧条目应被丢弃")
-            // 最新条目(消息 1000)在末尾
-            XCTAssertEqual(logger.entries.last?.message, "消息 1000")
+            // Rust 侧返回逆序（最新在前）
+            XCTAssertEqual(logger.entries.first?.message, "消息 1000")
             exp.fulfill()
         }
         wait(for: [exp], timeout: 5)
@@ -163,10 +171,11 @@ final class LoggerBufferTests: XCTestCase {
         let exp = expectation(description: "级别正确存储")
         DispatchQueue.main.async {
             XCTAssertEqual(logger.entries.count, 4)
-            XCTAssertEqual(logger.entries[0].level, .debug)
-            XCTAssertEqual(logger.entries[1].level, .info)
-            XCTAssertEqual(logger.entries[2].level, .warning)
-            XCTAssertEqual(logger.entries[3].level, .error)
+            // Rust 侧返回逆序（最新在前）
+            XCTAssertEqual(logger.entries[0].level, .error)
+            XCTAssertEqual(logger.entries[1].level, .warning)
+            XCTAssertEqual(logger.entries[2].level, .info)
+            XCTAssertEqual(logger.entries[3].level, .debug)
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2)
@@ -204,6 +213,12 @@ final class LoggerBufferTests: XCTestCase {
 
 /// 覆盖正常流程(写入/追加)、边界条件(轮转/覆盖)、意外操作(目录缺失/写入失败)。
 final class LoggerFileTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // Rust 侧 logger 为全局单例，测试间共享缓冲区；每次测试前清空
+        let logger = Logger(configDirectory: nil)
+        logger.clear()
+    }
 
     private func makeLogger(dir: URL, maxFileSize: Int64 = 1024) -> Logger {
         Logger(configDirectory: dir, maxFileSize: maxFileSize)

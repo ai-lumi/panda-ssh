@@ -18,11 +18,21 @@ final class AppModelSelectionTests: XCTestCase {
         model = AppModel(backend: MockBackend.demo())
     }
 
+    /// 等待主队列异步操作完成
+    private func drainMainQueue() {
+        let expectation = XCTestExpectation(description: "Drain main queue")
+        DispatchQueue.main.async {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+    }
+
     // MARK: 正常流程
 
     func testSelectGroupSetsSelectionAndClearsHost() {
         model.selectHost("h-webprod")
         model.selectGroup("g-east")
+        drainMainQueue()
         XCTAssertEqual(model.selectedGroupID, "g-east")
         XCTAssertNil(model.selectedHostID, "选中分组后主机选中态应清除(单一选中语义)")
         XCTAssertEqual(model.workspacePresentation, .empty)
@@ -31,6 +41,7 @@ final class AppModelSelectionTests: XCTestCase {
     func testSelectHostClearsGroupSelection() {
         model.selectGroup("g-east")
         model.selectHost("h-webprod")
+        drainMainQueue()
         XCTAssertNil(model.selectedGroupID)
         XCTAssertEqual(model.selectedHostID, "h-webprod")
         XCTAssertEqual(model.workspacePresentation, .hostDetail(hostID: "h-webprod"))
@@ -38,17 +49,20 @@ final class AppModelSelectionTests: XCTestCase {
 
     func testNewHostDefaultsToSelectedGroup() {
         model.selectGroup("g-east")
+        drainMainQueue()
         XCTAssertEqual(model.groupIDForNewHost, "g-east")
     }
 
     func testNewHostDefaultsToGroupOfSelectedHost() {
         model.selectHost("h-webprod") // 属于 g-east
+        drainMainQueue()
         XCTAssertEqual(model.groupIDForNewHost, "g-east", "选中分组内主机时,默认归属该主机所在分组")
     }
 
     func testSelectedGroupWinsOverSelectedHost() {
         model.selectHost("h-webprod")
         model.selectGroup("g-test")
+        drainMainQueue()
         XCTAssertEqual(model.groupIDForNewHost, "g-test")
     }
 
@@ -77,6 +91,7 @@ final class AppModelSelectionTests: XCTestCase {
         model.showSnippets()
 
         model.presentTab(tabID)
+        drainMainQueue()
 
         XCTAssertEqual(model.sidebarPage, .hosts)
         XCTAssertEqual(model.workspacePresentation, .tab(tabID: tabID))
@@ -84,6 +99,7 @@ final class AppModelSelectionTests: XCTestCase {
 
     func testConnectionMonitorPresentationPreservesCurrentWorkspaceSelection() {
         model.selectHost("h-webprod")
+        drainMainQueue()
         let presentation = model.workspacePresentation
 
         model.showConnectionMonitor()
@@ -99,6 +115,7 @@ final class AppModelSelectionTests: XCTestCase {
 
     func testRepeatedConnectionMonitorPresentationDoesNotMutateExistingSelection() {
         model.selectGroup("g-prod")
+        drainMainQueue()
         let presentation = model.workspacePresentation
 
         model.showConnectionMonitor()
@@ -140,9 +157,19 @@ final class AppModelSelectionTests: XCTestCase {
 
 @MainActor
 final class GlobalTransferNavigationTests: XCTestCase {
+    /// 等待主队列异步操作完成
+    private func drainMainQueue() {
+        let expectation = XCTestExpectation(description: "Drain main queue")
+        DispatchQueue.main.async {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+    }
+
     func test重复打开传输保留工作区选择() {
         let model = AppModel(backend: MockBackend.demo())
         model.selectHost("h-webprod")
+        drainMainQueue()
         let selection = model.workspacePresentation
         model.showTransfers()
         model.showTransfers()

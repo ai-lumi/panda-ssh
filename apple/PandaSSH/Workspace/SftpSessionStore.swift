@@ -819,18 +819,19 @@ final class SftpSessionStore: ObservableObject {
             }
         }
 
-        // 目录组:走批量传输路径(单 SSH 连接复用)。
-        let dirSources = aggregation.groups.compactMap { group -> String? in
-            // 从原始扫描结果中找到对应的目录源路径
-            localPaths.first { path in
+        // 目录组:每个目录走批量传输路径(单 SSH 连接复用),共享 groupID。
+        for group in aggregation.groups {
+            guard let groupID = UUID(uuidString: group.id) else { continue }
+            let dirSource = localPaths.first { path in
                 (path as NSString).lastPathComponent == group.name
                     && allItems.contains { $0.source == path && $0.isDir }
             }
-        }
-        if !dirSources.isEmpty {
+            guard let source = dirSource else { continue }
             _ = transfers.addBatchUpload(
-                sources: dirSources,
+                sources: [source],
                 destDir: destinationDirectory,
+                groupID: groupID,
+                groupName: group.name,
                 hostID: host.id,
                 password: connectionSecrets?.password,
                 passphrase: connectionSecrets?.passphrase

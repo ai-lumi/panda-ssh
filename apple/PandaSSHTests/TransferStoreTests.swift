@@ -771,12 +771,14 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String {
         let id = makeID()
         uploads.append(BatchCall(hostID: hostID, sources: sources, destDir: destDir))
-        tasks.append(makeRecord(id: id, direction: .upload, sources: sources, destDir: destDir))
+        tasks.append(makeRecord(id: id, direction: .upload, sources: sources, destDir: destDir, groupID: groupID.flatMap { UUID(uuidString: $0) }, groupName: groupName))
         return id
     }
 
@@ -784,12 +786,14 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String {
         let id = makeID()
         downloads.append(BatchCall(hostID: hostID, sources: sources, destDir: destDir))
-        tasks.append(makeRecord(id: id, direction: .download, sources: sources, destDir: destDir))
+        tasks.append(makeRecord(id: id, direction: .download, sources: sources, destDir: destDir, groupID: groupID.flatMap { UUID(uuidString: $0) }, groupName: groupName))
         return id
     }
 
@@ -821,7 +825,9 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
             destDir: tasks[index].destDir,
             hostID: tasks[index].hostID,
             error: nil,
-            pendingConflict: pendingConflict
+            pendingConflict: pendingConflict,
+            groupID: tasks[index].groupID,
+            groupName: tasks[index].groupName
         )
     }
 
@@ -830,7 +836,7 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
         return UUID().uuidString
     }
 
-    private func makeRecord(id: String, direction: TransferDirection, sources: [String], destDir: String) -> BatchTransferRecord {
+    private func makeRecord(id: String, direction: TransferDirection, sources: [String], destDir: String, groupID: UUID? = nil, groupName: String? = nil) -> BatchTransferRecord {
         BatchTransferRecord(
             id: UUID(uuidString: id) ?? UUID(),
             direction: direction,
@@ -842,7 +848,9 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
             destDir: destDir,
             hostID: "",
             error: nil,
-            pendingConflict: nil
+            pendingConflict: nil,
+            groupID: groupID,
+            groupName: groupName
         )
     }
 
@@ -858,7 +866,9 @@ private final class BatchTransferSourceSpy: TransferSource, BatchTransferSource 
             destDir: record.destDir,
             hostID: record.hostID,
             error: record.error,
-            pendingConflict: record.pendingConflict
+            pendingConflict: record.pendingConflict,
+            groupID: record.groupID,
+            groupName: record.groupName
         )
     }
 }

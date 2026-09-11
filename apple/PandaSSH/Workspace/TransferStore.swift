@@ -191,6 +191,8 @@ protocol BatchTransferSource: TaskRevisionSource {
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String
@@ -200,6 +202,8 @@ protocol BatchTransferSource: TaskRevisionSource {
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String
@@ -225,6 +229,10 @@ struct BatchTransferRecord: Equatable {
     let error: String?
     /// 等待覆盖确认时的冲突信息；非 nil 表示任务暂停等待用户决策。
     let pendingConflict: PendingConflict?
+    /// 所属任务组 id;nil 表示不属于任何组。
+    let groupID: UUID?
+    /// 所属任务组名称;nil 表示不属于任何组。
+    let groupName: String?
 }
 
 // MARK: - 真实 FFI 源
@@ -282,9 +290,12 @@ final class FFITransferSource: TransferSource, BatchTransferSource {
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String {
+        // TODO: FFI 层暂未支持 groupID/groupName，传 nil
         try! startBatchUpload(
             hostId: hostID,
             sources: sources,
@@ -298,9 +309,12 @@ final class FFITransferSource: TransferSource, BatchTransferSource {
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String {
+        // TODO: FFI 层暂未支持 groupID/groupName，传 nil
         try! startBatchDownload(
             hostId: hostID,
             sources: sources,
@@ -351,6 +365,8 @@ private struct MockBatchTask: Equatable {
     var transferred: UInt64 = 0
     var status: TransferStatus = .queued
     var speed: Double = 0
+    var groupID: UUID? = nil
+    var groupName: String? = nil
 }
 
 final class MockTransferSource: TransferSource, BatchTransferSource {
@@ -395,6 +411,8 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
             destination: destination,
             hostID: hostID
         )
+        task.groupID = groupID.flatMap { UUID(uuidString: $0) }
+        task.groupName = groupName
         if failRule(index), task.size > 0 {
             task.failAt = UInt64(Double(task.size) * (0.3 + random() * 0.4))
         }
@@ -478,7 +496,7 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
     }
 
     private func mockRecord(_ task: MockTask) -> TransferRecord {
-        TransferRecord(
+        var record = TransferRecord(
             id: UUID(uuidString: task.id) ?? UUID(),
             direction: task.direction,
             name: task.name,
@@ -498,17 +516,27 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
             groupName: task.groupName,
             pendingConflict: nil
         )
+        // 模拟源的速度计算：仅运行中任务有速度，与 Rust 后端行为一致
+        if task.status == .running && task.speed > 0 {
+            record.speed = Int64(task.speed)
+            record.totalSpeed = Int64(task.speed)
+            let remaining = Double(task.size - task.transferred)
+            record.etaSeconds = remaining / task.speed
+        }
+        return record
     }
 
     func enqueueBatchUpload(
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String {
         let id = UUID().uuidString
-        let task = MockBatchTask(
+        var task = MockBatchTask(
             id: id,
             direction: .upload,
             sources: sources,
@@ -516,6 +544,8 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
             hostID: hostID,
             size: 0
         )
+        task.groupID = groupID.flatMap { UUID(uuidString: $0) }
+        task.groupName = groupName
         batchTasks.append(task)
         pump()
         return id
@@ -525,11 +555,13 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
         hostID: String,
         sources: [String],
         destDir: String,
+        groupID: String?,
+        groupName: String?,
         password: String?,
         passphrase: String?
     ) -> String {
         let id = UUID().uuidString
-        let task = MockBatchTask(
+        var task = MockBatchTask(
             id: id,
             direction: .download,
             sources: sources,
@@ -537,6 +569,8 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
             hostID: hostID,
             size: 0
         )
+        task.groupID = groupID.flatMap { UUID(uuidString: $0) }
+        task.groupName = groupName
         batchTasks.append(task)
         pump()
         return id
@@ -565,7 +599,9 @@ private func mockBatchRecord(_ task: MockBatchTask) -> BatchTransferRecord {
             destDir: task.destDir,
             hostID: task.hostID,
             error: nil,
-            pendingConflict: nil
+            pendingConflict: nil,
+            groupID: task.groupID,
+            groupName: task.groupName
         )
     }
 
@@ -677,6 +713,8 @@ final class TransferStore: ObservableObject {
     func addBatchUpload(
         sources: [String],
         destDir: String,
+        groupID: UUID? = nil,
+        groupName: String? = nil,
         hostID: String = "",
         password: String? = nil,
         passphrase: String? = nil
@@ -686,6 +724,8 @@ final class TransferStore: ObservableObject {
             hostID: hostID,
             sources: sources,
             destDir: destDir,
+            groupID: groupID?.uuidString,
+            groupName: groupName,
             password: password,
             passphrase: passphrase
         )
@@ -699,6 +739,8 @@ final class TransferStore: ObservableObject {
     func addBatchDownload(
         sources: [String],
         destDir: String,
+        groupID: UUID? = nil,
+        groupName: String? = nil,
         hostID: String = "",
         password: String? = nil,
         passphrase: String? = nil
@@ -708,6 +750,8 @@ final class TransferStore: ObservableObject {
             hostID: hostID,
             sources: sources,
             destDir: destDir,
+            groupID: groupID?.uuidString,
+            groupName: groupName,
             password: password,
             passphrase: passphrase
         )
@@ -1005,8 +1049,8 @@ private extension TransferRecord {
         self.batchDestDir = batchRecord.destDir
         self.source = batchRecord.sources.first ?? ""
         self.destination = batchRecord.destDir
-        self.groupID = nil
-        self.groupName = nil
+        self.groupID = batchRecord.groupID
+        self.groupName = batchRecord.groupName
         self.pendingConflict = batchRecord.pendingConflict
         let count = batchRecord.sources.count
         if count == 0 {
@@ -1039,6 +1083,9 @@ private extension BatchTransferRecord {
                 targetDate: conflict.targetMtime.map { Date(timeIntervalSince1970: Double($0)) }
             )
         }
+        // FFI 层暂未返回 groupID/groupName，设为 nil
+        self.groupID = nil
+        self.groupName = nil
         let count = ffiRecord.sources.count
         if count == 0 {
             self.name = "批量\(self.direction == .upload ? "上传" : "下载")"
