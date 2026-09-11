@@ -211,122 +211,16 @@ final class LoggerBufferTests: XCTestCase {
 
 // MARK: - Logger 文件日志与轮转测试
 
-/// 覆盖正常流程(写入/追加)、边界条件(轮转/覆盖)、意外操作(目录缺失/写入失败)。
+/// 文件日志与轮转测试已迁移至 Rust 侧 (crates/panda-core/src/logger.rs)。
+/// Swift 侧仅保留内存缓冲相关的测试，因为 Logger 的文件 I/O 完全委托给 Rust 全局 logger，
+/// Swift 侧的 configDirectory 参数仅保留以兼容现有调用方，实际控制文件路径的是 Rust 侧的 init_store()。
+/// 相关 Rust 测试：file_logging_writes_and_appends、file_rotation_creates_backup、concurrent_writes_do_not_crash。
 final class LoggerFileTests: XCTestCase {
     override func setUp() {
         super.setUp()
         // Rust 侧 logger 为全局单例，测试间共享缓冲区；每次测试前清空
         let logger = Logger(configDirectory: nil)
         logger.clear()
-    }
-
-    private func makeLogger(dir: URL, maxFileSize: Int64 = 1024) -> Logger {
-        Logger(configDirectory: dir, maxFileSize: maxFileSize)
-    }
-
-    private func tempDir() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("logger-file-\(UUID().uuidString)")
-    }
-
-    func testLogWritesToFile() {
-        let dir = tempDir()
-        let logger = makeLogger(dir: dir)
-        logger.info("文件测试消息", module: "SSH")
-        logger.flush()
-
-        let logURL = dir.appendingPathComponent("logs/panda-ssh.log")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path), "日志文件应存在")
-
-        let content = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
-        XCTAssertTrue(content.contains("文件测试消息"), "文件内容应包含日志消息")
-        XCTAssertTrue(content.contains("SSH"), "文件内容应包含模块名")
-    }
-
-    func testAppendAfterReinit() {
-        let dir = tempDir()
-
-        let logger1 = makeLogger(dir: dir)
-        logger1.info("第一次", module: "Test")
-        logger1.flush()
-
-        // 重新初始化(模拟重启)
-        let logger2 = makeLogger(dir: dir)
-        logger2.info("第二次", module: "Test")
-        logger2.flush()
-
-        let logURL = dir.appendingPathComponent("logs/panda-ssh.log")
-        let content = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
-        XCTAssertTrue(content.contains("第一次"), "重启后应保留旧内容")
-        XCTAssertTrue(content.contains("第二次"), "重启后应追加新内容")
-    }
-
-    func testRotationWhenFileSizeExceedsLimit() {
-        let dir = tempDir()
-        // 设小阈值(1 字节)以便触发轮转
-        let logger = makeLogger(dir: dir, maxFileSize: 1)
-
-        // 第一次写入:maxFileSize=1,格式化行约 60 字节,触发轮转
-        // 空文件被轮转为 .1,新文件写入「第一条」
-        logger.info("第一条", module: "Test")
-        logger.flush()
-
-        let logURL = dir.appendingPathComponent("logs/panda-ssh.log")
-        let backupURL = logURL.appendingPathExtension("1")
-
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path), "应生成 .1 备份文件")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path), "应创建新日志文件")
-
-        // 重新初始化(模拟重启),打开已有文件,再写入触发第二次轮转
-        let logger2 = makeLogger(dir: dir, maxFileSize: 1)
-        logger2.info("第二条", module: "Test")
-        logger2.flush()
-
-        // 第二次轮转:含「第一条」的文件被轮转为 .1(覆盖旧的空备份)
-        let backupContent = (try? String(contentsOf: backupURL, encoding: .utf8)) ?? ""
-        XCTAssertTrue(backupContent.contains("第一条"), "备份文件应包含被轮转的旧日志")
-
-        // 新文件应包含轮转后写入的「第二条」
-        let newContent = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
-        XCTAssertTrue(newContent.contains("第二条"), "新文件应包含轮转后的新日志")
-        XCTAssertFalse(newContent.contains("第一条"), "新文件不应包含旧日志")
-    }
-
-    func testRotationOverwritesOldBackup() {
-        let dir = tempDir()
-        // 第一次写入触发轮转:空文件→.1,新文件写入「第一批」
-        let logger1 = makeLogger(dir: dir, maxFileSize: 1)
-        logger1.info("第一批", module: "Test")
-        logger1.flush()
-
-        // 第二轮:重新初始化打开已有文件,再写入触发轮转
-        // 含「第一批」的文件→.1(覆盖旧的空备份),新文件写入「第二批」
-        let logger2 = makeLogger(dir: dir, maxFileSize: 1)
-        logger2.info("第二批", module: "Test")
-        logger2.flush()
-
-        let backupURL = dir.appendingPathComponent("logs/panda-ssh.log.1")
-        let backupContent = (try? String(contentsOf: backupURL, encoding: .utf8)) ?? ""
-        // 第二次轮转后,备份应包含「第一批」(轮转前主文件的内容)
-        XCTAssertTrue(backupContent.contains("第一批"), "第二次轮转后备份应包含第一批内容")
-        XCTAssertFalse(backupContent.contains("第二批"), "备份不应包含第二批内容")
-
-        let logURL = dir.appendingPathComponent("logs/panda-ssh.log")
-        let newContent = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
-        XCTAssertTrue(newContent.contains("第二批"), "新文件应包含第二批内容")
-    }
-
-    func testDirectoryAutoCreated() {
-        let dir = tempDir()
-        // 目录不存在时 Logger 初始化应自动创建
-        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
-
-        let logger = makeLogger(dir: dir)
-        logger.info("目录测试", module: "Test")
-        logger.flush()
-
-        let logURL = dir.appendingPathComponent("logs/panda-ssh.log")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: logURL.path), "目录不存在时应自动创建")
     }
 
     func testNilConfigDirectorySkipsFileLogging() {
