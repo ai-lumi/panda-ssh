@@ -86,7 +86,7 @@ pub fn compute_disambiguated_titles(
         let title = if *ordinal == 1 {
             base
         } else {
-            format!("{base}({ordinal})")
+            format!("{base} ({ordinal})")
         };
         titles.push(title);
     }

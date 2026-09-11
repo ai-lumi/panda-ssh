@@ -2506,8 +2506,8 @@ struct WorkspaceState {
     tabs: Vec<InternalTab>,
     active_tab_id: Option<String>,
     pending_close: Option<PendingClose>,
-    /// 主机名查询函数：host_id -> Option<name>
-    host_name_provider: Box<dyn Fn(&str) -> Option<String> + Send>,
+    /// 主机名映射表：host_id -> name
+    host_names: HashMap<String, String>,
     /// 终端会话状态机：tab_id -> TerminalSessionState
     terminal_sessions: HashMap<String, panda_core::TerminalSessionState>,
     /// TOFU 并发序列化：host_id → 等待该主机确认结果的 oneshot sender 列表。
@@ -2522,16 +2522,18 @@ impl WorkspaceState {
             tabs: Vec::new(),
             active_tab_id: None,
             pending_close: None,
-            host_name_provider: Box::new(|id: &str| Some(id.to_string())),
+            host_names: HashMap::new(),
             terminal_sessions: HashMap::new(),
             tofu_waiters: HashMap::new(),
             tofu_probing: HashSet::new(),
         }
     }
 
-    /// 设置主机名查询函数。
-    fn set_host_name_provider(&mut self, provider: Box<dyn Fn(&str) -> Option<String> + Send>) {
-        self.host_name_provider = provider;
+    /// 增量更新主机名映射。
+    fn update_host_names(&mut self, mappings: Vec<HostNameMapping>) {
+        for mapping in mappings {
+            self.host_names.insert(mapping.host_id, mapping.name);
+        }
     }
 
     /// 计算当前标签页列表（含消歧标题）。
@@ -2543,7 +2545,7 @@ impl WorkspaceState {
             .collect();
         let titles = panda_core::compute_disambiguated_titles(
             &workspace_tabs,
-            &|host_id| (self.host_name_provider)(host_id),
+            &|host_id| self.host_names.get(host_id).cloned(),
         );
         self.tabs
             .iter()
@@ -2765,12 +2767,8 @@ fn workspace_state() -> &'static Mutex<WorkspaceState> {
 /// 注意：由于 FFI 限制，这里提供一个简化版本：直接传入 host_id -> name 的映射表。
 #[uniffi::export]
 pub fn workspace_set_host_names(host_names: Vec<HostNameMapping>) {
-    let map: std::collections::HashMap<String, String> = host_names
-        .into_iter()
-        .map(|m| (m.host_id, m.name))
-        .collect();
     let mut state = workspace_state().lock().unwrap();
-    state.set_host_name_provider(Box::new(move |id: &str| map.get(id).cloned()));
+    state.update_host_names(host_names);
 }
 
 /// 主机名映射记录。
@@ -3133,12 +3131,15 @@ mod tests {
 
     /// 辅助：创建带主机名映射的 WorkspaceState。
     fn make_state(names: &[(&str, &str)]) -> WorkspaceState {
-        let map: std::collections::HashMap<String, String> = names
+        let mappings: Vec<HostNameMapping> = names
             .iter()
-            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .map(|(id, name)| HostNameMapping {
+                host_id: id.to_string(),
+                name: name.to_string(),
+            })
             .collect();
         let mut state = WorkspaceState::new();
-        state.set_host_name_provider(Box::new(move |id: &str| map.get(id).cloned()));
+        state.update_host_names(mappings);
         state
     }
 
