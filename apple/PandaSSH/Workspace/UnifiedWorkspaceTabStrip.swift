@@ -101,51 +101,81 @@ struct UnifiedWorkspaceTabStrip: View {
         .accessibilityLabel(direction < 0 ? "浏览前一页签" : "浏览后一页签")
     }
 
+    @State private var hoveredTabID: UUID?
+
     private func tabButton(_ tab: WorkspaceTab) -> some View {
-        Button {
+        let isHovered = hoveredTabID == tab.id
+        let active = isActive(tab)
+
+        // 两个独立组件水平排列，各自管理自己的手势
+        // 标签区域：onTapGesture（低优先级）
+        // 关闭按钮：Button（高优先级），不受父视图 onTapGesture 影响
+        return HStack(spacing: 0) {
+            // ── 左侧：文本标签区域 ──
+            labelArea(for: tab, active: active)
+
+            // ── 右侧：关闭按钮 ─
+            closeButton(for: tab, isHovered: isHovered)
+        }
+        .font(.callout)
+        .background {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(active ? Color.primary.opacity(0.14) : Color.clear)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Color.primary.opacity(isHovered ? 0.15 : 0), lineWidth: 0.5)
+        )
+        .onHover { hovered in
+            hoveredTabID = hovered ? tab.id : (hoveredTabID == tab.id ? nil : hoveredTabID)
+        }
+        .accessibilityLabel(tab.title)
+    }
+
+    /// 左侧标签区域：状态圆点 + 图标 + 标题，点击选中
+    private func labelArea(for tab: WorkspaceTab, active: Bool) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(statusColor(for: tab.id))
+                .frame(width: 6, height: 6)
+            Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(tab.title)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .frame(minHeight: 30)
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onTapGesture {
             workspace.select(tabID: tab.id)
             model.presentTab(tab.id)
+        }
+        .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// 右侧关闭按钮：独立 Button，仅触发 requestClose
+    private func closeButton(for tab: WorkspaceTab, isHovered: Bool) -> some View {
+        Button {
+            workspace.requestClose(tabID: tab.id)
         } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor(for: tab.id))
-                    .frame(width: 6, height: 6)
-                Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(tab.title)
-                    .lineLimit(1)
-                Button {
-                    workspace.requestClose(tabID: tab.id)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 20, height: 20)
-                        .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .background(
-                    Color.primary.opacity(0.04),
-                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                )
-                .accessibilityLabel("关闭 \(tab.title)")
-            }
-            .font(.callout)
-            .padding(.horizontal, 9)
-            .frame(minHeight: 30)
-            .background(
-                isActive(tab) ? Color.primary.opacity(0.14) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-            )
+            Image(systemName: "xmark")
+                .font(.caption.weight(.semibold))
+                .frame(width: 20, height: 20)
+                .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(tab.title)
-        .accessibilityAddTraits(isActive(tab) ? [.isButton, .isSelected] : .isButton)
+        .foregroundStyle(.secondary)
+        .background(
+            Color.primary.opacity(isHovered ? 0.10 : 0.04),
+            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+        )
+        .padding(.trailing, 6)
+        .accessibilityLabel("关闭 \(tab.title)")
     }
 
     private func isActive(_ tab: WorkspaceTab) -> Bool {

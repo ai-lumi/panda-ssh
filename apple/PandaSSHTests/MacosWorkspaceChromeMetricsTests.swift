@@ -30,13 +30,6 @@ final class MacosWorkspaceChromeMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.sidebarWidth, 300)
     }
 
-    func test侧栏宽度同值重复赋值不再发布() {
-        metrics.updateSidebarWidth(300)
-        metrics.updateSidebarWidth(300)
-        XCTAssertEqual(publishCount, 1)
-        XCTAssertEqual(metrics.sidebarWidth, 300)
-    }
-
     func test侧栏宽度变化后再次发布() {
         metrics.updateSidebarWidth(300)
         metrics.updateSidebarWidth(320)
@@ -44,23 +37,48 @@ final class MacosWorkspaceChromeMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.sidebarWidth, 320)
     }
 
-    func test红绿灯安全宽度同值重复更新不再发布() {
-        let window = makeWindow(width: 900)
-        metrics.update(window: window)
-        let first = metrics.trafficLightSafeWidth
-        metrics.update(window: window)
-        // 第二次以同几何更新：同值不发布，只有首次那一拍。
+    /// 幂等契约：无论走侧栏、正常窗口还是 fallback 路径，同值重复更新 MUST NOT 重复发布。
+    func test幂等契约_同值重复更新不再发布() {
+        // 侧栏路径
+        metrics.updateSidebarWidth(300)
+        metrics.updateSidebarWidth(300)
         XCTAssertEqual(publishCount, 1)
-        XCTAssertEqual(metrics.trafficLightSafeWidth, first)
+
+        // 正常窗口路径（有 zoomButton）
+        let normalWindow = makeWindow(width: 900)
+        metrics.update(window: normalWindow)
+        let safeWidth = metrics.trafficLightSafeWidth
+        metrics.update(window: normalWindow)
+        XCTAssertEqual(publishCount, 2) // 只有首次窗口更新发布
+        XCTAssertEqual(metrics.trafficLightSafeWidth, safeWidth)
+
+        // fallback 路径（无 zoomButton）：窗口宽 60 ≠ 默认 76，首次发布
+        let fallbackWindow = makeWindow(width: 60)
+        fallbackWindow.contentView = nil
+        metrics.update(window: fallbackWindow)
+        XCTAssertEqual(metrics.trafficLightSafeWidth, 60)
+        metrics.update(window: fallbackWindow)
+        XCTAssertEqual(publishCount, 3) // 只有首次 fallback 发布
     }
 
-    func test红绿灯安全宽度窗口变化后再次发布() {
+    /// 值变化发布：正常窗口变窄和 fallback 值变化都 MUST 正常发布。
+    func test值变化时正常发布() {
+        // 正常窗口路径：变窄触发发布
         let window = makeWindow(width: 900)
         metrics.update(window: window)
-        // 红绿灯固定在左上角，x 不随窗口变宽改变；变窄到小于实测值触发夹逼变化。
         window.setFrame(NSRect(x: 0, y: 0, width: 40, height: 300), display: false)
         metrics.update(window: window)
         XCTAssertEqual(publishCount, 2)
+        XCTAssertEqual(metrics.trafficLightSafeWidth, 40)
+
+        // fallback 路径：宽 60 → 40，两次不同的 fallback 值各发布一次
+        let fallbackWindow = makeWindow(width: 60)
+        fallbackWindow.contentView = nil
+        metrics.update(window: fallbackWindow)
+        XCTAssertEqual(publishCount, 3)
+        fallbackWindow.setFrame(NSRect(x: 0, y: 0, width: 40, height: 300), display: false)
+        metrics.update(window: fallbackWindow)
+        XCTAssertEqual(publishCount, 4)
         XCTAssertEqual(metrics.trafficLightSafeWidth, 40)
     }
 
@@ -79,32 +97,10 @@ final class MacosWorkspaceChromeMetricsTests: XCTestCase {
 
     // MARK: 边界条件
 
-    func test无红绿灯按钮的窗口走fallback且同值不重复发布() {
-        // contentView 为 nil 的窗口无法提供 zoomButton，触发 fallback 路径。
-        // 窗口宽 60：fallback = 60 ≠ 默认 76，首次更新发布；同值重复不再发布。
-        let window = makeWindow(width: 60)
-        window.contentView = nil
-        metrics.update(window: window)
-        XCTAssertEqual(metrics.trafficLightSafeWidth, 60)
-        metrics.update(window: window)
-        XCTAssertEqual(publishCount, 1)
-    }
-
     func test极小窗口宽度fallback被夹逼到窗口宽度() {
         let window = makeWindow(width: 40)
         window.contentView = nil
         metrics.update(window: window)
-        XCTAssertEqual(metrics.trafficLightSafeWidth, 40)
-    }
-
-    func testfallback值变化时正常发布() {
-        // 宽 60 → fallback 60（首次发布）；变窄到 40 → fallback 40（再次发布）。
-        let window = makeWindow(width: 60)
-        window.contentView = nil
-        metrics.update(window: window)
-        window.setFrame(NSRect(x: 0, y: 0, width: 40, height: 300), display: false)
-        metrics.update(window: window)
-        XCTAssertEqual(publishCount, 2)
         XCTAssertEqual(metrics.trafficLightSafeWidth, 40)
     }
 

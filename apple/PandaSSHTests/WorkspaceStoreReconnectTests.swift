@@ -18,6 +18,16 @@ import XCTest
 /// - 边界条件：tabID 存在但 session 已释放（weak 引用 nil）/ 从未注册 → 不抛异常。
 @MainActor
 final class WorkspaceStoreReconnectTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        workspaceReset()
+    }
+
+    override func tearDown() {
+        workspaceReset()
+        super.tearDown()
+    }
+
 
     /// 构造一个不注入 `reconnectHandler` 的 store，使用默认注册表转发路径。
     private func makeStore() -> WorkspaceStore {

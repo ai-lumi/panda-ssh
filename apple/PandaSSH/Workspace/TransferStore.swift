@@ -757,6 +757,11 @@ final class TransferStore: ObservableObject {
         adjustPollingFrequency()
     }
 
+    /// 查询全部批量传输任务当前状态。
+    func listBatchTransfers() -> [BatchTransferRecord] {
+        batchSource?.listBatchTransfers() ?? []
+    }
+
     /// 重试失败任务;非失败任务为 no-op。
     func retry(id: UUID) {
         _ = source.retryTransfer(id: id.uuidString)
