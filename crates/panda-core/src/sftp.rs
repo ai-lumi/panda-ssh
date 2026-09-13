@@ -628,4 +628,65 @@ mod tests {
         assert_eq!(info.source_mtime, None);
         assert!(info.target_mtime.is_some());
     }
+
+    #[tokio::test]
+    async fn wait_if_paused_returns_cancelled_when_cancel_is_true() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let result = wait_if_paused(Some(&cancel), None, None).await;
+        assert!(matches!(result, Err(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_returns_immediately_when_not_paused() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
+        let result = wait_if_paused(Some(&cancel), Some(&pause), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_waits_until_resumed_with_notify() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(true));
+        let resume = Arc::new(Notify::new());
+
+        let pause_clone = pause.clone();
+        let resume_clone = resume.clone();
+
+        // 在另一个任务中延迟解除暂停
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            pause_clone.store(false, Ordering::Relaxed);
+            resume_clone.notify_one();
+        });
+
+        let result = wait_if_paused(Some(&cancel), Some(&pause), Some(&resume)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_uses_polling_when_no_resume_notify() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(true));
+
+        let pause_clone = pause.clone();
+
+        // 在另一个任务中延迟解除暂停
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            pause_clone.store(false, Ordering::Relaxed);
+        });
+
+        let result = wait_if_paused(Some(&cancel), Some(&pause), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_already_exists_message_detects_various_forms() {
+        assert!(is_already_exists_message("File already exists"));
+        assert!(is_already_exists_message("file exists"));
+        assert!(is_already_exists_message("directory EXISTS"));
+        assert!(!is_already_exists_message("not found"));
+        assert!(!is_already_exists_message("permission denied"));
+    }
 }

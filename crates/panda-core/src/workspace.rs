@@ -326,7 +326,7 @@ mod tests {
         ];
         let names = |_id: &str| -> Option<String> { Some("server".to_string()) };
         let titles = compute_disambiguated_titles(&tabs, &names);
-        assert_eq!(titles, vec!["server", "server(2)", "server(3)"]);
+        assert_eq!(titles, vec!["server", "server (2)", "server (3)"]);
     }
 
     #[test]
@@ -338,20 +338,20 @@ mod tests {
         ];
         let names = |id: &str| -> Option<String> { Some(id.to_string()) };
         let titles = compute_disambiguated_titles(&tabs, &names);
-        assert_eq!(titles, vec!["serverA", "serverB", "serverA(2)"]);
+        assert_eq!(titles, vec!["serverA", "serverB", "serverA (2)"]);
     }
 
     #[test]
     fn closing_middle_tab_renumbers_remaining() {
-        // 初始：server, server(2), server(3)
-        // 关闭 server(2) 后：server, server(2)
+        // 初始：server, server (2), server (3)
+        // 关闭 server (2) 后：server, server (2)
         let tabs = vec![
             make_tab("1", "server", TabKind::Terminal),
             make_tab("3", "server", TabKind::Terminal),
         ];
         let names = |_id: &str| -> Option<String> { Some("server".to_string()) };
         let titles = compute_disambiguated_titles(&tabs, &names);
-        assert_eq!(titles, vec!["server", "server(2)"]);
+        assert_eq!(titles, vec!["server", "server (2)"]);
     }
 
     #[test]

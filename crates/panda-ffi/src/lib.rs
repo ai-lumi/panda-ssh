@@ -3153,8 +3153,8 @@ mod tests {
         let list = state.tab_list();
         assert_eq!(list.len(), 3);
         assert_eq!(list[0].title, "server");
-        assert_eq!(list[1].title, "server(2)");
-        assert_eq!(list[2].title, "server(3)");
+        assert_eq!(list[1].title, "server (2)");
+        assert_eq!(list[2].title, "server (3)");
         assert_eq!(list[0].id, id1);
         assert_eq!(list[1].id, id2);
         assert_eq!(list[2].id, id3);
@@ -3175,7 +3175,7 @@ mod tests {
         let list = state.tab_list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].title, "server");
-        assert_eq!(list[1].title, "server(2)");
+        assert_eq!(list[1].title, "server (2)");
         assert!(list.iter().any(|t| t.id == id3));
     }
 
@@ -3448,7 +3448,7 @@ mod tests {
         let list = state.tab_list();
         assert_eq!(list[0].title, "alpha");
         assert_eq!(list[1].title, "beta");
-        assert_eq!(list[2].title, "alpha(2)");
+        assert_eq!(list[2].title, "alpha (2)");
     }
 
     // -----------------------------------------------------------------------

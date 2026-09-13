@@ -160,3 +160,185 @@ impl DeleteTask {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+
+    struct MockFs {
+        nodes: HashMap<String, NodeKind>,
+        fail_inspect: Option<String>,
+    }
+
+    impl MockFs {
+        fn new() -> Self {
+            Self { nodes: HashMap::new(), fail_inspect: None }
+        }
+
+        fn with_file(mut self, path: &str) -> Self {
+            self.nodes.insert(path.to_string(), NodeKind::File);
+            self
+        }
+
+        fn with_dir(mut self, path: &str, children: Vec<&str>) -> Self {
+            self.nodes.insert(path.to_string(), NodeKind::Directory);
+            for child in children {
+                self.nodes.insert(format!("{}/{}", path, child), NodeKind::File);
+            }
+            self
+        }
+
+        fn with_fail_inspect(mut self, path: &str) -> Self {
+            self.fail_inspect = Some(path.to_string());
+            self
+        }
+    }
+
+    impl DeleteFileSystem for MockFs {
+        async fn inspect(&self, path: &str) -> Result<NodeKind, DeleteError> {
+            if let Some(ref fail_path) = self.fail_inspect {
+                if fail_path == path {
+                    return Err(DeleteError::new("inspect 失败", false));
+                }
+            }
+            self.nodes.get(path).copied().ok_or_else(|| DeleteError::new("not found", false))
+        }
+
+        async fn children(&self, path: &str) -> Result<Vec<String>, DeleteError> {
+            let prefix = format!("{}/", path);
+            let children: Vec<String> = self.nodes.keys()
+                .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('/'))
+                .map(|k| k[prefix.len()..].to_string())
+                .collect();
+            Ok(children)
+        }
+
+        async fn remove(&self, _path: &str, _kind: NodeKind) -> Result<(), DeleteError> {
+            Ok(())
+        }
+    }
+
+    fn dummy_changed() -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(|| {})
+    }
+
+    #[test]
+    fn local_error_creates_non_fatal_delete_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let err = local_error(io_err);
+        assert!(!err.fatal);
+        assert!(err.message.contains("permission denied"));
+    }
+
+    #[test]
+    fn fail_to_start_sets_failed_status_when_not_cancelled() {
+        let task = DeleteTask::new(
+            "test".to_string(),
+            WorkKind::LocalDelete,
+            vec!["/tmp/test".to_string()],
+            dummy_changed(),
+        ).unwrap();
+
+        task.fail_to_start("连接失败".to_string());
+
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.status, WorkStatus::Failed);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert_eq!(snapshot.errors[0].message, "连接失败");
+    }
+
+    #[test]
+    fn fail_to_start_sets_cancelled_status_when_already_cancelled() {
+        let task = DeleteTask::new(
+            "test".to_string(),
+            WorkKind::LocalDelete,
+            vec!["/tmp/test".to_string()],
+            dummy_changed(),
+        ).unwrap();
+
+        task.cancel();
+        task.fail_to_start("连接失败".to_string());
+
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.status, WorkStatus::Cancelled);
+        assert_eq!(snapshot.errors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_records_error_and_returns_when_inspect_fails() {
+        let changed_count = Arc::new(AtomicUsize::new(0));
+        let changed_count_clone = changed_count.clone();
+        let changed = Arc::new(move || { changed_count_clone.fetch_add(1, Ordering::SeqCst); });
+
+        let task = DeleteTask::new(
+            "test".to_string(),
+            WorkKind::LocalDelete,
+            vec!["/nonexistent".to_string()],
+            changed,
+        ).unwrap();
+
+        let fs = MockFs::new().with_fail_inspect("/nonexistent");
+        task.run(fs).await;
+
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.status, WorkStatus::Failed);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(snapshot.errors[0].message.contains("inspect 失败"));
+    }
+
+    #[tokio::test]
+    async fn execute_deletes_file_successfully() {
+        let task = DeleteTask::new(
+            "test".to_string(),
+            WorkKind::LocalDelete,
+            vec!["/tmp/file.txt".to_string()],
+            dummy_changed(),
+        ).unwrap();
+
+        let fs = MockFs::new().with_file("/tmp/file.txt");
+        task.run(fs).await;
+
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.status, WorkStatus::Completed);
+        assert_eq!(snapshot.succeeded, 1);
+        assert!(snapshot.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_deletes_directory_with_children() {
+        let task = DeleteTask::new(
+            "test".to_string(),
+            WorkKind::LocalDelete,
+            vec!["/tmp/dir".to_string()],
+            dummy_changed(),
+        ).unwrap();
+
+        let fs = MockFs::new().with_dir("/tmp/dir", vec!["a.txt", "b.txt"]);
+        task.run(fs).await;
+
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.status, WorkStatus::Completed);
+        assert_eq!(snapshot.succeeded, 3); // dir + 2 files
+    }
+
+    #[tokio::test]
+    async fn cancel_before_run_prevents_execution() {
+        let task = DeleteTask::new(
+            "test".to_string(),
+            WorkKind::LocalDelete,
+            vec!["/tmp/file.txt".to_string()],
+            dummy_changed(),
+        ).unwrap();
+
+        task.cancel();
+
+        let fs = MockFs::new().with_file("/tmp/file.txt");
+        task.run(fs).await;
+
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.status, WorkStatus::Cancelled);
+        assert_eq!(snapshot.succeeded, 0);
+    }
+}
