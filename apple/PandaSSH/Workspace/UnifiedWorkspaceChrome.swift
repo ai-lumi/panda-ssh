@@ -4,6 +4,7 @@ import SwiftUI
 /// 平台宿主仅传入窗口安全预留宽度；页签、侧栏入口与业务状态均不分叉。
 struct UnifiedWorkspaceChrome: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var workspace: WorkspaceStore
     let leadingReservedWidth: Double
     let trailingReservedWidth: Double
     let showsCustomSidebarRecovery: Bool
@@ -53,6 +54,16 @@ struct UnifiedWorkspaceChrome: View {
 
                 UnifiedWorkspaceTabStrip()
                     .frame(width: layout.tabStripWidth)
+                    #if os(macOS)
+                    .onKeyPress { press in
+                        guard press.modifiers.contains(.command), press.key == KeyEquivalent("w") else {
+                            return .ignored
+                        }
+                        guard let activeID = workspace.activeTabID else { return .ignored }
+                        workspace.requestClose(tabID: activeID)
+                        return .handled
+                    }
+                    #endif
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }

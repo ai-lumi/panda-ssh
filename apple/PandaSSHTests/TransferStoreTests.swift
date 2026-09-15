@@ -46,6 +46,19 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertEqual(task?.transferred, 0)
     }
 
+    /// 应用进入停机后必须拒绝新的传输注册，且不能把占位 id 当作真实任务展示。
+    func testBeginApplicationShutdown_rejectsNewTransfer() {
+        let store = makeStore()
+        _ = addFile(store, name: "before.bin")
+
+        store.beginApplicationShutdown()
+        let rejected = addFile(store, name: "after.bin")
+
+        XCTAssertFalse(store.isAcceptingNewTasks)
+        XCTAssertNil(store.tasks.first { $0.id == rejected })
+        XCTAssertTrue(store.tasks.allSatisfy { $0.status == .cancelled })
+    }
+
     func testTickAdvancesProgress() {
         let store = makeStore()
         let id = addFile(store)

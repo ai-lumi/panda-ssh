@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftTerm
 
 /// SSH 内容页的共享几何与交互所有权；不承载连接状态机。
-enum TerminalContentPhase: Equatable { case connecting, shell, failed }
+enum TerminalContentPhase: Equatable { case connecting, shell, ended, failed }
 
 struct TerminalContentPresentation: Equatable {
     enum Overlay: Equatable { case none, centered }
@@ -119,6 +119,20 @@ struct TerminalTabView: View {
                         }
                     }
                 }
+            case .ended:
+                terminalCanvas(presentation: presentation) {
+                    VStack(spacing: 16) {
+                        Image(systemName: "checkmark.circle").font(.largeTitle)
+                        Text("SSH 会话已结束").font(.headline)
+                        Text("\(host.address):\(host.port)").font(.caption.monospaced())
+                        Text("远端 shell 已正常退出。")
+                            .multilineTextAlignment(.center)
+                        ViewThatFits {
+                            HStack { endedActions }
+                            VStack { endedActions }
+                        }
+                    }
+                }
             case .shell:
                 let readingAttempt = session.attempt
                 SwiftTermWrapper(
@@ -138,12 +152,18 @@ struct TerminalTabView: View {
         switch session.phase {
         case .connecting: .connecting
         case .shell: .shell
+        case .ended: .ended
         case .failed: .failed
         }
     }
 
     @ViewBuilder private var failureActions: some View {
         Button("重试") { session.retry() }.buttonStyle(.borderedProminent)
+        Button("关闭标签") { workspace.close(tabID: tab.id) }
+    }
+
+    @ViewBuilder private var endedActions: some View {
+        Button("重新连接") { session.retry() }.buttonStyle(.borderedProminent)
         Button("关闭标签") { workspace.close(tabID: tab.id) }
     }
 
@@ -212,6 +232,7 @@ struct TerminalTabView: View {
         switch phase {
         case .connecting: return .connecting
         case .shell: return .connected
+        case .ended: return .inactive
         case .failed: return .failed
         }
     }
@@ -404,12 +425,16 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         sendToShell(Data(data))
     }
 
-    /// 所有终端输入统一走此入口；写入失败立即通知会话进入不可交互状态。
+    /// 所有终端输入统一走此入口；暂时背压只提示并保留会话，真正写入失败才结束读循环。
     internal func sendToShell(_ data: Data) {
         guard currentPhase == .shell, let connection else { return }
         do {
             try connection.write(data)
         } catch {
+            if let panda = error as? PandaError, case .ShellInputBackpressure = panda {
+                Logger.shared.warning("SSH 输入暂时拥塞；本次输入未发送", module: LogModule.ssh)
+                return
+            }
             reportError(error, from: connection)
         }
     }

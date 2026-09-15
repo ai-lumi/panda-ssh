@@ -154,6 +154,16 @@ impl russh::server::Handler for TestHandler {
                 session.disconnect(russh::Disconnect::ByApplication, "fixture disconnect", "")?;
                 return Ok(());
             }
+            if let Some(status) = data
+                .trim_ascii()
+                .strip_prefix(b"exit ")
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.parse::<u32>().ok())
+            {
+                session.exit_status_request(channel, status)?;
+                session.close(channel)?;
+                return Ok(());
+            }
             if data.trim_ascii() == b"exit" {
                 session.data(channel, b"logout\n".to_vec())?;
                 session.exit_status_request(channel, 0)?;
@@ -1470,6 +1480,22 @@ async fn shell_session_reports_remote_exit_after_draining_final_output() {
 }
 
 #[tokio::test]
+async fn shell_session_reports_nonzero_remote_exit_status() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+    let shell = ShellSession::open(Arc::new(session)).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = shell.read(1024).unwrap();
+    shell.write(b"exit 7\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = shell.read(1024);
+    assert!(matches!(result, Err(Error::ShellExitStatus(7))), "{result:?}");
+}
+
+#[tokio::test]
 async fn releasing_transport_owner_closes_channels_even_if_client_survives() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
@@ -1524,7 +1550,10 @@ async fn shell_full_queues_report_failure_without_hanging() {
     for _ in 0..64 {
         shell.write(b"x").unwrap();
     }
-    assert!(shell.write(b"overflow").is_err());
+    assert!(matches!(
+        shell.write(b"overflow"),
+        Err(Error::ShellInputBackpressure)
+    ));
     for _ in 0..8 {
         shell.resize(80, 24).unwrap();
     }

@@ -14,6 +14,9 @@ const IDLE_AFTER_MS: u64 = 5_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleKind {
     Connected,
+    ConnectionTimeout,
+    AuthenticationFailed,
+    SftpOperationFailed,
     ShellExit,
     ExplicitClose,
     SocketEof,
@@ -28,6 +31,9 @@ impl LifecycleKind {
     pub fn description(self) -> &'static str {
         match self {
             Self::Connected => "连接成功",
+            Self::ConnectionTimeout => "连接或握手超时",
+            Self::AuthenticationFailed => "SSH 认证失败",
+            Self::SftpOperationFailed => "SFTP 操作失败",
             Self::ShellExit => "Channel 正常结束",
             Self::ExplicitClose => "显式关闭",
             Self::SocketEof => "Socket EOF",
@@ -46,6 +52,9 @@ impl LifecycleKind {
                 | Self::WriteError
                 | Self::KeepaliveFailed
                 | Self::TransportError
+                | Self::ConnectionTimeout
+                | Self::AuthenticationFailed
+                | Self::SftpOperationFailed
         )
     }
 }
@@ -147,6 +156,7 @@ struct ConnectionRecord {
     rate_window_started: Instant,
     rate_window_received: u64,
     rate_window_sent: u64,
+    explicit_close_requested: bool,
     last_error: Option<String>,
     channels: HashMap<u64, ChannelSnapshot>,
 }
@@ -172,6 +182,7 @@ impl ConnectionRecord {
             rate_window_started: Instant::now(),
             rate_window_received: 0,
             rate_window_sent: 0,
+            explicit_close_requested: false,
             last_error: None,
             channels: HashMap::new(),
         }
@@ -224,26 +235,47 @@ impl TelemetryRegistry {
     }
 
     pub fn record_event(&self, id: u64, kind: LifecycleKind) {
-        let connections = self.lock();
-        let Some(record) = connections.get(&id) else {
-            return;
-        };
-        // 本地已明确关闭后的 EOF/读写完成回调属于清理，不应污染最终状态和日志。
-        if kind.is_error() && record.transport_state == TransportState::Closed {
-            return;
-        }
-        let event = LifecycleEvent {
-            connection_id: id,
-            address: record.address.clone(),
-            owner_kind: record.owner_kind.clone(),
-            owner_id: record.owner_id.clone(),
-            kind,
+        let event = {
+            let connections = self.lock();
+            let Some(record) = connections.get(&id) else {
+                return;
+            };
+            // 本地已明确关闭后的 EOF/读写完成回调属于清理，不应污染最终状态和日志。
+            if kind.is_error() && record.explicit_close_requested {
+                return;
+            }
+            LifecycleEvent {
+                connection_id: id,
+                address: record.address.clone(),
+                owner_kind: record.owner_kind.clone(),
+                owner_id: record.owner_id.clone(),
+                kind,
+            }
         };
         let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         if events.len() >= 1000 {
             events.pop_front();
         }
-        events.push_back(event);
+        events.push_back(event.clone());
+        drop(events);
+
+        let level = if event.kind.is_error() {
+            crate::logger::LogLevel::Error
+        } else {
+            crate::logger::LogLevel::Info
+        };
+        crate::logger::global_logger().log(
+            level,
+            "SSH",
+            &format!(
+                "host={}; connection={}; owner={}#{}; {}",
+                event.address,
+                event.connection_id,
+                event.owner_kind,
+                event.owner_id,
+                event.kind.description()
+            ),
+        );
     }
 
     pub fn drain_events(&self) -> Vec<LifecycleEvent> {
@@ -284,13 +316,29 @@ impl TelemetryRegistry {
 
     pub fn fail(&self, id: u64, error: String) {
         if let Some(record) = self.lock().get_mut(&id) {
-            if record.transport_state == TransportState::Closed {
+            if record.explicit_close_requested {
                 return;
             }
             record.transport_state = TransportState::Failed;
             record.ssh_state = SshState::Failed;
             record.health_state = HealthState::Unavailable;
-            record.last_error = Some(sanitize_error(error));
+            if record.last_error.is_none() {
+                record.last_error = Some(sanitize_error(error));
+            }
+        }
+    }
+
+    /// 以固定、无敏感内容的原因记录失败状态和生命周期事件。
+    pub fn fail_with_event(&self, id: u64, kind: LifecycleKind) {
+        debug_assert!(kind.is_error());
+        self.fail(id, kind.description().into());
+        self.record_event(id, kind);
+    }
+
+    /// 标记由本地发起的关闭。仅这种关闭后的底层回调可作为清理忽略。
+    pub fn mark_explicit_close(&self, id: u64) {
+        if let Some(record) = self.lock().get_mut(&id) {
+            record.explicit_close_requested = true;
         }
     }
 
@@ -436,7 +484,7 @@ impl TelemetryRegistry {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, ConnectionRecord>> {
         self.connections
             .lock()
-            .expect("telemetry registry lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -470,6 +518,9 @@ mod tests {
         use super::LifecycleKind::*;
         for kind in [
             Connected,
+            ConnectionTimeout,
+            AuthenticationFailed,
+            SftpOperationFailed,
             ShellExit,
             ExplicitClose,
             SocketEof,
@@ -484,7 +535,14 @@ mod tests {
                 kind.is_error(),
                 matches!(
                     kind,
-                    SocketEof | ReadError | WriteError | KeepaliveFailed | TransportError
+                    SocketEof
+                        | ReadError
+                        | WriteError
+                        | KeepaliveFailed
+                        | TransportError
+                        | ConnectionTimeout
+                        | AuthenticationFailed
+                        | SftpOperationFailed
                 )
             );
         }
@@ -506,6 +564,7 @@ mod tests {
     fn expected_eof_after_explicit_close_does_not_create_failure() {
         let registry = super::TelemetryRegistry::default();
         let id = registry.register_connection("fixture".into(), "example.test:22".into());
+        registry.mark_explicit_close(id);
         registry.close_connection(id);
         registry.fail(id, "关闭后的 EOF".into());
         registry.record_event(id, super::LifecycleKind::SocketEof);
@@ -517,10 +576,25 @@ mod tests {
     }
 
     #[test]
+    fn concrete_failure_after_unconfirmed_close_is_preserved() {
+        let registry = super::TelemetryRegistry::default();
+        let id = registry.register_connection("fixture".into(), "example.test:22".into());
+        registry.close_connection(id);
+        registry.fail(id, "Socket 读取失败：连接被重置".into());
+        registry.record_event(id, super::LifecycleKind::ReadError);
+
+        let snapshot = registry.snapshot().pop().unwrap();
+        assert_eq!(snapshot.transport_state, super::TransportState::Failed);
+        assert_eq!(snapshot.last_error.as_deref(), Some("Socket 读取失败：连接被重置"));
+        assert_eq!(registry.drain_events()[0].kind, super::LifecycleKind::ReadError);
+    }
+
+    #[test]
     fn closing_transport_cannot_be_reactivated_by_late_io_or_reported_as_error() {
         let registry = super::TelemetryRegistry::default();
         let id = registry.register_connection("fixture".into(), "example.test:22".into());
         registry.set_authenticated(id);
+        registry.mark_explicit_close(id);
         registry.close_connection(id);
 
         // 真实连接在发送 SSH disconnect 帧时仍可能完成一次底层 write；
@@ -553,6 +627,18 @@ mod tests {
             .all(|event| event.connection_id == id && event.owner_id == "7"));
         assert_eq!(events.last().unwrap().kind, super::LifecycleKind::Released);
         assert!(registry.drain_events().is_empty());
+    }
+
+    #[test]
+    fn lifecycle_event_is_written_to_core_log_without_ui_drain() {
+        let registry = super::TelemetryRegistry::default();
+        let address = "direct-log-fixture:22";
+        let id = registry.register_connection("h".into(), address.into());
+        registry.set_owner(id, "终端", "tab-direct-log");
+
+        assert!(crate::logger::global_logger().entries(100).iter().any(|entry| {
+            entry.module == "SSH" && entry.message.contains(address) && entry.message.contains("连接成功")
+        }));
     }
     use super::*;
 
@@ -680,6 +766,21 @@ mod tests {
                 .count(),
             256
         );
+    }
+
+    #[test]
+    fn classified_failure_records_state_and_safe_lifecycle_event() {
+        let registry = TelemetryRegistry::default();
+        let id = registry.register_connection("h".into(), "x:22".into());
+
+        registry.fail_with_event(id, LifecycleKind::AuthenticationFailed);
+
+        let snapshot = registry.snapshot().pop().unwrap();
+        assert_eq!(snapshot.transport_state, TransportState::Failed);
+        assert_eq!(snapshot.last_error.as_deref(), Some("SSH 认证失败"));
+        let events = registry.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, LifecycleKind::AuthenticationFailed);
     }
 
     #[test]

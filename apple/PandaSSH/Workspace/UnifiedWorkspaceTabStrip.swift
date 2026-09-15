@@ -102,6 +102,9 @@ struct UnifiedWorkspaceTabStrip: View {
     }
 
     @State private var hoveredTabID: UUID?
+    #if os(macOS)
+    @State private var tabMenuHandler: TabMenuActionHandler?
+    #endif
 
     private func tabButton(_ tab: WorkspaceTab) -> some View {
         let isHovered = hoveredTabID == tab.id
@@ -130,6 +133,15 @@ struct UnifiedWorkspaceTabStrip: View {
             hoveredTabID = hovered ? tab.id : (hoveredTabID == tab.id ? nil : hoveredTabID)
         }
         .accessibilityLabel(tab.title)
+        #if os(macOS)
+        .onTabRightClick { event in
+            showTabContextMenu(for: tab, event: event)
+        }
+        #else
+        .contextMenu {
+            tabContextMenuContent(for: tab)
+        }
+        #endif
     }
 
     /// 左侧标签区域：状态圆点 + 图标 + 标题，点击选中
@@ -190,6 +202,55 @@ struct UnifiedWorkspaceTabStrip: View {
         case .inactive: Color.gray.opacity(0.6)
         }
     }
+
+    // MARK: - 页签右键菜单
+
+    #if os(macOS)
+    /// macOS：构建 NSMenu 并弹出。
+    private func showTabContextMenu(for tab: WorkspaceTab, event: NSEvent) {
+        if tabMenuHandler == nil {
+            tabMenuHandler = TabMenuActionHandler(workspace: workspace)
+        }
+        let menu = TabContextMenuBuilder.buildNSMenu(
+            tabID: tab.id,
+            tabKind: tab.kind,
+            target: tabMenuHandler,
+            action: #selector(TabMenuActionHandler.handleMenuItem(_:))
+        )
+        // 使用临时定位视图弹出菜单；事件已携带鼠标位置信息。
+        let anchor = NSView(frame: .zero)
+        NSMenu.popUpContextMenu(menu, with: event, for: anchor)
+    }
+    #else
+    /// iPadOS：`.contextMenu` 内容构建。
+    @ViewBuilder
+    private func tabContextMenuContent(for tab: WorkspaceTab) -> some View {
+        let items = TabContextMenuBuilder.items(for: tab.kind)
+        if items.contains(.reconnect) {
+            Button {
+                workspace.reconnectTerminal(tabID: tab.id)
+            } label: {
+                Label(TabMenuItem.reconnect.title, systemImage: TabMenuItem.reconnect.symbolName)
+            }
+            Divider()
+        }
+        Button {
+            workspace.requestClose(tabID: tab.id)
+        } label: {
+            Label(TabMenuItem.closeTab.title, systemImage: TabMenuItem.closeTab.symbolName)
+        }
+        Button {
+            workspace.requestCloseOthers(keeping: tab.id)
+        } label: {
+            Label(TabMenuItem.closeOthers.title, systemImage: TabMenuItem.closeOthers.symbolName)
+        }
+        Button {
+            workspace.requestCloseAll()
+        } label: {
+            Label(TabMenuItem.closeAll.title, systemImage: TabMenuItem.closeAll.symbolName)
+        }
+    }
+    #endif
 
     private func moveBrowseAnchor(direction: Int, using proxy: ScrollViewProxy) {
         let viewport = currentViewport

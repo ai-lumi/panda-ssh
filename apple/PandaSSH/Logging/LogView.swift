@@ -42,7 +42,7 @@ struct LogView: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(entry.level == .debug ? .secondary : .primary)
                         .textSelection(.enabled)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .id(entry.id)
             }

@@ -38,8 +38,8 @@ enum LogModule {
 
 /// 单条日志:时间戳 + 级别 + 模块名 + 消息。
 /// `formatted` 属性生成 `[ISO8601] [LEVEL] [module] message` 格式文本。
-struct LogEntry: Identifiable, Sendable {
-    let id = UUID()
+struct LogEntry: Identifiable, Sendable, Equatable {
+    let id: UInt64
     let timestamp: Date
     let level: LogLevel
     let module: String
@@ -90,14 +90,6 @@ final class Logger: ObservableObject {
 
     // MARK: - 日志记录
 
-    /// 记录连接生命周期事件(由 Rust 固定枚举生成;桥接层不读取终端数据或凭据)。
-    func logConnectionEvents(_ events: [ConnectionLifecycleRecord]) {
-        for event in events {
-            log("host=\(event.address); connection=\(event.connectionId); owner=\(event.ownerKind)#\(event.ownerId); \(event.reason)",
-                level: event.isError ? .error : .info, module: LogModule.ssh)
-        }
-    }
-
     /// 记录一条日志。写入 Rust 侧环形缓冲区与文件日志,然后刷新 @Published entries。
     /// `module` 必须使用规范模块名
     /// （SSH / SFTP / Transfer / HostKey / Config / FFI）；默认 `Config` 归入配置/通用类别。
@@ -114,10 +106,10 @@ final class Logger: ObservableObject {
         refreshEntries()
     }
 
-    func debug(_ message: String, module: String = "App") { log(message, level: .debug, module: module) }
-    func info(_ message: String, module: String = "App") { log(message, level: .info, module: module) }
-    func warning(_ message: String, module: String = "App") { log(message, level: .warning, module: module) }
-    func error(_ message: String, module: String = "App") { log(message, level: .error, module: module) }
+    func debug(_ message: String, module: String = LogModule.config) { log(message, level: .debug, module: module) }
+    func info(_ message: String, module: String = LogModule.config) { log(message, level: .info, module: module) }
+    func warning(_ message: String, module: String = LogModule.config) { log(message, level: .warning, module: module) }
+    func error(_ message: String, module: String = LogModule.config) { log(message, level: .error, module: module) }
 
     // MARK: - 清除
 
@@ -140,7 +132,7 @@ final class Logger: ObservableObject {
     /// 从 Rust 侧拉取最新日志条目并更新 @Published。
     private func refreshEntries() {
         let ffiEntries = logEntries(limit: UInt32(Self.maxBufferEntries))
-        let mapped = ffiEntries.compactMap { ffiEntry -> LogEntry? in
+        let mapped = ffiEntries.reversed().compactMap { ffiEntry -> LogEntry? in
             let level: LogLevel
             switch ffiEntry.level {
             case .debug: level = .debug
@@ -151,13 +143,16 @@ final class Logger: ObservableObject {
             // 解析 ISO8601 时间戳
             let timestamp = ISO8601DateFormatter().date(from: ffiEntry.timestamp) ?? Date()
             return LogEntry(
+                id: ffiEntry.id,
                 timestamp: timestamp,
                 level: level,
                 module: ffiEntry.module,
                 message: ffiEntry.message
             )
         }
-        entries = mapped
+        if entries != mapped {
+            entries = mapped
+        }
     }
 
     /// 启动定时拉取 Rust 侧日志条目(1Hz,仅用于捕获 Rust 侧直接写入的日志)。

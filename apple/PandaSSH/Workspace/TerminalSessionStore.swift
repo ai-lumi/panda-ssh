@@ -1,6 +1,6 @@
 import Foundation
 
-/// 终端会话状态机：连接中 → shell / failed。
+/// 终端会话状态机：连接中 → shell / ended / failed。
 /// 管理真实 SSH shell（`ShellConnection`）与 mock 演示模式。
 /// 数据流由 TerminalTabView 的 SwiftTerm TerminalView 包装器读取 `connection`
 /// 并双向桥接（用户输入 → write，远端输出 → feed）。
@@ -10,6 +10,7 @@ final class TerminalSessionStore: ObservableObject {
     enum Phase: Equatable {
         case connecting
         case shell
+        case ended
         case failed
     }
 
@@ -147,8 +148,7 @@ final class TerminalSessionStore: ObservableObject {
 
     func handleRemoteShellExit() {
         Logger.shared.info("SSH shell 已结束 host=\(host.address):\(host.port)", module: LogModule.ssh)
-        failure = .other("SSH 会话已结束。")
-        phase = .failed
+        phase = .ended
         releaseConnection()
     }
 

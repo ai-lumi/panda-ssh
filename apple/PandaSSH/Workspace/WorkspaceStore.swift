@@ -124,7 +124,7 @@ final class WorkspaceStore: ObservableObject {
 
     /// 标记终端标签已断开(phase→.failed 或连接丢失)。
     func markTerminalDisconnected(tabID: UUID) {
-        reportConnectionStatus(.failed, forTabID: tabID)
+        reportConnectionStatus(.inactive, forTabID: tabID)
     }
 
     /// 由终端/SFTP 页签在连接状态变化时调用。已被关闭的页签不得重新写入状态，
@@ -186,6 +186,28 @@ final class WorkspaceStore: ObservableObject {
         guard tabs.contains(where: { $0.id == tabID }) else { return }
         workspaceSelectTab(tabId: tabID.uuidString.lowercased())
         syncFromFfi()
+    }
+
+    /// 切换到下一个页签（从左往右循环）。
+    /// 无页签或无活动页签时忽略。
+    func selectNextTab() {
+        guard let currentIndex = currentIndex() else { return }
+        guard let nextIndex = nextTabIndex(current: currentIndex, total: tabs.count) else { return }
+        select(tabID: tabs[nextIndex].id)
+    }
+
+    /// 切换到上一个页签（从右往左循环）。
+    /// 无页签或无活动页签时忽略。
+    func selectPreviousTab() {
+        guard let currentIndex = currentIndex() else { return }
+        guard let previousIndex = previousTabIndex(current: currentIndex, total: tabs.count) else { return }
+        select(tabID: tabs[previousIndex].id)
+    }
+
+    /// 获取当前活动页签的索引。
+    private func currentIndex() -> Int? {
+        guard let activeTabID else { return nil }
+        return tabs.firstIndex(where: { $0.id == activeTabID })
     }
 
     /// 执行关闭;需要用户确认的入口先调用 requestClose。

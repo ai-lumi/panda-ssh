@@ -15,6 +15,7 @@ final class LogEntryTests: XCTestCase {
 
     func testFormattedContainsAllParts() {
         let entry = LogEntry(
+            id: 1,
             timestamp: Date(timeIntervalSince1970: 1723470000),
             level: .info,
             module: "SSH",
@@ -34,7 +35,7 @@ final class LogEntryTests: XCTestCase {
 
     func testFormattedContainsISO8601Timestamp() {
         let timestamp = Date(timeIntervalSince1970: 1723470000)
-        let entry = LogEntry(timestamp: timestamp, level: .debug, module: "App", message: "test")
+        let entry = LogEntry(id: 1, timestamp: timestamp, level: .debug, module: "App", message: "test")
         // ISO8601 格式应包含 T 和 Z
         XCTAssertTrue(entry.formatted.contains("T"), "时间戳应包含 T 分隔符")
         XCTAssertTrue(entry.formatted.contains("Z"), "时间戳应包含 Z 后缀(UTC)")
@@ -75,23 +76,6 @@ final class LoggerBufferTests: XCTestCase {
         logger.clear()
     }
 
-    @MainActor
-    func testConnectionLifecycleLogsIncludeOwnerAndDistinguishFailure() async throws {
-        let logger = Logger(configDirectory: nil)
-        logger.logConnectionEvents([
-            ConnectionLifecycleRecord(connectionId: 42, address: "example.test:22", ownerKind: "终端标签", ownerId: "7", reason: "Channel 正常结束", isError: false),
-            ConnectionLifecycleRecord(connectionId: 43, address: "example.test:22", ownerKind: "SFTP 标签", ownerId: "8", reason: "SSH keepalive 失败", isError: true),
-        ])
-        try await Task.sleep(for: .milliseconds(50))
-        // Rust 侧返回逆序（最新在前）
-        XCTAssertEqual(logger.entries.map(\.level), [.error, .info])
-        XCTAssertTrue(logger.entries[1].message.contains("connection=42"))
-        XCTAssertTrue(logger.entries[1].message.contains("终端标签#7"))
-        XCTAssertTrue(logger.entries[0].message.contains("keepalive"))
-        logger.logConnectionEvents([])
-        XCTAssertEqual(logger.entries.count, 2)
-    }
-
     /// 临时目录,每次测试新建,隔离文件副作用。
     private func makeLogger(maxFileSize: Int64 = 1024) -> (Logger, URL) {
         let dir = FileManager.default.temporaryDirectory
@@ -108,9 +92,8 @@ final class LoggerBufferTests: XCTestCase {
         let exp = expectation(description: "entries 更新")
         DispatchQueue.main.async {
             XCTAssertEqual(logger.entries.count, 500, "500 条日志后缓冲区应为 500")
-            // Rust 侧返回逆序（最新在前）
-            XCTAssertEqual(logger.entries.first?.message, "消息 499")
-            XCTAssertEqual(logger.entries.last?.message, "消息 0")
+            XCTAssertEqual(logger.entries.first?.message, "消息 0")
+            XCTAssertEqual(logger.entries.last?.message, "消息 499")
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2)
@@ -126,8 +109,8 @@ final class LoggerBufferTests: XCTestCase {
             XCTAssertEqual(logger.entries.count, 1000, "1001 条后缓冲区应为 1000")
             // 最旧条目(消息 0)被丢弃
             XCTAssertFalse(logger.entries.contains { $0.message == "消息 0" }, "最旧条目应被丢弃")
-            // Rust 侧返回逆序（最新在前）
-            XCTAssertEqual(logger.entries.first?.message, "消息 1000")
+            XCTAssertEqual(logger.entries.first?.message, "消息 1")
+            XCTAssertEqual(logger.entries.last?.message, "消息 1000")
             exp.fulfill()
         }
         wait(for: [exp], timeout: 5)
@@ -171,11 +154,10 @@ final class LoggerBufferTests: XCTestCase {
         let exp = expectation(description: "级别正确存储")
         DispatchQueue.main.async {
             XCTAssertEqual(logger.entries.count, 4)
-            // Rust 侧返回逆序（最新在前）
-            XCTAssertEqual(logger.entries[0].level, .error)
-            XCTAssertEqual(logger.entries[1].level, .warning)
-            XCTAssertEqual(logger.entries[2].level, .info)
-            XCTAssertEqual(logger.entries[3].level, .debug)
+            XCTAssertEqual(logger.entries[0].level, .debug)
+            XCTAssertEqual(logger.entries[1].level, .info)
+            XCTAssertEqual(logger.entries[2].level, .warning)
+            XCTAssertEqual(logger.entries[3].level, .error)
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2)

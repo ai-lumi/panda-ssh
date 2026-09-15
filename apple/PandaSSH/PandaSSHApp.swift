@@ -32,15 +32,6 @@ struct PandaSSHApp: App {
                 .environmentObject(workspace)
                 .transferStore(transfers)
                 .environmentObject(Logger.shared)
-                .task {
-                    // 独立于监控窗口的应用级日志消费；只读取 Rust 内存事件，不主动探测网络。
-                    guard !model.usesMockBackend else { return }
-                    while !Task.isCancelled {
-                        Logger.shared.logConnectionEvents(connectionLifecycleDrain())
-                        do { try await Task.sleep(for: .milliseconds(250)) }
-                        catch { break }
-                    }
-                }
         }
         #if os(macOS)
         // 场景必须与自绘顶栏采用一致样式，否则 SwiftUI 在焦点或内容更新后

@@ -82,6 +82,10 @@ pub enum PandaError {
     UnknownShellHandle(u64),
     #[error("shell session closed")]
     ShellSessionClosed,
+    #[error("shell input is temporarily backpressured")]
+    ShellInputBackpressure,
+    #[error("shell exited with status {0}")]
+    ShellExitStatus(u32),
     #[error("unknown SFTP session handle {0}")]
     UnknownSftpHandle(u64),
     #[error("operation cancelled")]
@@ -126,6 +130,8 @@ impl From<panda_core::Error> for PandaError {
             },
             panda_core::Error::Cancelled => PandaError::Cancelled,
             panda_core::Error::ShellSessionClosed => PandaError::ShellSessionClosed,
+            panda_core::Error::ShellInputBackpressure => PandaError::ShellInputBackpressure,
+            panda_core::Error::ShellExitStatus(status) => PandaError::ShellExitStatus(status),
             panda_core::Error::CredentialProtectionKeyRequired => {
                 PandaError::CredentialProtectionKeyRequired
             }
@@ -490,7 +496,7 @@ pub(crate) fn stores() -> Result<Arc<Stores>, PandaError> {
         .ok_or(PandaError::NotInitialized)
 }
 
-static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, ShellSession>>> = OnceLock::new();
+static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<ShellSession>>>>> = OnceLock::new();
 static NEXT_SHELL_ID: AtomicU64 = AtomicU64::new(1);
 
 struct OwnedSftpSession {
@@ -502,7 +508,7 @@ static SFTP_SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<AsyncMutex<OwnedSftpSessio
     OnceLock::new();
 static NEXT_SFTP_ID: AtomicU64 = AtomicU64::new(1);
 
-fn shell_sessions() -> &'static Mutex<HashMap<u64, ShellSession>> {
+fn shell_sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<ShellSession>>>> {
     SHELL_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -538,12 +544,13 @@ fn sftp_session(handle: u64) -> Result<Arc<AsyncMutex<OwnedSftpSession>>, PandaE
 pub fn init_store(config_dir: String) -> Result<(), PandaError> {
     let dir = PathBuf::from(config_dir);
     std::fs::create_dir_all(&dir)?;
-    *STORES.lock().unwrap() = Some(Arc::new(Stores {
+    *STORES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Stores {
         config: TomlConfigStore::new(dir.join("hosts.toml")),
         groups: TomlGroupStore::new(dir.join("groups.toml")),
         known_hosts: KnownHosts::new(dir.join("known_hosts")),
         credentials: CredentialStore::new(dir.join("credentials.toml")),
     }));
+    panda_core::logger::configure_global_file_path(dir.join("logs").join("panda-ssh.log"))?;
     Ok(())
 }
 
@@ -1390,10 +1397,12 @@ pub fn shell_open(
         let shell = ShellSession::open(Arc::clone(&session)).await?;
         // 只为成功打开的句柄分配连续编号，并与发布处于同一临界区。
         // 因此已发行但不在表内的编号一定已被关闭，无需永久保存关闭集合。
-        let mut sessions = shell_sessions().lock().unwrap();
+        let mut sessions = shell_sessions()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let id = next_shell_id();
         session.set_owner("终端标签", id.to_string());
-        sessions.insert(id, shell);
+        sessions.insert(id, Arc::new(Mutex::new(shell)));
         Ok(id)
     })
 }
@@ -1401,47 +1410,73 @@ pub fn shell_open(
 /// Write input bytes to the shell session.
 #[uniffi::export]
 pub fn shell_write(handle: u64, data: Vec<u8>) -> Result<(), PandaError> {
-    let sessions = shell_sessions().lock().unwrap();
-    let session = sessions
+    let session = shell_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&handle)
+        .cloned()
         .ok_or(PandaError::UnknownShellHandle(handle))?;
-    Ok(session.write(&data)?)
+    let result = session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .write(&data);
+    Ok(result?)
 }
 
 /// Read up to `max` bytes produced by the remote shell. Returns an empty
 /// vector when no output is currently buffered.
 #[uniffi::export]
 pub fn shell_read(handle: u64, max: u64) -> Result<Vec<u8>, PandaError> {
-    let sessions = shell_sessions().lock().unwrap();
-    let session = sessions
+    let session = shell_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&handle)
+        .cloned()
         .ok_or(PandaError::UnknownShellHandle(handle))?;
-    Ok(session.read(max as usize)?)
+    let result = session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .read(max as usize);
+    Ok(result?)
 }
 
 /// Close the shell session and disconnect the underlying SSH connection.
 #[uniffi::export]
 pub fn shell_close(handle: u64) -> Result<(), PandaError> {
-    let removed = shell_sessions().lock().unwrap().remove(&handle);
-    let Some(mut session) = removed else {
+    let removed = shell_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&handle);
+    let Some(session) = removed else {
         return if handle > 0 && handle < NEXT_SHELL_ID.load(Ordering::SeqCst) {
             Ok(())
         } else {
             Err(PandaError::UnknownShellHandle(handle))
         };
     };
-    runtime().block_on(session.close())?;
+    runtime().block_on(
+        session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .close(),
+    )?;
     Ok(())
 }
 
 /// Notify the remote PTY that the terminal window has been resized.
 #[uniffi::export]
 pub fn shell_resize(handle: u64, cols: u64, rows: u64) -> Result<(), PandaError> {
-    let sessions = shell_sessions().lock().unwrap();
-    let session = sessions
+    let session = shell_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&handle)
+        .cloned()
         .ok_or(PandaError::UnknownShellHandle(handle))?;
-    Ok(session.resize(cols as u32, rows as u32)?)
+    let result = session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resize(cols as u32, rows as u32);
+    Ok(result?)
 }
 
 /// 返回当前进程内的连接监控快照；该查询不会建立网络连接。
@@ -2234,17 +2269,6 @@ pub fn delete_snippet(name: String) -> Result<(), PandaError> {
 // Logger API
 // ---------------------------------------------------------------------------
 
-static LOGGER: OnceLock<panda_core::logger::Logger> = OnceLock::new();
-
-fn global_logger() -> &'static panda_core::logger::Logger {
-    LOGGER.get_or_init(|| {
-        let log_path = stores()
-            .ok()
-            .map(|s| s.config.path().parent().unwrap_or_else(|| std::path::Path::new(".")).join("panda.log"));
-        panda_core::logger::Logger::new(log_path)
-    })
-}
-
 /// 日志级别（FFI 枚举）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum LogLevelEnum {
@@ -2257,6 +2281,7 @@ pub enum LogLevelEnum {
 /// 日志条目（FFI 记录）。
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct LogEntryRecord {
+    pub id: u64,
     pub timestamp: String,
     pub level: LogLevelEnum,
     pub module: String,
@@ -2272,16 +2297,17 @@ pub fn log_write(level: LogLevelEnum, module: String, message: String) {
         LogLevelEnum::Warning => panda_core::logger::LogLevel::Warning,
         LogLevelEnum::Error => panda_core::logger::LogLevel::Error,
     };
-    global_logger().log(core_level, &module, &message);
+    panda_core::logger::global_logger().log(core_level, &module, &message);
 }
 
 /// 获取最近的日志条目（按时间倒序）。
 #[uniffi::export]
 pub fn log_entries(limit: u32) -> Vec<LogEntryRecord> {
-    global_logger()
+    panda_core::logger::global_logger()
         .entries(limit as usize)
         .into_iter()
         .map(|e| LogEntryRecord {
+            id: e.id,
             timestamp: e.timestamp,
             level: match e.level {
                 panda_core::logger::LogLevel::Debug => LogLevelEnum::Debug,
@@ -2298,7 +2324,7 @@ pub fn log_entries(limit: u32) -> Vec<LogEntryRecord> {
 /// 清空日志缓冲。
 #[uniffi::export]
 pub fn log_clear() {
-    global_logger().clear();
+    panda_core::logger::global_logger().clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -3013,6 +3039,22 @@ mod tests {
         assert!(matches!(
             PandaError::from(panda_core::Error::ShellSessionClosed),
             PandaError::ShellSessionClosed
+        ));
+    }
+
+    #[test]
+    fn shell_input_backpressure_has_a_structured_ffi_error() {
+        assert!(matches!(
+            PandaError::from(panda_core::Error::ShellInputBackpressure),
+            PandaError::ShellInputBackpressure
+        ));
+    }
+
+    #[test]
+    fn shell_nonzero_exit_has_a_structured_ffi_error() {
+        assert!(matches!(
+            PandaError::from(panda_core::Error::ShellExitStatus(7)),
+            PandaError::ShellExitStatus(7)
         ));
     }
 

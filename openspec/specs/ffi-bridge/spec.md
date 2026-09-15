@@ -11,7 +11,7 @@ FFI 层 SHALL 导出：`init_store(config_dir)`、`list_hosts`、`save_host`、`
 #### Scenario: Swift 绑定可生成
 
 - **WHEN** 运行 `apple/Scripts/build-rust.sh`（手动/CI 验证步骤）
-- **THEN** 生成 Swift 绑定源码与 xcframework（macOS / iOS / iOS 模拟器，arm64-only）
+- **THEN** 生成 Swift 绑定源码与 XCFramework，其中 macOS slice MUST 同时支持 `arm64` 与 `x86_64`，iOS device 与 simulator slice 保持既有 arm64 支持
 
 #### Scenario: 远程文件管理可达 UI
 

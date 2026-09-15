@@ -94,6 +94,12 @@ pub enum Error {
     #[error("shell session closed")]
     ShellSessionClosed,
 
+    #[error("shell input is temporarily backpressured")]
+    ShellInputBackpressure,
+
+    #[error("shell exited with status {0}")]
+    ShellExitStatus(u32),
+
     #[error("unknown connection telemetry id {0}")]
     UnknownConnection(u64),
 

@@ -133,13 +133,11 @@ impl client::Handler for ClientHandler {
                 } else {
                     LifecycleKind::TransportError
                 };
-                global_registry().fail(self.telemetry_id, kind.description().into());
-                global_registry().record_event(self.telemetry_id, kind);
+                global_registry().fail_with_event(self.telemetry_id, kind);
                 Err(error)
             }
             client::DisconnectReason::ReceivedDisconnect(_) => {
-                global_registry().fail(self.telemetry_id, "SSH 传输断开".into());
-                global_registry().record_event(self.telemetry_id, LifecycleKind::TransportError);
+                global_registry().fail_with_event(self.telemetry_id, LifecycleKind::TransportError);
                 Ok(())
             }
         }
@@ -329,11 +327,11 @@ impl SshSession {
             {
                 Ok(Ok(socket)) => socket,
                 Ok(Err(error)) => {
-                    global_registry().fail(telemetry_id, error.to_string());
+                    global_registry().fail_with_event(telemetry_id, LifecycleKind::TransportError);
                     return Err(Error::Ssh(russh::Error::IO(error)));
                 }
                 Err(_) => {
-                    global_registry().fail(telemetry_id, "连接超时".into());
+                    global_registry().fail_with_event(telemetry_id, LifecycleKind::ConnectionTimeout);
                     return Err(Error::Timeout);
                 }
             };
@@ -357,11 +355,11 @@ impl SshSession {
         {
             Ok(Ok(handle)) => handle,
             Ok(Err(e)) => {
-                global_registry().fail(telemetry_id, e.to_string());
+                global_registry().fail_with_event(telemetry_id, LifecycleKind::TransportError);
                 return Err(Self::map_connect_error(e, cfg, &failure));
             }
             Err(_) => {
-                global_registry().fail(telemetry_id, "SSH 握手超时".into());
+                global_registry().fail_with_event(telemetry_id, LifecycleKind::ConnectionTimeout);
                 return Err(Error::Timeout);
             }
         };
@@ -371,11 +369,11 @@ impl SshSession {
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                global_registry().fail(telemetry_id, error.to_string());
+                global_registry().fail_with_event(telemetry_id, LifecycleKind::AuthenticationFailed);
                 return Err(error);
             }
             Err(_) => {
-                global_registry().fail(telemetry_id, "SSH 认证超时".into());
+                global_registry().fail_with_event(telemetry_id, LifecycleKind::ConnectionTimeout);
                 return Err(Error::Timeout);
             }
         }
@@ -467,10 +465,17 @@ impl SshSession {
     }
 
     async fn exec_inner(&self, command: &str) -> Result<ExecOutput> {
-        let mut channel = self.handle.channel_open_session().await?;
+        let mut channel = match self.handle.channel_open_session().await {
+            Ok(channel) => channel,
+            Err(error) => {
+                global_registry().fail_with_event(self.telemetry_id, LifecycleKind::TransportError);
+                return Err(error.into());
+            }
+        };
         let channel_id =
             global_registry().open_channel(self.telemetry_id, crate::telemetry::ChannelKind::Exec);
         if let Err(error) = channel.exec(true, command).await {
+            global_registry().fail_with_event(self.telemetry_id, LifecycleKind::TransportError);
             global_registry().update_channel(
                 self.telemetry_id,
                 channel_id,
@@ -507,7 +512,7 @@ impl SshSession {
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
                     output.exit_status = Some(exit_status)
                 }
-                Some(ChannelMsg::Close) | None => {
+                Some(ChannelMsg::Close) => {
                     global_registry().update_channel(
                         self.telemetry_id,
                         channel_id,
@@ -516,6 +521,17 @@ impl SshSession {
                         Some(crate::telemetry::ChannelState::Closed),
                     );
                     break;
+                }
+                None => {
+                    global_registry().fail_with_event(self.telemetry_id, LifecycleKind::TransportError);
+                    global_registry().update_channel(
+                        self.telemetry_id,
+                        channel_id,
+                        0,
+                        0,
+                        Some(crate::telemetry::ChannelState::Failed),
+                    );
+                    return Err(Error::ShellSessionClosed);
                 }
                 Some(_) => {}
             }
@@ -570,6 +586,7 @@ impl SshSession {
             return Ok(());
         }
         global_registry().record_event(self.telemetry_id, LifecycleKind::ExplicitClose);
+        global_registry().mark_explicit_close(self.telemetry_id);
         global_registry().close_connection(self.telemetry_id);
         let result = self
             .handle
@@ -610,6 +627,8 @@ pub struct ShellSession {
     /// 随后才报告会话关闭，避免吞掉远端退出前的最后一批字节。
     closed: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    /// 远端 `exit-status`；`u32::MAX` 表示服务端未提供该字段。
+    exit_status: Arc<std::sync::atomic::AtomicU32>,
     telemetry_id: u64,
     channel_telemetry_id: u64,
 }
@@ -640,7 +659,9 @@ impl ShellSession {
         // 2. Advertise the terminal type via the `TERM` env var.
         //    set-env is a best-effort request; servers that do not support
         //    it will silently ignore the failure.
-        let _ = channel.set_env(false, "TERM", TERM_TYPE).await;
+        if channel.set_env(false, "TERM", TERM_TYPE).await.is_err() {
+            crate::logger::global_logger().warning("SSH", "终端 TERM 环境变量未被远端接受");
+        }
 
         // 3. Start the remote shell process.
         channel.request_shell(true).await?;
@@ -657,40 +678,66 @@ impl ShellSession {
         let reader_closed = Arc::clone(&closed);
         let failed = Arc::new(AtomicBool::new(false));
         let reader_failed = Arc::clone(&failed);
-        let reader_session = Arc::downgrade(&session);
+        let exit_status = Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+        let reader_exit_status = Arc::clone(&exit_status);
         let reader_telemetry_id = telemetry_id;
         let reader_channel_telemetry_id = channel_telemetry_id;
         let reader = tokio::spawn(async move {
+            let mut saw_close = false;
             loop {
                 tokio::select! {
                     Some(data) = rx.recv() => {
-                        if channel.data(&data[..]).await.is_err() {
+                        if let Err(error) = channel.data(&data[..]).await {
                             reader_failed.store(true, Ordering::SeqCst);
+                            global_registry().fail(reader_telemetry_id, error.to_string());
+                            global_registry().record_event(reader_telemetry_id, LifecycleKind::WriteError);
                             global_registry().update_channel(reader_telemetry_id, reader_channel_telemetry_id, 0, 0, Some(crate::telemetry::ChannelState::Failed));
                             break;
                         }
                         global_registry().update_channel(reader_telemetry_id, reader_channel_telemetry_id, 0, data.len() as u64, None);
                     }
                     Some((cols, rows)) = resize_rx.recv() => {
-                        let _ = channel.window_change(cols, rows, 0, 0).await;
+                        if channel.window_change(cols, rows, 0, 0).await.is_err() {
+                            crate::logger::global_logger().warning("SSH", "终端尺寸同步失败");
+                        }
                     }
                     msg = channel.wait() => {
                         match msg {
                             Some(ChannelMsg::Data { data }) => {
                                 global_registry().update_channel(reader_telemetry_id, reader_channel_telemetry_id, data.len() as u64, 0, None);
-                                output_reader.lock().unwrap().extend_from_slice(&data);
+                                output_reader
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .extend_from_slice(&data);
                             }
                             Some(ChannelMsg::ExtendedData { data, .. }) => {
                                 global_registry().update_channel(reader_telemetry_id, reader_channel_telemetry_id, data.len() as u64, 0, None);
-                                output_reader.lock().unwrap().extend_from_slice(&data);
+                                output_reader
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .extend_from_slice(&data);
                             }
                             Some(ChannelMsg::Close) => {
-                                global_registry().record_event(reader_telemetry_id, LifecycleKind::ShellExit);
-                                break;
+                                saw_close = true;
+                            }
+                            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                                reader_exit_status.store(exit_status, Ordering::SeqCst);
                             }
                             None => {
-                                reader_failed.store(true, Ordering::SeqCst);
-                                global_registry().record_event(reader_telemetry_id, LifecycleKind::TransportError);
+                                if saw_close {
+                                    let status = reader_exit_status.load(Ordering::SeqCst);
+                                    if status != u32::MAX && status != 0 {
+                                        reader_failed.store(true, Ordering::SeqCst);
+                                        global_registry().fail(reader_telemetry_id, "远端 shell 以非零退出码结束".into());
+                                        global_registry().record_event(reader_telemetry_id, LifecycleKind::TransportError);
+                                    } else {
+                                        global_registry().record_event(reader_telemetry_id, LifecycleKind::ShellExit);
+                                    }
+                                } else {
+                                    reader_failed.store(true, Ordering::SeqCst);
+                                    global_registry().fail(reader_telemetry_id, "SSH 通道在未收到关闭通知前结束".into());
+                                    global_registry().record_event(reader_telemetry_id, LifecycleKind::TransportError);
+                                }
                                 break;
                             }
                             Some(_) => {}
@@ -710,9 +757,8 @@ impl ShellSession {
                     crate::telemetry::ChannelState::Closed
                 }),
             );
-            let _ = channel.close().await;
-            if let Some(session) = reader_session.upgrade() {
-                let _ = tokio::time::timeout(Duration::from_secs(1), session.disconnect()).await;
+            if channel.close().await.is_err() {
+                crate::logger::global_logger().warning("SSH", "终端通道关闭请求失败");
             }
         });
 
@@ -724,6 +770,7 @@ impl ShellSession {
             output,
             closed,
             failed,
+            exit_status,
             telemetry_id,
             channel_telemetry_id,
         })
@@ -742,22 +789,23 @@ impl ShellSession {
                 0,
                 Some(crate::telemetry::ChannelState::Failed),
             );
-            return Err(if self.failed.load(Ordering::SeqCst) {
-                Error::Other("SSH 连接异常".into())
-            } else {
-                Error::ShellSessionClosed
-            });
+            return Err(self.closed_error());
         }
-        self.writer.try_send(data.to_vec()).map_err(|_| {
-            global_registry().update_channel(
-                self.telemetry_id,
-                self.channel_telemetry_id,
-                0,
-                0,
-                Some(crate::telemetry::ChannelState::Failed),
-            );
-            Error::Other("failed to send data to shell".into())
-        })
+        match self.writer.try_send(data.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(Error::ShellInputBackpressure),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.failed.store(true, Ordering::SeqCst);
+                global_registry().update_channel(
+                    self.telemetry_id,
+                    self.channel_telemetry_id,
+                    0,
+                    0,
+                    Some(crate::telemetry::ChannelState::Failed),
+                );
+                Err(Error::Other("shell 输入通道已意外关闭".into()))
+            }
+        }
     }
 
     /// Notify the server that the PTY window has been resized to
@@ -768,11 +816,7 @@ impl ShellSession {
     /// working even if the server does not support window-change).
     pub fn resize(&self, cols: u32, rows: u32) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(if self.failed.load(Ordering::SeqCst) {
-                Error::Other("SSH 连接异常".into())
-            } else {
-                Error::ShellSessionClosed
-            });
+            return Err(self.closed_error());
         }
         self.resize_tx
             .try_send((cols, rows))
@@ -781,29 +825,46 @@ impl ShellSession {
 
     /// Read up to `max` bytes that the remote shell has produced.
     pub fn read(&self, max: usize) -> Result<Vec<u8>> {
-        let mut buf = self.output.lock().unwrap();
+        let mut buf = self
+            .output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let take = max.min(buf.len());
         if take > 0 {
             return Ok(buf.drain(..take).collect());
         }
         if self.closed.load(Ordering::SeqCst) {
-            return Err(if self.failed.load(Ordering::SeqCst) {
-                Error::Other("SSH 连接异常".into())
-            } else {
-                Error::ShellSessionClosed
-            });
+            return Err(self.closed_error());
         }
         Ok(Vec::new())
+    }
+
+    fn closed_error(&self) -> Error {
+        let status = self.exit_status.load(Ordering::SeqCst);
+        if status != u32::MAX && status != 0 {
+            Error::ShellExitStatus(status)
+        } else if self.failed.load(Ordering::SeqCst) {
+            Error::Other("SSH 连接异常".into())
+        } else {
+            Error::ShellSessionClosed
+        }
     }
 
     /// Close the shell channel and wait for the reader to finish.
     /// 底层 Transport 由本 ShellSession 独占，并随本对象释放。
     pub async fn close(&mut self) -> Result<()> {
         self.closed.store(true, Ordering::SeqCst);
+        let mut reader_error = None;
         if let Some(reader) = self.reader.take() {
             // 不经过输入队列；即使队列满或远端窗口不再消费也能精确释放。
             reader.abort();
-            let _ = reader.await;
+            if let Err(error) = reader.await {
+                if error.is_panic() {
+                    self.failed.store(true, Ordering::SeqCst);
+                    global_registry().fail(self.telemetry_id, "终端后台任务异常结束".into());
+                    reader_error = Some(Error::Other("终端后台任务异常结束".into()));
+                }
+            }
         }
         global_registry().update_channel(
             self.telemetry_id,
@@ -813,7 +874,8 @@ impl ShellSession {
             Some(crate::telemetry::ChannelState::Closed),
         );
         match tokio::time::timeout(Duration::from_secs(1), self.session.disconnect()).await {
-            Ok(result) => result,
+            Ok(Ok(())) => reader_error.map_or(Ok(()), Err),
+            Ok(Err(error)) => Err(error),
             Err(_) => Err(Error::Timeout),
         }
     }

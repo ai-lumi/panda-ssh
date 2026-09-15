@@ -3,7 +3,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// 日志级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,7 @@ impl LogLevel {
 /// 日志条目。
 #[derive(Debug, Clone)]
 pub struct LogEntry {
+    pub id: u64,
     pub timestamp: String,
     pub level: LogLevel,
     pub module: String,
@@ -40,8 +42,11 @@ pub struct Logger {
     buffer: Mutex<Vec<LogEntry>>,
     /// 缓冲容量上限。
     capacity: usize,
+    next_id: AtomicU64,
+    /// 避免文件系统持续失败时为每条业务日志重复插入同一条告警。
+    persistence_error_reported: AtomicBool,
     /// 文件日志路径（None 表示不写文件）。
-    file_path: Option<PathBuf>,
+    file_path: Mutex<Option<PathBuf>>,
     /// 当前文件大小。
     file_size: Mutex<i64>,
     /// 文件轮转阈值（字节）。
@@ -63,7 +68,9 @@ impl Logger {
         Self {
             buffer: Mutex::new(Vec::new()),
             capacity: DEFAULT_CAPACITY,
-            file_path,
+            next_id: AtomicU64::new(0),
+            persistence_error_reported: AtomicBool::new(false),
+            file_path: Mutex::new(file_path),
             file_size: Mutex::new(file_size),
             rotation_threshold: DEFAULT_ROTATION_THRESHOLD,
         }
@@ -72,6 +79,7 @@ impl Logger {
     /// 写入一条日志。
     pub fn log(&self, level: LogLevel, module: &str, message: &str) {
         let entry = LogEntry {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed) + 1,
             timestamp: now_iso8601(),
             level,
             module: module.to_string(),
@@ -80,7 +88,7 @@ impl Logger {
 
         // 写入环形缓冲
         {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if buffer.len() >= self.capacity {
                 buffer.remove(0);
             }
@@ -88,8 +96,15 @@ impl Logger {
         }
 
         // 写入文件
-        if let Some(ref path) = self.file_path {
-            self.write_to_file(path, &entry);
+        if let Some(path) = self
+            .file_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            if self.write_to_file(&path, &entry).is_err() {
+                self.disable_file_persistence();
+            }
         }
     }
 
@@ -112,28 +127,84 @@ impl Logger {
 
     /// 获取最近的日志条目（按时间倒序）。
     pub fn entries(&self, limit: usize) -> Vec<LogEntry> {
-        let buffer = self.buffer.lock().unwrap();
+        let buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         buffer.iter().rev().take(limit).cloned().collect()
     }
 
     /// 清空环形缓冲。
     pub fn clear(&self) {
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         buffer.clear();
     }
 
     /// 当前缓冲条目数。
     pub fn len(&self) -> usize {
-        self.buffer.lock().unwrap().len()
+        self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
     }
 
     /// 缓冲是否为空。
     pub fn is_empty(&self) -> bool {
-        self.buffer.lock().unwrap().is_empty()
+        self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty()
+    }
+
+    /// 在配置目录就绪后启用文件持久化，并按原始顺序补写此前仅存在内存中的日志。
+    pub fn configure_file_path(&self, path: PathBuf) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                self.record_persistence_failure();
+                return Ok(());
+            }
+        }
+        *self
+            .file_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path.clone());
+        let entries = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for entry in entries {
+            if self.write_to_file(&path, &entry).is_err() {
+                self.disable_file_persistence();
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// 文件不可用时仍保留内存日志，并明确记录一次可见告警。
+    fn disable_file_persistence(&self) {
+        *self
+            .file_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.record_persistence_failure();
+    }
+
+    fn record_persistence_failure(&self) {
+        if self
+            .persistence_error_reported
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        let entry = LogEntry {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed) + 1,
+            timestamp: now_iso8601(),
+            level: LogLevel::Error,
+            module: "Config".into(),
+            message: "日志文件不可写，当前仅保留内存日志".into(),
+        };
+        let mut buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if buffer.len() >= self.capacity {
+            buffer.remove(0);
+        }
+        buffer.push(entry);
     }
 
     /// 写入文件并在达到阈值时轮转。
-    fn write_to_file(&self, path: &Path, entry: &LogEntry) {
+    fn write_to_file(&self, path: &Path, entry: &LogEntry) -> std::io::Result<()> {
         let line = format!(
             "[{}] [{}] [{}] {}\n",
             entry.timestamp,
@@ -145,27 +216,40 @@ impl Logger {
 
         // 检查是否需要轮转
         {
-            let mut size = self.file_size.lock().unwrap();
+            let mut size = self.file_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if *size + bytes.len() as i64 > self.rotation_threshold {
-                self.rotate_file(path);
+                self.rotate_file(path)?;
                 *size = 0;
             }
         }
 
         // 追加写入
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            if file.write_all(bytes).is_ok() {
-                let mut size = self.file_size.lock().unwrap();
-                *size += bytes.len() as i64;
-            }
-        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(bytes)?;
+        let mut size = self.file_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *size += bytes.len() as i64;
+        Ok(())
     }
 
     /// 文件轮转：当前文件重命名为 .1，创建新文件。
-    fn rotate_file(&self, path: &Path) {
+    fn rotate_file(&self, path: &Path) -> std::io::Result<()> {
         let backup = path.with_extension("log.1");
-        let _ = fs::rename(path, &backup);
+        if path.exists() {
+            fs::rename(path, &backup)?;
+        }
+        Ok(())
     }
+}
+
+static GLOBAL_LOGGER: OnceLock<Logger> = OnceLock::new();
+
+/// SSH 与 FFI 共用的进程内日志服务。配置路径可在 `init_store` 后补齐。
+pub fn global_logger() -> &'static Logger {
+    GLOBAL_LOGGER.get_or_init(|| Logger::new(None))
+}
+
+pub fn configure_global_file_path(path: PathBuf) -> std::io::Result<()> {
+    global_logger().configure_file_path(path)
 }
 
 /// 简单 ISO 8601 时间戳。
@@ -291,6 +375,34 @@ mod tests {
         let content = fs::read_to_string(&log_path).unwrap();
         assert!(content.contains("[INFO] [ssh] connected"));
         assert!(content.contains("[ERROR] [sftp] timeout"));
+    }
+
+    #[test]
+    fn logs_before_file_configuration_are_persisted_after_configuration() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("logs/panda-ssh.log");
+        let logger = Logger::new(None);
+        logger.info("ssh", "连接成功");
+        logger.configure_file_path(log_path.clone()).unwrap();
+
+        let content = fs::read_to_string(log_path).unwrap();
+        assert!(content.contains("连接成功"));
+        assert!(logger.entries(1)[0].id > 0);
+    }
+
+    #[test]
+    fn file_persistence_failure_is_retained_in_memory_log() {
+        let dir = TempDir::new().unwrap();
+        let occupied_parent = dir.path().join("not-a-directory");
+        fs::write(&occupied_parent, "file").unwrap();
+        let logger = Logger::new(None);
+
+        logger.configure_file_path(occupied_parent.join("panda-ssh.log")).unwrap();
+
+        assert!(logger.entries(10).iter().any(|entry| {
+            entry.level == LogLevel::Error
+                && entry.message == "日志文件不可写，当前仅保留内存日志"
+        }));
     }
 
     #[test]

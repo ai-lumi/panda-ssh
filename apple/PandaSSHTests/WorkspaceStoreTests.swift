@@ -990,6 +990,25 @@ final class WorkspaceConnectionStatusObservationTests: XCTestCase {
         XCTAssertEqual(store.connectionStatus(forTabID: closed), .inactive)
         XCTAssertEqual(store.connectionStatus(forHostID: "h1"), .inactive)
     }
+
+    /// 应用停机必须关闭全部标签，并拒绝停机开始后的新连接注册。
+    func testBeginApplicationShutdown_closesTabsAndRejectsNewTabs() {
+        var closed: [UUID] = []
+        let store = WorkspaceStore(
+            hostNameProvider: { _ in "web" },
+            closeSessionHandler: { closed.append($0.id) }
+        )
+        let terminal = store.openTerminal(hostID: "h1")
+        let sftp = store.openSFTP(hostID: "h2")
+
+        store.beginApplicationShutdown()
+        let rejected = store.openTerminal(hostID: "h3")
+
+        XCTAssertFalse(store.isAcceptingNewConnections)
+        XCTAssertTrue(store.tabs.isEmpty)
+        XCTAssertEqual(Set(closed), Set([terminal, sftp]))
+        XCTAssertFalse(closed.contains(rejected))
+    }
 }
 
 /// 测试用引用盒子,便于在闭包中收集结果。

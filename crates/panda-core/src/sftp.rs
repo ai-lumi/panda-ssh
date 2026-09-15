@@ -136,10 +136,25 @@ pub struct SftpClient {
 impl SftpClient {
     /// Open a channel on `session` and start the SFTP subsystem.
     pub async fn new(session: &SshSession) -> Result<Self> {
-        let channel = session.open_channel().await?;
-        channel.request_subsystem(true, "sftp").await?;
-        let sftp_session = SftpSession::new(channel.into_stream()).await?;
         let telemetry_id = session.telemetry_id();
+        let channel = match session.open_channel().await {
+            Ok(channel) => channel,
+            Err(error) => {
+                global_registry().fail_with_event(telemetry_id, crate::telemetry::LifecycleKind::TransportError);
+                return Err(error);
+            }
+        };
+        if let Err(error) = channel.request_subsystem(true, "sftp").await {
+            global_registry().fail_with_event(telemetry_id, crate::telemetry::LifecycleKind::TransportError);
+            return Err(error.into());
+        }
+        let sftp_session = match SftpSession::new(channel.into_stream()).await {
+            Ok(session) => session,
+            Err(error) => {
+                global_registry().fail_with_event(telemetry_id, crate::telemetry::LifecycleKind::TransportError);
+                return Err(error.into());
+            }
+        };
         let channel_telemetry_id = global_registry().open_channel(telemetry_id, ChannelKind::Sftp);
         Ok(Self {
             session: sftp_session,
@@ -158,17 +173,28 @@ impl SftpClient {
         );
     }
 
+    fn observe<T>(&self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            global_registry().record_event(
+                self.telemetry_id,
+                crate::telemetry::LifecycleKind::SftpOperationFailed,
+            );
+        }
+        result
+    }
+
     /// Get metadata of a remote file or directory.
     pub async fn metadata(&self, path: &str) -> Result<russh_sftp::protocol::FileAttributes> {
-        Ok(self.session.metadata(path).await?)
+        self.observe(self.session.metadata(path).await.map_err(Into::into))
     }
 
     /// List the entries of a remote directory.
     pub async fn list_dir(&self, path: &str) -> Result<Vec<RemoteFile>> {
-        let entries = self
+        let entries = self.observe(self
             .session
             .read_dir(path)
-            .await?
+            .await
+            .map_err(Into::into))?
             .map(|entry| {
                 let meta = entry.metadata();
                 RemoteFile {
@@ -362,11 +388,11 @@ impl SftpClient {
     }
 
     pub async fn remove_file(&self, path: &str) -> Result<()> {
-        Ok(self.session.remove_file(path).await?)
+        self.observe(self.session.remove_file(path).await.map_err(Into::into))
     }
 
     pub async fn remove_dir(&self, path: &str) -> Result<()> {
-        Ok(self.session.remove_dir(path).await?)
+        self.observe(self.session.remove_dir(path).await.map_err(Into::into))
     }
 
     /// 递归删除远端文件或目录。文件直接删除；目录先递归清空内容再删除自身。
@@ -411,7 +437,7 @@ impl SftpClient {
     }
 
     pub async fn create_dir(&self, path: &str) -> Result<()> {
-        Ok(self.session.create_dir(path).await?)
+        self.observe(self.session.create_dir(path).await.map_err(Into::into))
     }
 
     /// 递归创建远端目录（等价于 `mkdir -p`）。
@@ -458,7 +484,7 @@ impl SftpClient {
     /// Resolve the user's home directory at session start.
     /// SFTP 会话初始工作目录通常是用户 home；`canonicalize(".")` 将其转为绝对路径。
     pub async fn home_dir(&self) -> Result<String> {
-        Ok(self.session.canonicalize(".").await?)
+        self.observe(self.session.canonicalize(".").await.map_err(Into::into))
     }
 
     /// 上传前检查远端目标是否已存在。
@@ -526,6 +552,10 @@ impl SftpClient {
                 Ok(())
             }
             Err(error) => {
+                global_registry().record_event(
+                    self.telemetry_id,
+                    crate::telemetry::LifecycleKind::SftpOperationFailed,
+                );
                 global_registry().update_channel(
                     self.telemetry_id,
                     self.channel_telemetry_id,

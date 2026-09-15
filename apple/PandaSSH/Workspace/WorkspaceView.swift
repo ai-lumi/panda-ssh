@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// 多标签页工作区容器:顶部自定义标签栏(纯 SwiftUI,双端共享,
 /// 不依赖 NSTabView/UITabView),内容区按活动标签类型分发到
@@ -48,6 +51,8 @@ struct WorkspaceView: View {
     }
 
     #if os(macOS)
+    @State private var quitProtection = QuitProtection()
+
     private var macOSBody: some View {
         VStack(spacing: 0) {
             UnifiedWorkspaceChrome(
@@ -61,6 +66,21 @@ struct WorkspaceView: View {
         // 顶部 chrome 与原生红绿灯处于同一行，由实测安全矩形避让。
         .ignoresSafeArea(.container, edges: .top)
         .modifier(macOSCloseAlerts)
+        .onKeyPress { press in
+            guard press.modifiers.contains(.command), press.key == KeyEquivalent("q") else {
+                return .ignored
+            }
+            let shouldQuit = quitProtection.triggerQuit()
+            if shouldQuit {
+                NSApplication.shared.terminate(nil)
+            }
+            return .handled
+        }
+        .overlay(alignment: .bottom) {
+            QuitProtectionToast(isVisible: quitProtection.pendingQuit)
+                .padding(.bottom, 24)
+                .animation(.easeInOut(duration: 0.2), value: quitProtection.pendingQuit)
+        }
     }
 
     private var macOSUnifiedSplitView: some View {
@@ -214,6 +234,21 @@ struct WorkspaceView: View {
             nonTerminalHostsContent
             terminalTabs(policy: terminalPolicy)
             sftpTabs(policy: sftpPolicy)
+        }
+        .focusable()
+        .onKeyPress { press in
+            // 仅在按下 Tab 键且包含 Control 修饰符时处理
+            guard press.key == .tab, press.modifiers.contains(.control) else {
+                return .ignored
+            }
+            if press.modifiers.contains(.shift) {
+                // Ctrl+Shift+Tab: 切换到上一个页签
+                workspace.selectPreviousTab()
+            } else {
+                // Ctrl+Tab: 切换到下一个页签
+                workspace.selectNextTab()
+            }
+            return .handled
         }
     }
 
