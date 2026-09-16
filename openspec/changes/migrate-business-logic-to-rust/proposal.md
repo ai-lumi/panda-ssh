@@ -23,6 +23,7 @@
 3. **Phase 2**：基础设施下沉——配置导入导出（用 Rust `zip` crate 替代手写 ZIP）、日志系统迁移到 Rust
 4. **Phase 3**：状态管理下沉——标签页生命周期、终端会话状态机、连接前评估 + TOFU 序列化、传输推送通道替代轮询
 5. **Phase 4**：Swift 瘦身——所有 ViewModel 退化为 `@Published` 转发层，删除选择逻辑改用 UI 框架原生能力
+6. **覆盖率分层收尾**：FFI 中的无状态纯值适配器与拥有会话、传输或工作区状态的业务入口分离；门禁只排除前者，后者继续以 Rust fake/integration 测试覆盖。
 
 ## Non-goals
 
@@ -31,6 +32,7 @@
 - 不新增业务功能
 - 不改变 `panda-core` 的跨平台编译目标（Linux 可编译性不变）
 - 不涉及 UI 视觉/交互变更
+- 不以排除整个 `panda-ffi` crate 或混合业务模块的方式降低覆盖率门禁
 
 ## Capabilities
 

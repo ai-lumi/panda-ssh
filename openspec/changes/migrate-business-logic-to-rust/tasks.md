@@ -99,6 +99,15 @@
 - [x] 运行 Swift 测试通过（`MainWindowChromeLifecycleTests` 1 个预先存在的失败，非本次引入）
 - [x] 确认所有 26 个 Spec 的每个 Scenario 至少有一个对应测试
 
+### 0.9 FFI 覆盖率分层（收尾）
+
+- [x] 证据：以 `cargo llvm-cov --no-cfg-coverage` 分组采集，确认 `cfg(coverage)` 会阻塞 FFI fake-server 测试；不得以该失真结果判定未覆盖。
+- [x] 测试夹具：批量和单传输测试在断言后取消并等待后台任务终态，避免污染同进程后续测试。
+- [ ] 测试：先为拟迁移的纯适配器导出编写跨 FFI 契约测试，覆盖正常值、非法值和边界值。
+- [ ] 实现：将无状态、无资源所有权、无错误策略的纯值适配器移入独立模块；保留导出签名、UniFFI 类型和 Swift 绑定不变。
+- [ ] 验证：会话句柄、传输调度、TOFU、持久化、日志、工作区/终端状态机不得进入被排除模块；以搜索和模块边界审查记录证明。
+- [ ] 验证：分组运行 `cargo llvm-cov --no-cfg-coverage`，对独立纯适配器模块使用文件级排除，其余 `panda-core` 与 FFI 业务模块 lines/regions 均达到 95%。
+
 ---
 
 ## Phase 1：纯算法下沉
