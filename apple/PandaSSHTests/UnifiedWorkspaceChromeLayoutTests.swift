@@ -47,6 +47,27 @@ final class UnifiedWorkspaceChromeLayoutTests: XCTestCase {
         XCTAssertFalse(layout.drawsDetailTabBar)
     }
 
+    /// macOS 只应在显式保留的空白区域启动窗口拖动；页签和按钮区域
+    /// 不得再由覆盖整个 chrome 的背景拖动视图接管鼠标按下事件。
+    func test尾部窗口拖动保留区与页签区分离() {
+        let layout = UnifiedWorkspaceChromeLayout.resolve(
+            windowWidth: 1_200,
+            sidebarWidth: 260,
+            isSidebarVisible: true,
+            leadingReservedWidth: 76,
+            trailingReservedWidth: 80,
+            isFullScreen: false
+        )
+
+        XCTAssertEqual(layout.trailingSafeWidth, 80)
+        XCTAssertEqual(
+            layout.leadingSafeWidth + layout.sidebarToolsWidth
+                + layout.tabStripWidth + layout.trailingSafeWidth,
+            1_200
+        )
+        XCTAssertEqual(layout.tabStripWidth, 860)
+    }
+
     func test侧栏隐藏时保留恢复入口并把空间交给页签栏() {
         let layout = UnifiedWorkspaceChromeLayout.resolve(
             windowWidth: 1_200,

@@ -624,6 +624,8 @@ final class TransferStore: ObservableObject {
     static let maxConcurrent = 3
 
     @Published private(set) var tasks: [TransferTask] = []
+    /// 应用停机开始后不再接受新的传输注册，避免取消快照与新任务交错。
+    @Published private(set) var isAcceptingNewTasks = true
 
     private let source: any TransferSource
     private let batchSource: (any BatchTransferSource)?
@@ -688,6 +690,7 @@ final class TransferStore: ObservableObject {
         password: String? = nil,
         passphrase: String? = nil
     ) -> UUID {
+        guard isAcceptingNewTasks else { return UUID() }
         let (localPath, remotePath) = direction == .upload
             ? (source, destination)
             : (destination, source)
@@ -719,6 +722,7 @@ final class TransferStore: ObservableObject {
         password: String? = nil,
         passphrase: String? = nil
     ) -> UUID {
+        guard isAcceptingNewTasks else { return UUID() }
         guard let batchSource = batchSource else { return UUID() }
         let id = batchSource.enqueueBatchUpload(
             hostID: hostID,
@@ -745,6 +749,7 @@ final class TransferStore: ObservableObject {
         password: String? = nil,
         passphrase: String? = nil
     ) -> UUID {
+        guard isAcceptingNewTasks else { return UUID() }
         guard let batchSource = batchSource else { return UUID() }
         let id = batchSource.enqueueBatchDownload(
             hostID: hostID,
@@ -860,6 +865,15 @@ final class TransferStore: ObservableObject {
     func cancelAll(forHostID hostID: String) {
         tasks.filter { $0.hostID == hostID && Self.isActiveStatus($0.status) }
             .forEach { cancel(id: $0.id) }
+    }
+
+    /// 应用级停机：先关闭新任务入口，再按当前快照取消所有活跃的单文件与批量任务。
+    /// 不等待远端确认；远端结果在进程退出后未知，不能自动重放。
+    func beginApplicationShutdown() {
+        guard isAcceptingNewTasks else { return }
+        isAcceptingNewTasks = false
+        refresh()
+        tasks.filter { Self.isActiveStatus($0.status) }.forEach { cancel(id: $0.id) }
     }
 
     private static func isActiveStatus(_ status: TransferStatus) -> Bool {

@@ -52,6 +52,8 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var pendingCloseTabID: UUID?
     /// 批量关闭时待确认的终端标签页集合(含目标范围与已连接数);nil 表示无待确认。
     @Published private(set) var pendingBatchClose: PendingBatchClose?
+    /// 应用停机期间拒绝创建新标签，防止异步 UI 事件在关闭快照之后新建连接。
+    @Published private(set) var isAcceptingNewConnections = true
 
     /// 按 hostID 查询主机显示名;查不到(如主机已删除)时返回 nil,标题回退为 hostID。
     /// 同时用于在标签操作前同步主机名映射到 Rust。
@@ -322,9 +324,21 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// 应用级停机：关闭新工作入口、取消传输、无确认关闭全部标签并请求释放全部连接。
+    /// 重复调用为 no-op，确保第二次 CMD+Q 的重复事件不会二次释放同一资源。
+    func beginApplicationShutdown() {
+        guard isAcceptingNewConnections else { return }
+        isAcceptingNewConnections = false
+        pendingCloseTabID = nil
+        pendingBatchClose = nil
+        transferStore?.beginApplicationShutdown()
+        closeAll()
+    }
+
     // MARK: - 内部
 
     private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
+        guard isAcceptingNewConnections else { return UUID() }
         // 确保 Rust 侧有该主机的名称,用于标题消歧
         if let name = hostNameProvider(hostID) {
             workspaceSetHostNames(hostNames: [HostNameMapping(hostId: hostID, name: name)])

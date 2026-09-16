@@ -53,6 +53,28 @@ final class QuitProtectionTests: XCTestCase {
         XCTAssertFalse(protection.beginShutdownIfConfirmed())
     }
 
+    /// 系统级终止请求必须走同一两次确认逻辑；首次取消，第二次才允许退出，
+    /// 且停机动作只能调用一次。
+    func testSystemQuitRequests_cancelFirstAndAllowSecondOnlyOnce() {
+        let protection = QuitProtection()
+        let coordinator = ApplicationQuitCoordinator()
+        var shutdownCount = 0
+        coordinator.installHandler {
+            if protection.beginShutdownIfConfirmed() {
+                shutdownCount += 1
+                return true
+            }
+            return false
+        }
+
+        XCTAssertFalse(coordinator.shouldTerminateNow())
+        XCTAssertTrue(protection.pendingQuit)
+        XCTAssertTrue(coordinator.shouldTerminateNow())
+        XCTAssertEqual(shutdownCount, 1)
+        XCTAssertFalse(coordinator.shouldTerminateNow())
+        XCTAssertEqual(shutdownCount, 1)
+    }
+
     /// 首次触发应返回 shouldQuit = false（不退出，仅显示提示）。
     func test_firstTrigger_returnsFalse() {
         let protection = QuitProtection()

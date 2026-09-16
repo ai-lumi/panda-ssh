@@ -5,6 +5,8 @@ import Foundation
 struct UnifiedWorkspaceChromeLayout: Equatable {
     /// 标题栏原生控件占用的左侧安全区，由 macOS 宿主实测提供。
     let leadingSafeWidth: Double
+    /// 仅用于窗口拖动的尾部空白区，不承载页签或按钮。
+    let trailingSafeWidth: Double
     let availableWidth: Double
     let sidebarToolsWidth: Double
     /// detail 内的顶栏没有侧栏空间，不能创建溢出零宽 frame 的工具按钮。
@@ -25,7 +27,10 @@ struct UnifiedWorkspaceChromeLayout: Equatable {
     ) -> UnifiedWorkspaceChromeLayout {
         let safeWindowWidth = finiteNonnegative(windowWidth)
         let safeLeadingWidth = min(finiteNonnegative(leadingReservedWidth), safeWindowWidth)
-        let safeTrailingWidth = finiteNonnegative(trailingReservedWidth)
+        let safeTrailingWidth = min(
+            finiteNonnegative(trailingReservedWidth),
+            max(0, safeWindowWidth - safeLeadingWidth)
+        )
         let availableWidth = max(0, safeWindowWidth - safeLeadingWidth - safeTrailingWidth)
         let sidebarToolsWidth = isSidebarVisible
             ? min(max(0, finiteNonnegative(sidebarWidth) - safeLeadingWidth), availableWidth)
@@ -35,6 +40,7 @@ struct UnifiedWorkspaceChromeLayout: Equatable {
 
         return UnifiedWorkspaceChromeLayout(
             leadingSafeWidth: safeLeadingWidth,
+            trailingSafeWidth: safeTrailingWidth,
             availableWidth: availableWidth,
             sidebarToolsWidth: sidebarToolsWidth,
             tabStripWidth: max(0, availableWidth - sidebarToolsWidth - sidebarRecoveryWidth),

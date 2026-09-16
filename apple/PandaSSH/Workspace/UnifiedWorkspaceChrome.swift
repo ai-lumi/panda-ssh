@@ -4,7 +4,6 @@ import SwiftUI
 /// 平台宿主仅传入窗口安全预留宽度；页签、侧栏入口与业务状态均不分叉。
 struct UnifiedWorkspaceChrome: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var workspace: WorkspaceStore
     let leadingReservedWidth: Double
     let trailingReservedWidth: Double
     let showsCustomSidebarRecovery: Bool
@@ -38,6 +37,7 @@ struct UnifiedWorkspaceChrome: View {
             HStack(spacing: 0) {
                 Color.clear
                     .frame(width: layout.leadingSafeWidth)
+                    .macOSWindowDragRegion()
 
                 if layout.showsSidebarTools {
                     sidebarTools
@@ -54,16 +54,12 @@ struct UnifiedWorkspaceChrome: View {
 
                 UnifiedWorkspaceTabStrip()
                     .frame(width: layout.tabStripWidth)
-                    #if os(macOS)
-                    .onKeyPress { press in
-                        guard press.modifiers.contains(.command), press.key == KeyEquivalent("w") else {
-                            return .ignored
-                        }
-                        guard let activeID = workspace.activeTabID else { return .ignored }
-                        workspace.requestClose(tabID: activeID)
-                        return .handled
-                    }
-                    #endif
+
+                // 窗口拖动只绑定到明确的空白区；不得覆盖页签或按钮，
+                // 否则 AppKit 会在 SwiftUI 拖放启动前接管鼠标拖动。
+                Color.clear
+                    .frame(width: layout.trailingSafeWidth)
+                    .macOSWindowDragRegion()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
@@ -110,3 +106,15 @@ struct UnifiedWorkspaceChrome: View {
         .accessibilityLabel("显示侧栏")
     }
 }
+
+#if os(macOS)
+private extension View {
+    func macOSWindowDragRegion() -> some View {
+        background(WindowDragView())
+    }
+}
+#else
+private extension View {
+    func macOSWindowDragRegion() -> some View { self }
+}
+#endif

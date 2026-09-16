@@ -20,9 +20,9 @@ SwiftUI 在 macOS 14+ 提供 `.onKeyPress(keys:phases:action:)` 修饰符，可�
 
 ### 决策 1：使用 `.onKeyPress` 而非 `.keyboardShortcut`
 
-**选择**：在页签容器 View 上使用 `.onKeyPress(keys: [.init("w")], phases: .down)` 捕获 CMD+W；在主窗口根 View 上使用同样的方式捕获 CMD+Q。
+**选择**：在页签容器 View 上使用 `.onKeyPress(keys: [.init("w")], phases: .down)` 捕获 CMD+W；CMD+Q 改由 macOS `NSApplicationDelegate.applicationShouldTerminate(_:)` 拦截。
 
-**理由**：`.keyboardShortcut` 绑定在 `Button` 上，无法做焦点条件判断。`.onKeyPress` 可在 View 层级精确控制按键响应，且支持通过 View 层级顺序实现焦点感知——页签区域注册的 CMD+W 在焦点位于页签时消费事件，阻止冒泡到其他层。
+**理由**：`.keyboardShortcut` 绑定在 `Button` 上，无法做焦点条件判断。`.onKeyPress` 可在 View 层级精确控制 CMD+W 的焦点范围；但系统 CMD+Q 会直接走 AppKit 终止请求，不能以 SwiftUI 按键事件作为可靠拦截点。应用委托同时覆盖菜单与 Dock 的终止请求。
 
 **替代方案**：使用 `NSEvent.addLocalMonitorForEvents` 全局拦截。缺点是脱离 SwiftUI 视图层级，难以判断焦点状态，且需要 AppKit 桥接，增加复杂度。
 
@@ -40,11 +40,11 @@ SwiftUI 在 macOS 14+ 提供 `.onKeyPress(keys:phases:action:)` 修饰符，可�
 
 **替代方案**：第二次按键直接调用 `NSApplication.shared.terminate(nil)`。拒绝：无法证明在途任务已收到取消、连接关闭按所有者隔离，且会把远端执行状态不明误当作正常释放。
 
-### 决策 4：CMD+Q 拦截点在主窗口根 View
+### 决策 4：CMD+Q 拦截点在应用委托
 
-**选择**：CMD+Q 的 `.onKeyPress` 注册在主窗口最外层 View（`MainWindowChrome` 或其根容器），确保窗口任意位置按下均能捕获。
+**选择**：在 `NSApplicationDelegate.applicationShouldTerminate(_:)` 调用共享的应用停机协调器；首次请求返回 `.terminateCancel`，第二次有效请求在同步发起清理后返回 `.terminateNow`。
 
-**理由**：CMD+Q 需要全局响应，注册在最外层保证无论焦点在何处都能拦截。`.onKeyPress` 在 View 层级中由内向外传播，最外层的注册确保兜底捕获。
+**理由**：AppKit 终止请求是系统 CMD+Q、菜单退出和 Dock 退出的共同入口；它不受 SwiftUI 焦点链影响，也能通过返回值阻止首次默认退出。
 
 ### 决策 5：退出提示使用 Toast 样式
 

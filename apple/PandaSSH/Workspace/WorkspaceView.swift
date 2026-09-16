@@ -51,35 +51,33 @@ struct WorkspaceView: View {
     }
 
     #if os(macOS)
-    @State private var quitProtection = QuitProtection()
+    @State private var quitProtection = ApplicationQuitCoordinator.shared.quitProtection
 
     private var macOSBody: some View {
         VStack(spacing: 0) {
             UnifiedWorkspaceChrome(
                 leadingReservedWidth: chromeMetrics.trafficLightSafeWidth,
+                trailingReservedWidth: 80,
                 sidebarWidth: chromeMetrics.sidebarWidth
             )
-            .background(WindowDragView())
             Divider()
             macOSUnifiedSplitView
         }
         // 顶部 chrome 与原生红绿灯处于同一行，由实测安全矩形避让。
         .ignoresSafeArea(.container, edges: .top)
         .modifier(macOSCloseAlerts)
-        .onKeyPress { press in
-            guard press.modifiers.contains(.command), press.key == KeyEquivalent("q") else {
-                return .ignored
-            }
-            let shouldQuit = quitProtection.triggerQuit()
-            if shouldQuit {
-                NSApplication.shared.terminate(nil)
-            }
-            return .handled
-        }
         .overlay(alignment: .bottom) {
             QuitProtectionToast(isVisible: quitProtection.pendingQuit)
                 .padding(.bottom, 24)
                 .animation(.easeInOut(duration: 0.2), value: quitProtection.pendingQuit)
+        }
+        .background {
+            // 拦截 CMD+W：在系统菜单处理前截获，关闭活动页签而非关闭窗口。
+            CloseTabKeyInterceptor {
+                if let activeID = workspace.activeTabID {
+                    workspace.requestClose(tabID: activeID)
+                }
+            }
         }
     }
 

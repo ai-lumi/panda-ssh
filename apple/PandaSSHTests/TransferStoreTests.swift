@@ -50,6 +50,7 @@ final class TransferStoreTests: XCTestCase {
     func testBeginApplicationShutdown_rejectsNewTransfer() {
         let store = makeStore()
         _ = addFile(store, name: "before.bin")
+        let batchID = store.addBatchUpload(sources: ["/l/tree"], destDir: "/r")
 
         store.beginApplicationShutdown()
         let rejected = addFile(store, name: "after.bin")
@@ -57,6 +58,7 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertFalse(store.isAcceptingNewTasks)
         XCTAssertNil(store.tasks.first { $0.id == rejected })
         XCTAssertTrue(store.tasks.allSatisfy { $0.status == .cancelled })
+        XCTAssertEqual(store.tasks.first { $0.id == batchID }?.status, .cancelled)
     }
 
     func testTickAdvancesProgress() {

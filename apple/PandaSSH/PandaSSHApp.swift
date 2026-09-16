@@ -2,6 +2,9 @@ import SwiftUI
 
 @main
 struct PandaSSHApp: App {
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(PandaSSHApplicationDelegate.self) private var applicationDelegate
+    #endif
     @StateObject private var model: AppModel
     @StateObject private var workspace: WorkspaceStore
     /// 全局传输任务队列(与原型全局传输列表一致,各 SFTP 标签共享)。
@@ -17,12 +20,23 @@ struct PandaSSHApp: App {
         _model = StateObject(wrappedValue: model)
         let transfers = TransferStore()
         self.transfers = transfers
-        _workspace = StateObject(wrappedValue: WorkspaceStore(
+        let workspace = WorkspaceStore(
             hostNameProvider: { hostID in
                 model.hosts.first(where: { $0.id == hostID })?.name
             },
             transferStore: transfers
-        ))
+        )
+        _workspace = StateObject(wrappedValue: workspace)
+        #if os(macOS)
+        ApplicationQuitCoordinator.shared.installHandler {
+            let protection = ApplicationQuitCoordinator.shared.quitProtection
+            if protection.beginShutdownIfConfirmed() {
+                workspace.beginApplicationShutdown()
+                return true
+            }
+            return false
+        }
+        #endif
     }
 
     var body: some Scene {

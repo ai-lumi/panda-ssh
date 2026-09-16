@@ -9,8 +9,14 @@ import SwiftUI
 @MainActor
 @Observable
 final class QuitProtection {
+    /// 全局共享实例。Scene commands 与窗口视图均引用同一对象，
+    /// 保证 CMD+Q 状态在菜单拦截与 toast 呈现之间同步。
+    static let shared = QuitProtection()
+
     /// 当前是否处于「再按一次退出」的待退出状态。
     private(set) var pendingQuit: Bool = false
+    /// 已确认的停机流程只能进入一次，防止重复按键重复释放资源。
+    private(set) var isShuttingDown: Bool = false
 
     /// 退出提示超时时间（秒）。超时后自动重置 `pendingQuit`。
     let timeout: TimeInterval
@@ -37,6 +43,14 @@ final class QuitProtection {
         pendingQuit = true
         startResetTimer()
         return false
+    }
+
+    /// 在第二次按键确认后启动一次性停机流程。
+    /// 返回 true 仅表示本次调用获得了执行停机的所有权。
+    func beginShutdownIfConfirmed() -> Bool {
+        guard triggerQuit(), !isShuttingDown else { return false }
+        isShuttingDown = true
+        return true
     }
 
     /// 手动清除待退出状态（如用户主动 dismiss 提示）。

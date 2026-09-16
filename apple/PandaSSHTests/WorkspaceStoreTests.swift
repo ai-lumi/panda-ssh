@@ -1000,6 +1000,10 @@ final class WorkspaceConnectionStatusObservationTests: XCTestCase {
         )
         let terminal = store.openTerminal(hostID: "h1")
         let sftp = store.openSFTP(hostID: "h2")
+        let host = HostEntry(id: "h1", name: "web", address: "example.test", port: 22, username: "test")
+        let terminalSession = TerminalSessionStore(host: host)
+        terminalSession.finishConnecting()
+        store.registerTerminal(terminalSession, for: terminal)
 
         store.beginApplicationShutdown()
         let rejected = store.openTerminal(hostID: "h3")
@@ -1007,6 +1011,8 @@ final class WorkspaceConnectionStatusObservationTests: XCTestCase {
         XCTAssertFalse(store.isAcceptingNewConnections)
         XCTAssertTrue(store.tabs.isEmpty)
         XCTAssertEqual(Set(closed), Set([terminal, sftp]))
+        XCTAssertEqual(terminalSession.phase, .failed)
+        XCTAssertNil(terminalSession.connection)
         XCTAssertFalse(closed.contains(rejected))
     }
 }
