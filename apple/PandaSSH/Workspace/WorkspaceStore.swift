@@ -54,6 +54,14 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var pendingBatchClose: PendingBatchClose?
     /// 应用停机期间拒绝创建新标签，防止异步 UI 事件在关闭快照之后新建连接。
     @Published private(set) var isAcceptingNewConnections = true
+    /// 页签分组列表，仅会话内保持，不持久化。
+    @Published private(set) var groups: [TabGroup] = []
+    /// 未分配到任何分组的页签 ID 列表，按显示顺序。
+    @Published private(set) var ungroupedTabIDs: [UUID] = []
+    /// 页签显示顺序映射，独立于 Rust 侧 tabs 数组。
+    private var displayOrder: [UUID] = []
+    /// 分组名称计数器，用于自动生成唯一名称。
+    private var groupCounter = 0
 
     /// 按 hostID 查询主机显示名;查不到(如主机已删除)时返回 nil,标题回退为 hostID。
     /// 同时用于在标签操作前同步主机名映射到 Rust。
@@ -190,20 +198,22 @@ final class WorkspaceStore: ObservableObject {
         syncFromFfi()
     }
 
-    /// 切换到下一个页签（从左往右循环）。
+    /// 切换到下一个页签（从左往右循环，按显示顺序）。
     /// 无页签或无活动页签时忽略。
     func selectNextTab() {
-        guard let currentIndex = currentIndex() else { return }
-        guard let nextIndex = nextTabIndex(current: currentIndex, total: tabs.count) else { return }
-        select(tabID: tabs[nextIndex].id)
+        let displayed = displayedTabs
+        guard let currentIndex = displayed.firstIndex(where: { $0.id == activeTabID }) else { return }
+        guard let nextIndex = nextTabIndex(current: currentIndex, total: displayed.count) else { return }
+        select(tabID: displayed[nextIndex].id)
     }
 
-    /// 切换到上一个页签（从右往左循环）。
+    /// 切换到上一个页签（从右往左循环，按显示顺序）。
     /// 无页签或无活动页签时忽略。
     func selectPreviousTab() {
-        guard let currentIndex = currentIndex() else { return }
-        guard let previousIndex = previousTabIndex(current: currentIndex, total: tabs.count) else { return }
-        select(tabID: tabs[previousIndex].id)
+        let displayed = displayedTabs
+        guard let currentIndex = displayed.firstIndex(where: { $0.id == activeTabID }) else { return }
+        guard let previousIndex = previousTabIndex(current: currentIndex, total: displayed.count) else { return }
+        select(tabID: displayed[previousIndex].id)
     }
 
     /// 获取当前活动页签的索引。
@@ -335,6 +345,112 @@ final class WorkspaceStore: ObservableObject {
         closeAll()
     }
 
+    // MARK: - 页签排序与分组
+
+    /// 按分组和排序顺序返回的页签列表，用于 UI 渲染。
+    /// 顺序：按 groups 顺序输出每组页签，最后输出 ungroupedTabIDs。
+    var displayedTabs: [WorkspaceTab] {
+        var result: [WorkspaceTab] = []
+        let tabDict = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
+
+        // 按分组顺序输出
+        for group in groups {
+            for tabID in group.tabIDs {
+                if let tab = tabDict[tabID] {
+                    result.append(tab)
+                }
+            }
+        }
+
+        // 输出未分组页签
+        for tabID in ungroupedTabIDs {
+            if let tab = tabDict[tabID] {
+                result.append(tab)
+            }
+        }
+
+        return result
+    }
+
+    /// 创建新分组并将指定页签分配进去。
+    /// - Parameters:
+    ///   - tabID: 要分配到新分组的页签 ID
+    ///   - name: 分组名称，为 nil 时自动生成
+    /// - Returns: 新创建的分组 ID
+    func createGroup(forTabID tabID: UUID, name: String? = nil) -> UUID {
+        groupCounter += 1
+        let groupName = name ?? "分组 \(groupCounter)"
+        let groupID = UUID()
+        let group = TabGroup(id: groupID, name: groupName, tabIDs: [tabID])
+        groups.append(group)
+        ungroupedTabIDs.removeAll(where: { $0 == tabID })
+        return groupID
+    }
+
+    /// 删除指定分组。
+    /// 若分组非空，组内页签移至未分组状态。
+    func deleteGroup(id: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        let group = groups[index]
+        // 将组内页签移至未分组
+        for tabID in group.tabIDs {
+            if !ungroupedTabIDs.contains(tabID) {
+                ungroupedTabIDs.append(tabID)
+            }
+        }
+        groups.remove(at: index)
+    }
+
+    /// 重命名指定分组。
+    func renameGroup(id: UUID, to newName: String) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].name = newName
+    }
+
+    /// 将页签移动到指定分组。
+    /// 若页签已在其他分组，先从原分组移除。
+    func moveTab(_ tabID: UUID, toGroup groupID: UUID) {
+        guard let targetIndex = groups.firstIndex(where: { $0.id == groupID }) else { return }
+
+        // 从原位置移除
+        removeTabFromAnyGroup(tabID)
+        ungroupedTabIDs.removeAll(where: { $0 == tabID })
+
+        // 添加到目标分组
+        groups[targetIndex].tabIDs.append(tabID)
+    }
+
+    /// 将页签从分组中移除，变为未分组状态。
+    func removeTabFromGroup(_ tabID: UUID) {
+        removeTabFromAnyGroup(tabID)
+        if !ungroupedTabIDs.contains(tabID) {
+            ungroupedTabIDs.append(tabID)
+        }
+    }
+
+    /// 从任意分组中移除指定页签（内部辅助方法）。
+    /// 页签被移出（未分组/换组）时空分组保留，仅页签关闭时由 syncFromFfi 清理空分组。
+    private func removeTabFromAnyGroup(_ tabID: UUID) {
+        for i in groups.indices {
+            groups[i].tabIDs.removeAll(where: { $0 == tabID })
+        }
+    }
+
+    /// 在显示顺序中移动页签到指定索引位置。
+    /// 用于拖拽排序，同时更新 ungroupedTabIDs 的顺序。
+    func moveTabInDisplayOrder(_ tabID: UUID, toIndex targetIndex: Int) {
+        guard let currentIndex = displayOrder.firstIndex(of: tabID) else { return }
+        guard targetIndex >= 0 && targetIndex < displayOrder.count else { return }
+        guard currentIndex != targetIndex else { return }
+
+        displayOrder.remove(at: currentIndex)
+        displayOrder.insert(tabID, at: targetIndex)
+
+        // 同步更新 ungroupedTabIDs 的顺序
+        let groupedTabIDs = Set(groups.flatMap(\.tabIDs))
+        ungroupedTabIDs = displayOrder.filter { !groupedTabIDs.contains($0) }
+    }
+
     // MARK: - 内部
 
     private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
@@ -352,7 +468,7 @@ final class WorkspaceStore: ObservableObject {
     /// 从 Rust FFI 同步标签列表、活动标签与待关闭状态到 @Published 属性。
     private func syncFromFfi() {
         let records = workspaceTabList()
-        tabs = records.compactMap { record in
+        let newTabs = records.compactMap { record -> WorkspaceTab? in
             guard let id = UUID(uuidString: record.id) else { return nil }
             return WorkspaceTab(
                 id: id,
@@ -361,6 +477,33 @@ final class WorkspaceStore: ObservableObject {
                 title: record.title
             )
         }
+        let newTabIDs = Set(newTabs.map(\.id))
+
+        // 更新 displayOrder：移除已关闭的页签，新增的追加到末尾
+        displayOrder.removeAll(where: { !newTabIDs.contains($0) })
+        for tab in newTabs {
+            if !displayOrder.contains(tab.id) {
+                displayOrder.append(tab.id)
+            }
+        }
+
+        // 更新 ungroupedTabIDs：移除已关闭的页签
+        ungroupedTabIDs.removeAll(where: { !newTabIDs.contains($0) })
+        // 新增的未分组页签追加到 ungroupedTabIDs
+        let groupedTabIDs = Set(groups.flatMap(\.tabIDs))
+        for tabID in displayOrder {
+            if !groupedTabIDs.contains(tabID) && !ungroupedTabIDs.contains(tabID) {
+                ungroupedTabIDs.append(tabID)
+            }
+        }
+
+        // 清理分组中已关闭的页签
+        for i in groups.indices {
+            groups[i].tabIDs.removeAll(where: { !newTabIDs.contains($0) })
+        }
+        groups.removeAll(where: { $0.isEmpty })
+
+        tabs = newTabs
         if let activeStr = workspaceActiveTabId() {
             activeTabID = UUID(uuidString: activeStr)
         } else {

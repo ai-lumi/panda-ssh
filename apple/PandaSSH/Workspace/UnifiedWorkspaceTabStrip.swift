@@ -13,6 +13,7 @@ struct UnifiedWorkspaceTabStrip: View {
     @State private var tabFrames: [UUID: CGRect] = [:]
     @State private var viewportWidth = 0.0
     @State private var viewportOffset = 0.0
+    @State private var draggingTabID: UUID?
 
     private static let documentCoordinateSpace = "unified-workspace-tab-document"
     private static let documentHorizontalPadding = TabStripViewportState.revealPadding
@@ -47,10 +48,54 @@ struct UnifiedWorkspaceTabStrip: View {
                             }
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 4) {
-                                    ForEach(workspace.tabs) { tab in
-                                        tabButton(tab)
-                                            .id(tab.id)
-                                            .background(tabFrameReporter(for: tab.id))
+                                    // 渲染分组页签
+                                    ForEach(Array(workspace.groups.enumerated()), id: \.element.id) { groupIndex, group in
+                                        if groupIndex > 0 || !workspace.ungroupedTabIDs.isEmpty {
+                                            groupSeparator
+                                        }
+                                        groupLabel(group.name)
+                                        ForEach(Array(group.tabIDs.enumerated()), id: \.element) { index, tabID in
+                                            if let tab = workspace.tabs.first(where: { $0.id == tabID }) {
+                                                let displayIndex = workspace.displayedTabs.firstIndex(where: { $0.id == tabID }) ?? 0
+                                                tabButton(tab)
+                                                    .id(tab.id)
+                                                    .background(tabFrameReporter(for: tab.id))
+                                                    .opacity(draggingTabID == tab.id ? 0.5 : 1.0)
+                                                    .onDrag {
+                                                        draggingTabID = tab.id
+                                                        return NSItemProvider(object: tab.id.uuidString as NSString)
+                                                    }
+                                                    .onDrop(of: [.text], delegate: TabDropDelegate(
+                                                        targetTabID: tab.id,
+                                                        targetIndex: displayIndex,
+                                                        workspace: workspace,
+                                                        draggingTabID: $draggingTabID
+                                                    ))
+                                            }
+                                        }
+                                    }
+                                    // 渲染未分组页签
+                                    if !workspace.ungroupedTabIDs.isEmpty && !workspace.groups.isEmpty {
+                                        groupSeparator
+                                    }
+                                    ForEach(Array(workspace.ungroupedTabIDs.enumerated()), id: \.element) { index, tabID in
+                                        if let tab = workspace.tabs.first(where: { $0.id == tabID }) {
+                                            let displayIndex = workspace.displayedTabs.firstIndex(where: { $0.id == tabID }) ?? 0
+                                            tabButton(tab)
+                                                .id(tab.id)
+                                                .background(tabFrameReporter(for: tab.id))
+                                                .opacity(draggingTabID == tab.id ? 0.5 : 1.0)
+                                                .onDrag {
+                                                    draggingTabID = tab.id
+                                                    return NSItemProvider(object: tab.id.uuidString as NSString)
+                                                }
+                                                .onDrop(of: [.text], delegate: TabDropDelegate(
+                                                    targetTabID: tab.id,
+                                                    targetIndex: displayIndex,
+                                                    workspace: workspace,
+                                                    draggingTabID: $draggingTabID
+                                                ))
+                                        }
                                     }
                                 }
                                 .padding(.horizontal, Self.documentHorizontalPadding)
@@ -190,6 +235,27 @@ struct UnifiedWorkspaceTabStrip: View {
         .accessibilityLabel("关闭 \(tab.title)")
     }
 
+    /// 分组分隔符：垂直线分隔不同分组
+    private var groupSeparator: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.2))
+            .frame(width: 1, height: 24)
+            .padding(.horizontal, 4)
+    }
+
+    /// 分组标签：显示分组名称
+    private func groupLabel(_ name: String) -> some View {
+        Text(name)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.primary.opacity(0.08))
+            )
+    }
+
     private func isActive(_ tab: WorkspaceTab) -> Bool {
         model.workspacePresentation == .tab(tabID: tab.id)
     }
@@ -214,6 +280,7 @@ struct UnifiedWorkspaceTabStrip: View {
         let menu = TabContextMenuBuilder.buildNSMenu(
             tabID: tab.id,
             tabKind: tab.kind,
+            workspace: workspace,
             target: tabMenuHandler,
             action: #selector(TabMenuActionHandler.handleMenuItem(_:))
         )
@@ -248,6 +315,27 @@ struct UnifiedWorkspaceTabStrip: View {
             workspace.requestCloseAll()
         } label: {
             Label(TabMenuItem.closeAll.title, systemImage: TabMenuItem.closeAll.symbolName)
+        }
+        Divider()
+        // 分组操作
+        Button {
+            workspace.createGroup(forTabID: tab.id)
+        } label: {
+            Label(TabMenuItem.newGroup.title, systemImage: TabMenuItem.newGroup.symbolName)
+        }
+        // 移动到已有分组
+        ForEach(workspace.groups) { group in
+            Button {
+                workspace.moveTab(tab.id, toGroup: group.id)
+            } label: {
+                Label("移动到「\(group.name)」", systemImage: TabMenuItem.moveToGroup(groupID: group.id, groupName: group.name).symbolName)
+            }
+        }
+        // 取消分组
+        Button {
+            workspace.removeTabFromGroup(tab.id)
+        } label: {
+            Label(TabMenuItem.ungroup.title, systemImage: TabMenuItem.ungroup.symbolName)
         }
     }
     #endif
@@ -422,5 +510,28 @@ private struct UnifiedTabFramePreference: PreferenceKey {
 
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+/// 页签拖拽放置代理：处理页签拖拽排序。
+private struct TabDropDelegate: DropDelegate {
+    let targetTabID: UUID
+    let targetIndex: Int
+    let workspace: WorkspaceStore
+    @Binding var draggingTabID: UUID?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggingID = draggingTabID,
+              draggingID != targetTabID else { return }
+        workspace.moveTabInDisplayOrder(draggingID, toIndex: targetIndex)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingTabID = nil
+        return true
     }
 }
