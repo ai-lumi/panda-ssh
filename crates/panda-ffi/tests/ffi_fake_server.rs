@@ -483,7 +483,7 @@ impl russh_sftp::server::Handler for MemFs {
 /// → 状态变 Known → 重连直接放行;非法密钥的 accept 报错。
 #[test]
 fn ffi_tofu_probe_accept_and_reconnect() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -562,7 +562,7 @@ fn ffi_tofu_probe_accept_and_reconnect() {
 /// 错误携带已存储与呈现两个指纹,known_hosts 不被覆盖。
 #[test]
 fn ffi_host_key_mismatch_is_rejected_with_fingerprints() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -632,7 +632,7 @@ fn ffi_host_key_mismatch_is_rejected_with_fingerprints() {
 
 #[test]
 fn ffi_sftp_and_connection_success_paths() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -837,7 +837,7 @@ fn ffi_connection_telemetry_maps_all_states_channels_and_large_counts() {
 #[test]
 fn ffi_lifecycle_events_can_be_drained_after_owner_release() {
     use panda_core::telemetry::{global_registry, LifecycleKind};
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry = global_registry();
     let id = registry.register_connection("events".into(), "example.test:22".into());
     registry.set_owner(id, "SFTP 标签", "fixture-handle");
@@ -857,7 +857,7 @@ fn ffi_lifecycle_events_can_be_drained_after_owner_release() {
 
 #[test]
 fn ffi_sftp_remove_all_recursive() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -1016,7 +1016,7 @@ fn ffi_sftp_remove_all_recursive() {
 
 #[test]
 fn ffi_error_and_conversion_paths() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     assert!(matches!(
         PandaError::from(panda_core::Error::AuthFailed),
@@ -1127,7 +1127,7 @@ fn ffi_error_and_conversion_paths() {
 
 #[test]
 fn ffi_store_and_api_error_paths() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let dir = std::env::temp_dir().join(format!("panda-ffi-test-{}", Uuid::new_v4()));
@@ -1268,7 +1268,7 @@ fn ffi_store_and_api_error_paths() {
 
 #[test]
 fn ffi_sftp_error_paths() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -1355,7 +1355,7 @@ fn ffi_sftp_error_paths() {
 
 #[test]
 fn ffi_save_host_with_explicit_id_replaces_in_place() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let fixed_id = Uuid::new_v4().to_string();
@@ -1383,7 +1383,7 @@ fn ffi_save_host_with_explicit_id_replaces_in_place() {
 
 #[test]
 fn ffi_shell_session_lifecycle() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -1446,7 +1446,7 @@ fn ffi_shell_session_lifecycle() {
 
 #[test]
 fn ffi_same_host_shells_are_isolated_when_one_closes() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     save_host(HostConfigRecord {
@@ -1494,7 +1494,7 @@ fn ffi_same_host_shells_are_isolated_when_one_closes() {
 
 #[test]
 fn ffi_same_host_sftp_handles_are_isolated_and_close_is_idempotent() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server();
@@ -1613,7 +1613,7 @@ fn ffi_same_host_sftp_handles_are_isolated_and_close_is_idempotent() {
 
 #[test]
 fn ffi_sftp_new_fails_when_subsystem_rejected() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let port = start_server_rejecting_sftp();
@@ -1677,7 +1677,7 @@ fn save_test_host(port: u16, name: &str) -> HostConfigRecord {
 
 #[test]
 fn ffi_transfer_upload_and_poll_completes() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-upload");
@@ -1714,7 +1714,7 @@ fn ffi_transfer_upload_and_poll_completes() {
 
 #[test]
 fn ffi_transfer_download_and_poll_completes() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-download");
@@ -1763,7 +1763,7 @@ fn ffi_transfer_download_and_poll_completes() {
 
 #[test]
 fn ffi_transfer_cancel_running_task() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-cancel");
@@ -1809,7 +1809,7 @@ fn ffi_transfer_cancel_running_task() {
 
 #[test]
 fn ffi_transfer_cancel_queued_task() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-queue");
@@ -1857,7 +1857,7 @@ fn ffi_transfer_cancel_queued_task() {
 
 #[test]
 fn ffi_transfer_retry_failed_task() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-retry");
@@ -1917,7 +1917,7 @@ fn ffi_transfer_retry_failed_task() {
 
 #[test]
 fn ffi_transfer_retry_non_terminal_task_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-retry-non-terminal");
@@ -1951,7 +1951,7 @@ fn ffi_transfer_retry_non_terminal_task_fails() {
 
 #[test]
 fn ffi_transfer_pause_and_resume_running_task() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-pause");
@@ -2016,7 +2016,7 @@ fn ffi_transfer_pause_and_resume_running_task() {
 
 #[test]
 fn ffi_transfer_unknown_task_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     assert!(matches!(
         transfer_status("00000000-0000-0000-0000-000000000000".into()),
@@ -2043,7 +2043,7 @@ fn ffi_transfer_unknown_task_returns_error() {
 
 #[test]
 fn ffi_transfer_list_includes_tasks() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-list");
@@ -2077,7 +2077,7 @@ fn ffi_transfer_list_includes_tasks() {
 
 #[test]
 fn ffi_shell_unknown_handle_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     assert!(matches!(
@@ -2102,7 +2102,7 @@ fn ffi_shell_unknown_handle_returns_error() {
 
 #[test]
 fn ffi_start_transfer_unknown_host_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     assert!(matches!(
@@ -2125,7 +2125,7 @@ fn ffi_start_transfer_unknown_host_returns_error() {
 
 #[test]
 fn ffi_sftp_check_upload_conflict_no_target_returns_none() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "upload-conflict-none");
@@ -2149,7 +2149,7 @@ fn ffi_sftp_check_upload_conflict_no_target_returns_none() {
 
 #[test]
 fn ffi_sftp_check_upload_conflict_existing_target_returns_info() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "upload-conflict-exists");
@@ -2189,7 +2189,7 @@ fn ffi_sftp_check_upload_conflict_existing_target_returns_info() {
 
 #[test]
 fn ffi_sftp_check_download_conflict_no_target_returns_none() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "download-conflict-none");
@@ -2225,7 +2225,7 @@ fn ffi_sftp_check_download_conflict_no_target_returns_none() {
 
 #[test]
 fn ffi_sftp_check_download_conflict_existing_target_returns_info() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "download-conflict-exists");
@@ -2266,7 +2266,7 @@ fn ffi_sftp_check_download_conflict_existing_target_returns_info() {
 
 #[test]
 fn ffi_batch_upload_directory_completes() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload");
@@ -2340,7 +2340,7 @@ fn ffi_batch_upload_directory_completes() {
 
 #[test]
 fn ffi_batch_upload_creates_missing_remote_parent() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-missing-parent");
@@ -2395,7 +2395,7 @@ fn ffi_batch_upload_creates_missing_remote_parent() {
 
 #[test]
 fn ffi_batch_upload_ignores_existing_remote_directory() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-existing-dir");
@@ -2457,7 +2457,7 @@ fn ffi_batch_upload_ignores_existing_remote_directory() {
 
 #[test]
 fn ffi_batch_upload_multiple_files_completes() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-files");
@@ -2522,7 +2522,7 @@ fn ffi_batch_upload_multiple_files_completes() {
 
 #[test]
 fn ffi_batch_download_directory_completes() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-download");
@@ -2593,7 +2593,7 @@ fn ffi_batch_download_directory_completes() {
 
 #[test]
 fn ffi_batch_transfer_cancel_running_task() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-cancel");
@@ -2645,7 +2645,7 @@ fn ffi_batch_transfer_cancel_running_task() {
 
 #[test]
 fn ffi_batch_transfer_list_includes_tasks() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-list");
@@ -2686,7 +2686,7 @@ fn ffi_batch_transfer_list_includes_tasks() {
 
 #[test]
 fn ffi_batch_upload_unknown_host_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let result = start_batch_upload(
@@ -2706,7 +2706,7 @@ fn ffi_batch_upload_unknown_host_returns_error() {
 
 #[test]
 fn ffi_batch_upload_nonexistent_source_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-missing");
@@ -2734,7 +2734,7 @@ fn ffi_batch_upload_nonexistent_source_fails() {
 
 #[test]
 fn ffi_batch_download_nonexistent_source_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-download-missing");
@@ -2764,7 +2764,7 @@ fn ffi_batch_download_nonexistent_source_fails() {
 
 #[test]
 fn ffi_batch_transfer_status_unknown_task_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let result = batch_transfer_status(Uuid::new_v4().to_string());
@@ -2806,7 +2806,7 @@ fn ffi_scan_local_batch_file_and_directory() {
 
 #[test]
 fn ffi_scan_remote_batch_directory() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "scan-remote");
@@ -2880,7 +2880,7 @@ fn ffi_scan_local_batch_missing_source_fails() {
 
 #[test]
 fn ffi_scan_remote_batch_unknown_host_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let result = scan_remote_batch(
@@ -2896,7 +2896,7 @@ fn ffi_scan_remote_batch_unknown_host_fails() {
 
 #[test]
 fn ffi_sftp_home_dir_returns_path() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "home-dir");
@@ -2909,7 +2909,7 @@ fn ffi_sftp_home_dir_returns_path() {
 
 #[test]
 fn ffi_scan_remote_batch_missing_password_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "scan-remote-no-pw");
@@ -2923,7 +2923,7 @@ fn ffi_scan_remote_batch_missing_password_fails() {
 
 #[test]
 fn ffi_scan_remote_batch_connection_refused_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let host = save_test_host(unused_port(), "scan-remote-refused");
 
@@ -2941,7 +2941,7 @@ fn ffi_scan_remote_batch_connection_refused_fails() {
 
 #[test]
 fn ffi_scan_remote_batch_subsystem_rejected_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server_rejecting_sftp();
     let host = save_test_host(port, "scan-remote-no-sftp");
@@ -2960,7 +2960,7 @@ fn ffi_scan_remote_batch_subsystem_rejected_fails() {
 
 #[test]
 fn ffi_batch_upload_missing_password_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-no-pw");
@@ -2999,7 +2999,7 @@ fn ffi_batch_upload_missing_password_fails() {
 
 #[test]
 fn ffi_batch_upload_overwrites_existing_target() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-overwrite");
@@ -3046,7 +3046,7 @@ fn ffi_batch_upload_overwrites_existing_target() {
 
 #[test]
 fn ffi_batch_upload_cancel_before_running_covers_queued_branch() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-cancel-queued");
@@ -3097,7 +3097,7 @@ fn ffi_batch_upload_cancel_before_running_covers_queued_branch() {
 
 #[test]
 fn ffi_invalid_task_id_returns_core_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let invalid = "not-a-uuid".to_string();
@@ -3135,7 +3135,7 @@ fn ffi_invalid_task_id_returns_core_error() {
 
 #[test]
 fn ffi_transfer_pause_terminal_task_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "pause-terminal");
@@ -3165,7 +3165,7 @@ fn ffi_transfer_pause_terminal_task_returns_error() {
 
 #[test]
 fn ffi_transfer_resume_non_paused_task_is_noop() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "resume-non-paused");
@@ -3195,7 +3195,7 @@ fn ffi_transfer_resume_non_paused_task_is_noop() {
 
 #[test]
 fn ffi_batch_transfer_cancel_unknown_task_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let result = batch_transfer_cancel(Uuid::new_v4().to_string());
@@ -3260,7 +3260,7 @@ fn wait_for_batch_conflict(task_id: &str) -> panda_ffi::BatchTransferStatusRecor
 /// 决策覆盖后目标内容被替换。
 #[test]
 fn ffi_batch_upload_conflict_waits_and_overwrites() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-conflict-overwrite");
@@ -3336,7 +3336,7 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
 /// 批量上传目标已存在，决策跳过 → 任务完成且目标内容保持不变。
 #[test]
 fn ffi_batch_upload_conflict_skip_keeps_target() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-conflict-skip");
@@ -3402,7 +3402,7 @@ fn ffi_batch_upload_conflict_skip_keeps_target() {
 /// 随后 resolve 应报错而非悬挂或改变状态。
 #[test]
 fn ffi_batch_transfer_cancel_while_waiting_conflict() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-conflict-cancel");
@@ -3462,7 +3462,7 @@ fn ffi_batch_transfer_cancel_while_waiting_conflict() {
 /// 对未知任务 resolve 报 UnknownTransferTask。
 #[test]
 fn ffi_batch_transfer_resolve_unknown_task_returns_error() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     assert!(matches!(
@@ -3476,7 +3476,7 @@ fn ffi_batch_transfer_resolve_unknown_task_returns_error() {
 /// 批量上传连接被拒 → 任务 Failed 且携带错误信息。
 #[test]
 fn ffi_batch_upload_connection_refused_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let host = save_test_host(unused_port(), "batch-upload-refused");
     let dir =
@@ -3509,7 +3509,7 @@ fn ffi_batch_upload_connection_refused_fails() {
 /// 批量上传 SFTP 子系统被拒 → 任务 Failed。
 #[test]
 fn ffi_batch_upload_subsystem_rejected_fails() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server_rejecting_sftp();
     let host = save_test_host(port, "batch-upload-no-sftp");
@@ -3547,7 +3547,7 @@ fn ffi_batch_upload_subsystem_rejected_fails() {
 /// 验证 spawn+oneshot 模式在并发 FFI 调用下正常工作。
 #[test]
 fn ffi_scan_local_batch_concurrent_does_not_deadlock() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let dir = std::env::temp_dir().join(format!(
@@ -3583,7 +3583,7 @@ fn ffi_scan_local_batch_concurrent_does_not_deadlock() {
 /// 从一个线程调用 scan，同时另一个线程可以正常启动批量任务。
 #[test]
 fn ffi_scan_local_batch_does_not_starve_runtime() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "scan-starve");
@@ -3627,7 +3627,7 @@ fn ffi_scan_local_batch_does_not_starve_runtime() {
 /// 2.1 批量上传冲突回调：用户选择覆盖（异步 oneshot 通道）。
 #[test]
 fn ffi_batch_upload_conflict_resolve_overwrite_async() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "conflict-ow-async");
@@ -3679,7 +3679,7 @@ fn ffi_batch_upload_conflict_resolve_overwrite_async() {
 /// 2.1 批量上传冲突回调：用户选择跳过（异步 oneshot 通道）。
 #[test]
 fn ffi_batch_upload_conflict_resolve_skip_async() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "conflict-sk-async");
@@ -3730,7 +3730,7 @@ fn ffi_batch_upload_conflict_resolve_skip_async() {
 /// 验证异步回调在取消时能正确唤醒。
 #[test]
 fn ffi_batch_upload_conflict_cancel_wakes_waiter() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "conflict-cancel-async");
