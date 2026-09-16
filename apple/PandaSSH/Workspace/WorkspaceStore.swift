@@ -124,7 +124,7 @@ final class WorkspaceStore: ObservableObject {
 
     /// 标记终端标签已断开(phase→.failed 或连接丢失)。
     func markTerminalDisconnected(tabID: UUID) {
-        reportConnectionStatus(.inactive, forTabID: tabID)
+        reportConnectionStatus(.failed, forTabID: tabID)
     }
 
     /// 由终端/SFTP 页签在连接状态变化时调用。已被关闭的页签不得重新写入状态，
