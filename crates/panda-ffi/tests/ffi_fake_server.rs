@@ -1843,6 +1843,11 @@ fn ffi_transfer_cancel_queued_task() {
         std::thread::sleep(Duration::from_millis(50));
         let status = transfer_status(ids[3].clone()).unwrap();
         if matches!(status.status, TransferStatusEnum::Cancelled) {
+            // 前三个任务仅用于占满并发槽位；显式收尾，避免污染后续测试。
+            for id in &ids[..3] {
+                transfer_cancel(id.clone()).unwrap();
+                wait_for_transfer_terminal(id);
+            }
             cleanup_store();
             return;
         }
@@ -1936,9 +1941,11 @@ fn ffi_transfer_retry_non_terminal_task_fails() {
     .unwrap();
 
     assert!(
-        matches!(transfer_retry(id), Err(PandaError::Core(_))),
+        matches!(transfer_retry(id.clone()), Err(PandaError::Core(_))),
         "非终态任务不允许重试"
     );
+    transfer_cancel(id.clone()).unwrap();
+    wait_for_transfer_terminal(&id);
     cleanup_store();
 }
 
@@ -2060,6 +2067,10 @@ fn ffi_transfer_list_includes_tasks() {
 
     let list = transfer_list().unwrap();
     assert!(list.iter().any(|t| t.id == id));
+
+    // 本测试只验证注册表可见性，不应把后台传输留给后续测试清理。
+    transfer_cancel(id.clone()).unwrap();
+    wait_for_transfer_terminal(&id);
 
     cleanup_store();
 }
@@ -2663,6 +2674,13 @@ fn ffi_batch_transfer_list_includes_tasks() {
     assert!(ids.contains(&id1));
     assert!(ids.contains(&id2));
 
+    // 本测试只验证注册表可见性，不应把后台传输留给后续测试清理。
+    // 显式取消并等待终态，避免跨测试共享的全局任务注册表造成阻塞。
+    batch_transfer_cancel(id1.clone()).unwrap();
+    batch_transfer_cancel(id2.clone()).unwrap();
+    wait_for_batch_status(&id1, BatchTransferStatusEnum::Cancelled);
+    wait_for_batch_status(&id2, BatchTransferStatusEnum::Cancelled);
+
     cleanup_store();
 }
 
@@ -3195,6 +3213,24 @@ fn wait_for_transfer_status(task_id: &str, expected: TransferStatusEnum) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("task did not reach expected status");
+}
+
+/// 清理辅助：取消已发出后，任务可能已经自然完成或失败；三种终态都代表
+/// 不会继续占用共享测试注册表。
+fn wait_for_transfer_terminal(task_id: &str) {
+    for _ in 0..200 {
+        let status = transfer_status(task_id.to_string()).unwrap();
+        if matches!(
+            status.status,
+            TransferStatusEnum::Completed
+                | TransferStatusEnum::Failed
+                | TransferStatusEnum::Cancelled
+        ) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("task did not reach a terminal status");
 }
 
 fn wait_for_batch_status(task_id: &str, expected: BatchTransferStatusEnum) {

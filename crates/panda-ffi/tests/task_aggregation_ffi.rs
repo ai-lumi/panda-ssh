@@ -1,7 +1,4 @@
-use panda_ffi::{
-    aggregate_task_groups_ffi, AggregationResultRecord, BatchTransferDirectionEnum,
-    TaskGroupRecord, TaskItemRecord,
-};
+use panda_ffi::{aggregate_task_groups_ffi, BatchTransferDirectionEnum, TaskItemRecord};
 
 fn file_item(source: &str, dest: &str, size: u64) -> TaskItemRecord {
     TaskItemRecord {

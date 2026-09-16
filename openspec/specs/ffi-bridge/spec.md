@@ -4,6 +4,26 @@
 
 通过 uniffi 把 panda-core 暴露给 SwiftUI（macOS / iPadOS）。FFI 层只做翻译与生命周期管理，不含业务逻辑。
 ## Requirements
+
+### Requirement: FFI 模块边界与覆盖率责任
+
+FFI 实现 SHALL 将无状态纯值适配器与拥有业务状态、资源生命周期、持久化副作用或错误策略的实现分离。只有纯值适配器模块 MAY 被覆盖率文件级排除；会话、传输、TOFU、凭据、日志、遥测、工作区和终端状态机 MUST 继续计入 Rust lines 与 regions 覆盖率门禁。模块拆分 MUST NOT 改变既有 UniFFI 导出名称、参数、返回类型或同步调用外观。
+
+#### Scenario: 纯适配器可独立审查
+
+- **WHEN** 覆盖率配置排除 FFI 纯适配器模块
+- **THEN** 被排除模块仅包含无状态值转换或 core 函数转发，且不访问 runtime、store、会话/任务注册表、网络或文件系统
+
+#### Scenario: 业务 FFI 仍受门禁约束
+
+- **WHEN** 运行 Rust 覆盖率门禁
+- **THEN** 会话句柄、传输调度、TOFU、持久化、日志、遥测、工作区和终端状态机所在模块均被统计，且 lines 与 regions MUST 分别不低于 95%
+
+#### Scenario: 拆分保持 Swift 契约
+
+- **WHEN** FFI 内部模块被拆分后生成 Swift 绑定
+- **THEN** 既有 Swift 调用可继续以相同导出名称、参数和返回类型构建及运行
+
 ### Requirement: 导出接口
 
 FFI 层 SHALL 导出：`init_store(config_dir)`、`list_hosts`、`save_host`、`delete_host`、`list_groups`、`save_group`、`delete_group`、`move_group`、`save_credential`、`read_credential`、`delete_credential`、`set_credential_protection_key`、`credential_protection_enabled`、`test_connection`、兼容性无状态 `sftp_*`、`host_key_status(host, port)`、`accept_unknown_host_key(host, port, key)`；并 SHALL 导出 `shell_open` / `shell_read` / `shell_write` / `shell_resize` / `shell_close`、`sftp_session_open` / `sftp_session_*` / `sftp_session_close` 以及连接遥测查询接口。连接入口（`test_connection`、无状态 `sftp_*`、`shell_open`、`sftp_session_open`）MUST 接受 `trust_on_first_use: bool` 参数：`false` 时对未知主机密钥使用 `Reject` 策略，`true` 时使用 `AcceptAndStore`。类型以 FFI 友好的 Record/Enum 暴露（`HostConfigRecord`、`AuthMethodEnum`、`RemoteFileRecord`、`GroupRecord`），错误以结构化 `PandaError` 暴露（见「错误分类」）。`save_host` / `save_group` 传入空 id 时 MUST 生成新 UUID。`HostConfigRecord` MUST 携带 `group_id: Option<String>` 表示主机归属分组（`None` 为根级）。`delete_group` MUST 级联清空被删分组（含子分组）下所有主机的 `group_id`，并一并删除子分组；`move_group` MUST 拒绝会造成环的移动（移入自身或后代分组）。
