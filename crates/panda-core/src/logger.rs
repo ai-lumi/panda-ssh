@@ -95,13 +95,14 @@ impl Logger {
             buffer.push(entry.clone());
         }
 
-        // 写入文件
-        if let Some(path) = self
+        // 写入文件。先取出路径克隆再进入 if let：Rust 2021 中 if let 判别式
+        // 的临时锁守卫会存活到块尾，若在块内 write 失败后再次加锁会自死锁。
+        let path = self
             .file_path
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-        {
+            .clone();
+        if let Some(path) = path {
             if self.write_to_file(&path, &entry).is_err() {
                 self.disable_file_persistence();
             }
@@ -403,6 +404,25 @@ mod tests {
             entry.level == LogLevel::Error
                 && entry.message == "日志文件不可写，当前仅保留内存日志"
         }));
+    }
+
+    /// 写入失败必须降级为仅内存日志，而不是在 `log` 内部对 file_path 互斥锁
+    /// 二次加锁造成同线程死锁（Rust 2021 中 `if let` 判别式临时值存活到块尾）。
+    #[test]
+    fn log_write_failure_disables_file_persistence_without_deadlock() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        fs::write(&blocker, "file").unwrap();
+        let logger = Logger::new(Some(blocker.join("panda-ssh.log")));
+
+        logger.info("ssh", "第一次写入失败");
+        logger.info("ssh", "失败后仅保留内存日志");
+
+        assert!(logger.entries(10).iter().any(|entry| {
+            entry.level == LogLevel::Error
+                && entry.message == "日志文件不可写，当前仅保留内存日志"
+        }));
+        assert_eq!(logger.len(), 3);
     }
 
     #[test]
