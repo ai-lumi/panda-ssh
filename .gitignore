@@ -16,3 +16,7 @@ xcuserdata/
 
 # IDE
 .qoder/
+.codex-backups/
+
+# 备份文件
+*.backup-*
