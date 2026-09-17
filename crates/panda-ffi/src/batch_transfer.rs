@@ -15,7 +15,10 @@ use panda_core::{
 };
 use uuid::Uuid;
 
-use crate::{load_host, notify_transfer_changed, runtime, stores, PandaError};
+use super::notify_transfer_changed;
+use crate::ffi_runtime::runtime;
+use crate::ffi_store::{credentials_for as store_credentials_for, load_host, stores};
+use crate::PandaError;
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -479,7 +482,7 @@ fn credentials_for(
     password: Option<String>,
     passphrase: Option<String>,
 ) -> Result<Credentials, String> {
-    crate::credentials_for(cfg, password, passphrase).map_err(|e| e.to_string())
+    store_credentials_for(cfg, password, passphrase).map_err(|e| e.to_string())
 }
 
 /// Get a single batch task's current status.

@@ -1,7 +1,7 @@
 //! SSH 会话、SFTP 会话句柄与交互式 Shell 的 FFI 导出。
 //!
 //! 本模块拥有 Shell/SFTP 会话注册表与连接辅助逻辑：句柄分配、精确关闭与
-//! 幂等语义都在这里维护；主机配置与凭据通过根模块的 store 再导出访问。
+//! 幂等语义都在这里维护；主机配置与凭据直接从 store 模块访问。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,10 +13,9 @@ use panda_core::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::{
-    credentials_for, load_host, runtime, stores, PandaError, RemoteFileConflictRecord,
-    RemoteFileRecord, SftpSessionRecord,
-};
+use crate::ffi_runtime::runtime;
+use crate::ffi_store::{credentials_for, load_host, stores};
+use crate::{PandaError, RemoteFileConflictRecord, RemoteFileRecord, SftpSessionRecord};
 
 // ---------------------------------------------------------------------------
 // Session registries

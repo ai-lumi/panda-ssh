@@ -60,8 +60,10 @@
 │       └── src/
 │           ├── ffi_store.rs        # 初始化、配置、分组、凭据、主机密钥
 │           ├── ffi_sessions.rs     # Shell/SFTP 会话及连接入口
-│           ├── ffi_transfers.rs    # 单文件传输任务
-│           ├── batch_transfer.rs   # 批量传输任务
+│           ├── ffi_runtime.rs      # 共享异步运行时
+│           ├── ffi_transfers.rs    # 传输域入口与单文件传输任务
+│           ├── batch_transfer.rs   # 传输域子模块：批量传输任务
+│           ├── task_aggregation.rs # 传输域子模块：任务聚合
 │           ├── ffi_workspace.rs    # 标签页、终端会话、TOFU 协调
 │           ├── ffi_telemetry.rs    # 连接遥测与日志
 │           └── bin/uniffi-bindgen.rs # Swift 绑定生成命令
@@ -209,7 +211,7 @@ cargo test --workspace
 # Rust：静态检查
 cargo clippy --workspace --all-targets
 
-# Rust：覆盖率门禁（行与 region 均至少 95%；脚本分组采集 fake-server profile）
+# Rust：覆盖率门禁（core/FFI 分报告，行与 region 均至少 95%，并核对业务 FFI 文件）
 bash scripts/verify-rust-coverage.sh
 
 # Swift：先确保已执行 build-rust.sh 与 xcodegen

@@ -1,4 +1,19 @@
-//! 单文件传输任务的 FFI 导出：注册表、调度和状态转换。
+//! 传输域 FFI 导出：单文件/批量任务、聚合、注册表、调度和状态转换。
+
+#[path = "batch_transfer.rs"]
+mod batch_transfer;
+pub use batch_transfer::{
+    batch_transfer_cancel, batch_transfer_list, batch_transfer_resolve_conflict,
+    batch_transfer_status, scan_local_batch, scan_remote_batch, start_batch_download,
+    start_batch_upload, BatchConflictRecord, BatchItemRecord, BatchTransferDirectionEnum,
+    BatchTransferStatusEnum, BatchTransferStatusRecord,
+};
+
+#[path = "task_aggregation.rs"]
+mod task_aggregation;
+pub use task_aggregation::{
+    aggregate_task_groups_ffi, AggregationResultRecord, TaskGroupRecord, TaskItemRecord,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,7 +23,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use panda_core::{KnownHosts, SftpClient, SshSession, TransferSpeedTracker, UnknownHostKeyPolicy};
 use uuid::Uuid;
 
-use crate::{credentials_for, load_host, runtime, stores, PandaError};
+use crate::ffi_runtime::runtime;
+use crate::ffi_store::{credentials_for, load_host, stores};
+use crate::PandaError;
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -141,7 +158,7 @@ fn transfer_semaphore() -> &'static tokio::sync::Semaphore {
 }
 
 /// 状态变更时调用：递增全局变更计数器。
-pub(crate) fn notify_transfer_changed() {
+fn notify_transfer_changed() {
     TRANSFER_CHANGE_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -611,6 +628,7 @@ pub fn transfer_change_counter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::global_test_lock;
 
     /// 构造一个假的 TransferTask 用于测试（不启动异步工作线程）。
     fn make_test_task(id: Uuid) -> TransferTask {
@@ -651,6 +669,7 @@ mod tests {
 
     #[test]
     fn progress_alone_advances_revision_and_snapshot() {
+        let _test_guard = global_test_lock();
         let task = make_test_task(Uuid::new_v4());
         let progress = task.progress_callback();
         for done in [1, 512, 1024] {
@@ -663,6 +682,7 @@ mod tests {
 
     #[test]
     fn change_counter_increments_on_notify() {
+        let _test_guard = global_test_lock();
         let before = transfer_change_counter();
         notify_transfer_changed();
         let after = transfer_change_counter();
@@ -671,6 +691,7 @@ mod tests {
 
     #[test]
     fn change_counter_does_not_increment_on_read() {
+        let _test_guard = global_test_lock();
         // 读取计数器本身不改变它的值
         let v1 = transfer_change_counter();
         let v2 = transfer_change_counter();
@@ -679,6 +700,7 @@ mod tests {
 
     #[test]
     fn change_counter_increments_on_cancel() {
+        let _test_guard = global_test_lock();
         let id = Uuid::new_v4();
         let task = make_test_task(id);
         insert_test_task(&task);
@@ -693,6 +715,7 @@ mod tests {
 
     #[test]
     fn change_counter_increments_on_pause() {
+        let _test_guard = global_test_lock();
         let id = Uuid::new_v4();
         let task = make_test_task(id);
         insert_test_task(&task);
@@ -707,6 +730,7 @@ mod tests {
 
     #[test]
     fn change_counter_increments_on_resume() {
+        let _test_guard = global_test_lock();
         let id = Uuid::new_v4();
         let task = make_test_task(id);
         // 先暂停
@@ -723,6 +747,7 @@ mod tests {
 
     #[test]
     fn change_counter_multiple_transitions_accumulate() {
+        let _test_guard = global_test_lock();
         let id = Uuid::new_v4();
         let task = make_test_task(id);
         insert_test_task(&task);
@@ -752,6 +777,7 @@ mod tests {
 
     #[test]
     fn change_counter_no_increment_for_noop_cancel() {
+        let _test_guard = global_test_lock();
         // 已完成的任务 cancel 是 no-op，任务状态不应改变
         let id = Uuid::new_v4();
         let task = make_test_task(id);
@@ -771,6 +797,7 @@ mod tests {
 
     #[test]
     fn change_counter_no_increment_for_noop_pause() {
+        let _test_guard = global_test_lock();
         // 已暂停的任务再次 pause 是 no-op，任务状态不应改变
         let id = Uuid::new_v4();
         let task = make_test_task(id);
@@ -794,6 +821,7 @@ mod tests {
 
     #[test]
     fn group_status_priority_prefers_running_over_all_terminal_states() {
+        let _test_guard = global_test_lock();
         use TransferStatusEnum as S;
         assert_eq!(group_status_priority(&[S::Failed, S::Running, S::Completed]), S::Running);
         assert_eq!(group_status_priority(&[S::Completed, S::Paused]), S::Paused);
@@ -806,6 +834,7 @@ mod tests {
 
     #[test]
     fn transfer_groups_aggregates_grouped_tasks_and_ignores_ungrouped() {
+        let _test_guard = global_test_lock();
         let mk = |group: Option<(&str, &str)>, status: TransferStatusEnum, size: u64, done: u64| {
             let mut task = make_test_task(Uuid::new_v4());
             if let Some((gid, gname)) = group {
@@ -857,6 +886,7 @@ mod tests {
 
     #[test]
     fn wait_while_paused_blocks_until_resume_and_reports_paused_status() {
+        let _test_guard = global_test_lock();
         let task = make_test_task(Uuid::new_v4());
         task.paused.store(true, Ordering::Relaxed);
         let handle = runtime().spawn({
@@ -886,6 +916,7 @@ mod tests {
 
     #[test]
     fn wait_while_paused_returns_immediately_when_cancelled() {
+        let _test_guard = global_test_lock();
         // 取消标志优先于暂停：等待立即返回且不改状态
         let task = make_test_task(Uuid::new_v4());
         task.cancel.store(true, Ordering::Relaxed);
@@ -917,6 +948,7 @@ mod tests {
 
     #[test]
     fn run_transfer_task_marks_cancelled_before_and_after_semaphore() {
+        let _test_guard = global_test_lock();
         let cfg = refused_host_config();
 
         // 排队阶段已设置取消标志：不获取信号量直接标 Cancelled
@@ -938,6 +970,7 @@ mod tests {
 
     #[test]
     fn run_transfer_task_marks_failed_when_connection_is_refused() {
+        let _test_guard = global_test_lock();
         // 上传方向：连接被拒绝 → Failed 且携带错误信息
         let mut task = make_test_task(Uuid::new_v4());
         task.password = Some("pw".into());
@@ -964,6 +997,7 @@ mod tests {
 
     #[test]
     fn transfer_retry_rejects_non_retryable_and_unknown_tasks() {
+        let _test_guard = global_test_lock();
         // 不存在的任务
         assert!(matches!(
             transfer_retry(Uuid::new_v4().to_string()),
@@ -984,8 +1018,8 @@ mod tests {
 
     #[test]
     fn transfer_retry_resets_state_and_reruns_until_terminal() {
-        // 重试会重新加载主机配置：持有全局 store 串行锁并初始化测试目录
-        let _lock = crate::ffi_store::tests::store_test_lock();
+        // 重试会重新加载主机配置：持有统一全局测试锁并初始化测试目录
+        let _test_guard = global_test_lock();
         let dir = tempfile::tempdir().unwrap();
         crate::init_store(dir.path().to_string_lossy().into_owned()).unwrap();
         let mut record: crate::HostConfigRecord = refused_host_config().into();
@@ -1023,6 +1057,7 @@ mod tests {
 
     #[test]
     fn transfer_pause_rejects_terminal_task_and_resume_is_noop_for_it() {
+        let _test_guard = global_test_lock();
         let id = Uuid::new_v4();
         let task = make_test_task(id);
         *task.status.lock().unwrap() = TransferStatusEnum::Failed;

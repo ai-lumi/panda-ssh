@@ -1,6 +1,7 @@
 //! 遥测、日志和连接健康检查 FFI 导出。
 
-use crate::{runtime, PandaError};
+use crate::ffi_runtime::runtime;
+use crate::PandaError;
 
 // ---------------------------------------------------------------------------
 // Connection telemetry types
@@ -333,9 +334,11 @@ pub fn log_clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::global_test_lock;
 
     #[test]
     fn lifecycle_record_has_only_safe_identifiers_and_fixed_reason() {
+        let _test_guard = global_test_lock();
         let event = ConnectionLifecycleRecord::from(panda_core::telemetry::LifecycleEvent {
             connection_id: 42,
             address: "example.test:22".into(),
@@ -350,6 +353,7 @@ mod tests {
 
     #[test]
     fn connection_snapshot_maps_all_structured_fields_without_sensitive_content() {
+        let _test_guard = global_test_lock();
         use panda_core::telemetry::{
             ChannelKind, ChannelSnapshot, ChannelState, ConnectionSnapshot, HealthState, SshState,
             TransportState,
@@ -408,6 +412,7 @@ mod tests {
 
     #[test]
     fn telemetry_list_can_be_empty_and_unknown_health_id_is_structured() {
+        let _test_guard = global_test_lock();
         assert!(connection_telemetry_list().is_empty());
         assert!(matches!(
             connection_health_check(u64::MAX),
@@ -418,6 +423,7 @@ mod tests {
 
     #[test]
     fn failure_classify_maps_every_error_code_to_its_category() {
+        let _test_guard = global_test_lock();
         assert_eq!(
             connection_failure_classify("Timeout".into()).category,
             FailureCategoryEnum::Timeout
@@ -448,6 +454,7 @@ mod tests {
 
     #[test]
     fn map_failure_category_converts_core_variants_including_host_key_mismatch() {
+        let _test_guard = global_test_lock();
         // HostKeyMismatch 经错误码字符串表不可达（变体携带参数），
         // 但映射必须保持完整，直接对映射函数验证。
         let core_to_ffi = [
@@ -470,6 +477,7 @@ mod tests {
 
     #[test]
     fn log_write_entries_and_clear_roundtrip_all_levels() {
+        let _test_guard = global_test_lock();
         log_clear();
         log_write(LogLevelEnum::Debug, "ffi-log-test".into(), "调试消息".into());
         log_write(LogLevelEnum::Info, "ffi-log-test".into(), "信息消息".into());

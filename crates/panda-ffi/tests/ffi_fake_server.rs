@@ -732,6 +732,7 @@ fn ffi_sftp_and_connection_success_paths() {
 #[test]
 fn ffi_connection_telemetry_maps_all_states_channels_and_large_counts() {
     use panda_core::telemetry::{global_registry, ChannelKind, ChannelState, HealthState};
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let registry = global_registry();
     let connecting = registry.register_connection("telemetry-connecting".into(), "a:22".into());
@@ -2774,12 +2775,14 @@ fn ffi_batch_transfer_status_unknown_task_returns_error() {
 
 #[test]
 fn ffi_scan_local_batch_empty_sources() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let items = scan_local_batch(vec![], "/dest".into()).unwrap();
     assert!(items.is_empty());
 }
 
 #[test]
 fn ffi_scan_local_batch_file_and_directory() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("panda-ffi-scan-local-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("a.txt");
@@ -2874,6 +2877,7 @@ fn ffi_scan_remote_batch_directory() {
 
 #[test]
 fn ffi_scan_local_batch_missing_source_fails() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let result = scan_local_batch(vec!["/no/such/path/exists".into()], "/dest".into());
     assert!(result.is_err());
 }

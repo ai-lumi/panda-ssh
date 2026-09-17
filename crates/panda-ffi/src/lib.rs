@@ -4,28 +4,18 @@
 //! async work runs on a lazily created global tokio runtime.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use panda_core::{AuthMethod, HostConfig};
-use tokio::runtime::Runtime;
 
 uniffi::setup_scaffolding!();
 
+mod ffi_runtime;
+
+#[cfg(test)]
+mod test_support;
+
 mod ffi_adapter;
 pub use ffi_adapter::{sftp_child_path, sftp_directory_path};
-
-mod batch_transfer;
-pub use batch_transfer::{
-    batch_transfer_cancel, batch_transfer_list, batch_transfer_resolve_conflict,
-    batch_transfer_status, scan_local_batch, scan_remote_batch, start_batch_download,
-    start_batch_upload, BatchConflictRecord, BatchItemRecord, BatchTransferDirectionEnum,
-    BatchTransferStatusEnum, BatchTransferStatusRecord,
-};
-
-mod task_aggregation;
-pub use task_aggregation::{
-    aggregate_task_groups_ffi, AggregationResultRecord, TaskGroupRecord, TaskItemRecord,
-};
 
 mod ffi_workspace;
 pub use ffi_workspace::{
@@ -53,12 +43,15 @@ pub use ffi_telemetry::{
 
 mod ffi_transfers;
 pub use ffi_transfers::{
+    aggregate_task_groups_ffi, batch_transfer_cancel, batch_transfer_list,
+    batch_transfer_resolve_conflict, batch_transfer_status, scan_local_batch, scan_remote_batch,
     start_transfer, transfer_cancel, transfer_change_counter, transfer_groups, transfer_list,
-    transfer_pause, transfer_resume, transfer_retry, transfer_status,
-    TransferDirectionEnum, TransferGroupRecord, TransferStatusEnum, TransferStatusRecord,
+    transfer_pause, transfer_resume, transfer_retry, transfer_status, start_batch_download,
+    start_batch_upload, AggregationResultRecord, BatchConflictRecord, BatchItemRecord,
+    BatchTransferDirectionEnum, BatchTransferStatusEnum, BatchTransferStatusRecord,
+    TaskGroupRecord, TaskItemRecord, TransferDirectionEnum, TransferGroupRecord,
+    TransferStatusEnum, TransferStatusRecord,
 };
-// 批量传输模块通过根模块引用单文件传输的变更通知。
-pub(crate) use ffi_transfers::notify_transfer_changed;
 
 mod ffi_store;
 pub use ffi_store::{
@@ -71,8 +64,6 @@ pub use ffi_store::{
     ExportManifestRecord, ImportResultRecord, PreconnectActionEnum, ResolvedCredentialEnum,
     SidebarNodeFFIRecord, SnippetRecord,
 };
-// 会话与传输模块通过根模块访问共享 store 状态。
-pub(crate) use ffi_store::{credentials_for, load_host, stores};
 
 mod ffi_sessions;
 pub use ffi_sessions::{
@@ -345,16 +336,6 @@ impl From<HostConfig> for HostConfigRecord {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Globals
-// ---------------------------------------------------------------------------
-
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
-pub(crate) fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,7 +383,7 @@ mod tests {
             group_id: None,
         };
         assert!(matches!(
-            credentials_for(&cfg, None, None),
+            ffi_store::credentials_for(&cfg, None, None),
             Err(PandaError::MissingPassword(_))
         ));
         assert!(matches!(

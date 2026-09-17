@@ -5,7 +5,7 @@ use panda_core::{
     aggregate_task_groups,
 };
 
-use crate::BatchTransferDirectionEnum;
+use super::BatchTransferDirectionEnum;
 
 // ---------------------------------------------------------------------------
 // Exported types

@@ -733,6 +733,15 @@ pub fn terminal_session_get(tab_id: String) -> Option<TerminalSessionRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::global_test_lock;
+    use crate::test_support::GlobalTestGuard;
+
+    fn reset_workspace() -> GlobalTestGuard {
+        let guard = global_test_lock();
+        workspace_reset();
+        preconnect_tofu_reset();
+        guard
+    }
 
     fn unique_tab_id(prefix: &str) -> String {
         format!("{}-{}", prefix, Uuid::new_v4())
@@ -1035,6 +1044,7 @@ mod tests {
 
     #[test]
     fn terminal_session_register_creates_connecting_session() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("register");
         let record = terminal_session_register("host-1".into(), tab_id.clone());
         assert_eq!(record.id, tab_id);
@@ -1048,6 +1058,7 @@ mod tests {
 
     #[test]
     fn terminal_session_phase_return_current_phase() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("phase");
         terminal_session_register("host-1".into(), tab_id.clone());
         assert_eq!(terminal_session_phase(tab_id.clone()), Some(TerminalPhaseEnum::Connecting));
@@ -1059,11 +1070,13 @@ mod tests {
 
     #[test]
     fn terminal_session_phase_returns_none_for_unknown_tab() {
+        let _test_guard = reset_workspace();
         assert_eq!(terminal_session_phase(unique_tab_id("nonexistent")), None);
     }
 
     #[test]
     fn terminal_session_transition_to_shell_from_connecting() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("to-shell");
         terminal_session_register("host-1".into(), tab_id.clone());
         terminal_session_transition_to_shell(tab_id.clone());
@@ -1075,6 +1088,7 @@ mod tests {
 
     #[test]
     fn terminal_session_transition_to_shell_from_shell_is_noop() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("noop-shell");
         terminal_session_register("host-1".into(), tab_id.clone());
         terminal_session_transition_to_shell(tab_id.clone());
@@ -1087,6 +1101,7 @@ mod tests {
 
     #[test]
     fn terminal_session_transition_to_failed_records_error() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("fail");
         terminal_session_register("host-1".into(), tab_id.clone());
         terminal_session_transition_to_failed(
@@ -1104,6 +1119,7 @@ mod tests {
 
     #[test]
     fn terminal_session_retry_increments_attempt() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("retry");
         terminal_session_register("host-1".into(), tab_id.clone());
         terminal_session_transition_to_failed(
@@ -1121,6 +1137,7 @@ mod tests {
 
     #[test]
     fn terminal_session_retry_from_connecting_returns_none() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("retry-connecting");
         terminal_session_register("host-1".into(), tab_id.clone());
         assert!(terminal_session_retry(tab_id.clone()).is_none());
@@ -1129,6 +1146,7 @@ mod tests {
 
     #[test]
     fn terminal_session_close_removes_session() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("close");
         terminal_session_register("host-1".into(), tab_id.clone());
         assert!(terminal_session_get(tab_id.clone()).is_some());
@@ -1139,6 +1157,7 @@ mod tests {
 
     #[test]
     fn terminal_session_is_stale_detects_outdated_generation() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("stale");
         let record = terminal_session_register("host-1".into(), tab_id.clone());
         let gen0 = record.attempt;
@@ -1159,11 +1178,13 @@ mod tests {
 
     #[test]
     fn terminal_session_is_stale_returns_true_for_unknown_tab() {
+        let _test_guard = reset_workspace();
         assert!(terminal_session_is_stale(unique_tab_id("nonexistent-stale"), 0));
     }
 
     #[test]
     fn terminal_session_full_lifecycle_via_ffi() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("lifecycle");
 
         let record = terminal_session_register("host-1".into(), tab_id.clone());
@@ -1197,6 +1218,7 @@ mod tests {
 
     #[test]
     fn terminal_session_close_via_tab_close() {
+        let _test_guard = reset_workspace();
         let mut state = workspace_state().lock().unwrap();
         let tab_id = state.open_tab("host-1".into(), panda_core::TabKind::Terminal);
         state.terminal_sessions.insert(
@@ -1215,14 +1237,14 @@ mod tests {
 
     #[test]
     fn tofu_first_waiter_gets_probe_true() {
-        preconnect_tofu_reset();
+        let _test_guard = reset_workspace();
         assert!(preconnect_tofu_register_waiter("host-1".into()));
         preconnect_tofu_resolve("host-1".into(), true);
     }
 
     #[test]
     fn tofu_second_waiter_gets_probe_false() {
-        preconnect_tofu_reset();
+        let _test_guard = reset_workspace();
         assert!(preconnect_tofu_register_waiter("host-2".into()));
         assert!(!preconnect_tofu_register_waiter("host-2".into()));
         preconnect_tofu_resolve("host-2".into(), true);
@@ -1230,7 +1252,7 @@ mod tests {
 
     #[test]
     fn tofu_resolve_clears_probing_state() {
-        preconnect_tofu_reset();
+        let _test_guard = reset_workspace();
         assert!(preconnect_tofu_register_waiter("host-3".into()));
         preconnect_tofu_resolve("host-3".into(), true);
         assert!(preconnect_tofu_register_waiter("host-3".into()));
@@ -1239,7 +1261,7 @@ mod tests {
 
     #[test]
     fn tofu_different_hosts_are_independent() {
-        preconnect_tofu_reset();
+        let _test_guard = reset_workspace();
         assert!(preconnect_tofu_register_waiter("host-a".into()));
         assert!(preconnect_tofu_register_waiter("host-b".into()));
         assert!(!preconnect_tofu_register_waiter("host-a".into()));
@@ -1250,23 +1272,13 @@ mod tests {
 
     #[test]
     fn tofu_resolve_without_waiters_is_noop() {
-        preconnect_tofu_reset();
+        let _test_guard = reset_workspace();
         preconnect_tofu_resolve("nonexistent".into(), true);
     }
 
     // -----------------------------------------------------------------------
     // FFI 导出包装层（全局状态经导出函数访问）
     // -----------------------------------------------------------------------
-
-    /// FFI 导出操作进程级全局工作区状态：新增测试串行执行并各自 reset 清场。
-    static WORKSPACE_FFI_LOCK: Mutex<()> = Mutex::new(());
-
-    fn reset_workspace() -> std::sync::MutexGuard<'static, ()> {
-        let guard = WORKSPACE_FFI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        workspace_reset();
-        preconnect_tofu_reset();
-        guard
-    }
 
     #[test]
     fn ffi_enum_mappings_cover_every_core_variant() {
@@ -1402,6 +1414,7 @@ mod tests {
 
     #[test]
     fn terminal_session_shell_transition_ignored_from_failed_phase() {
+        let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("ffi-failed-shell");
         terminal_session_register("host-1".into(), tab_id.clone());
         terminal_session_transition_to_failed(
@@ -1420,6 +1433,7 @@ mod tests {
 
     #[test]
     fn terminal_session_retry_unknown_tab_returns_none() {
+        let _test_guard = reset_workspace();
         assert!(terminal_session_retry(unique_tab_id("ffi-retry-unknown")).is_none());
     }
 }

@@ -549,28 +549,20 @@ pub fn delete_snippet(name: String) -> Result<(), PandaError> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::test_support::global_test_lock;
+    use crate::test_support::GlobalTestGuard;
     use crate::AuthMethodEnum;
-
-    /// 全局 STORES / SNIPPET_STORE / 日志文件路径在进程内共享：store 测试串行执行。
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// 合法 `<keytype> <base64>` 格式的测试公钥；指纹计算只解码不校验密钥内容。
     const TEST_KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
 
-    type StoreLock = std::sync::MutexGuard<'static, ()>;
-
     /// 在独立临时目录中初始化 store；返回的锁保证串行，tempdir 由调用方持有。
-    fn init_test_store() -> (StoreLock, tempfile::TempDir) {
-        let lock = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn init_test_store() -> (GlobalTestGuard, tempfile::TempDir) {
+        let lock = global_test_lock();
         let dir = tempfile::tempdir().unwrap();
         init_store(dir.path().to_string_lossy().into_owned()).unwrap();
         (lock, dir)
-    }
-
-    /// 供其他模块测试在需要初始化全局 STORES 时复用同一把串行锁。
-    pub(crate) fn store_test_lock() -> StoreLock {
-        TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn password_host(id: &str, name: &str, addr: &str) -> HostConfigRecord {
