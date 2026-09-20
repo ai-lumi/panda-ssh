@@ -3,12 +3,25 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorkKind { Upload, Download, LocalDelete, RemoteDelete }
+pub enum WorkKind {
+    Upload,
+    Download,
+    LocalDelete,
+    RemoteDelete,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkStatus {
-    Preparing, Scanning, Queued, Running, Paused, WaitingForDecision, Cancelling,
-    Completed, Failed, Cancelled,
+    Preparing,
+    Scanning,
+    Queued,
+    Running,
+    Paused,
+    WaitingForDecision,
+    Cancelling,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 impl WorkStatus {
@@ -18,10 +31,16 @@ impl WorkStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProgressUnit { Bytes, Items }
+pub enum ProgressUnit {
+    Bytes,
+    Items,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkFailure { pub path: String, pub message: String }
+pub struct WorkFailure {
+    pub path: String,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkSnapshot {
@@ -45,14 +64,24 @@ pub struct WorkSnapshot {
 impl WorkSnapshot {
     pub fn new(id: String, kind: WorkKind, status: WorkStatus, source: String) -> Self {
         Self {
-            id, kind, status, source, operation_id: None, group_id: None,
-            host_id: None, destination: None,
+            id,
+            kind,
+            status,
+            source,
+            operation_id: None,
+            group_id: None,
+            host_id: None,
+            destination: None,
             unit: match kind {
                 WorkKind::Upload | WorkKind::Download => ProgressUnit::Bytes,
                 WorkKind::LocalDelete | WorkKind::RemoteDelete => ProgressUnit::Items,
             },
-            processed: 0, total: None, discovered: 0, succeeded: 0,
-            current_path: None, errors: Vec::new(),
+            processed: 0,
+            total: None,
+            discovered: 0,
+            succeeded: 0,
+            current_path: None,
+            errors: Vec::new(),
         }
     }
 }
@@ -68,8 +97,13 @@ pub fn summarize_unfinished(tasks: &[WorkSnapshot]) -> UnfinishedSummary {
     let mut seen = HashSet::new();
     let mut result = UnfinishedSummary::default();
     for task in tasks.iter().filter(|task| task.status.is_unfinished()) {
-        let key = if let Some(id) = &task.operation_id { (0, id) }
-            else if let Some(id) = &task.group_id { (1, id) } else { (2, &task.id) };
+        let key = if let Some(id) = &task.operation_id {
+            (0, id)
+        } else if let Some(id) = &task.group_id {
+            (1, id)
+        } else {
+            (2, &task.id)
+        };
         if seen.insert(key) {
             result.total += 1;
             *result.by_kind.entry(task.kind).or_default() += 1;
@@ -88,18 +122,29 @@ pub struct WorkRegistry {
 
 impl Default for WorkRegistry {
     fn default() -> Self {
-        Self { accepting: true, preparations: BTreeMap::new(), owners: HashMap::new(), handed_off: HashSet::new() }
+        Self {
+            accepting: true,
+            preparations: BTreeMap::new(),
+            owners: HashMap::new(),
+            handed_off: HashSet::new(),
+        }
     }
 }
 
 impl WorkRegistry {
     pub fn ensure_accepting(&self) -> Result<(), String> {
-        if self.accepting { Ok(()) } else { Err("应用正在退出，不能启动新任务".into()) }
+        if self.accepting {
+            Ok(())
+        } else {
+            Err("应用正在退出，不能启动新任务".into())
+        }
     }
 
     pub fn begin(&mut self, mut task: WorkSnapshot) -> Result<(), String> {
         self.ensure_accepting()?;
-        if self.preparations.contains_key(&task.id) { return Err("准备操作已登记".into()); }
+        if self.preparations.contains_key(&task.id) {
+            return Err("准备操作已登记".into());
+        }
         task.operation_id = Some(task.id.clone());
         self.preparations.insert(task.id.clone(), task);
         Ok(())
@@ -112,19 +157,35 @@ impl WorkRegistry {
             return Err("准备操作已经结束".into());
         }
         if let Some(owner) = self.owners.get(task) {
-            if owner != operation { return Err("任务已属于其他操作".into()); }
+            if owner != operation {
+                return Err("任务已属于其他操作".into());
+            }
         }
         self.owners.insert(task.into(), operation.into());
         Ok(())
     }
 
-    pub fn finish_preparation(&mut self, operation: &str, error: Option<String>) -> Result<(), String> {
-        let task = self.preparations.get_mut(operation).ok_or("准备操作不存在")?;
-        if !task.status.is_unfinished() { return Ok(()); }
+    pub fn finish_preparation(
+        &mut self,
+        operation: &str,
+        error: Option<String>,
+    ) -> Result<(), String> {
+        let task = self
+            .preparations
+            .get_mut(operation)
+            .ok_or("准备操作不存在")?;
+        if !task.status.is_unfinished() {
+            return Ok(());
+        }
         task.status = if let Some(message) = error {
-            task.errors.push(WorkFailure { path: task.source.clone(), message });
+            task.errors.push(WorkFailure {
+                path: task.source.clone(),
+                message,
+            });
             WorkStatus::Failed
-        } else { WorkStatus::Completed };
+        } else {
+            WorkStatus::Completed
+        };
         self.handed_off.insert(operation.into());
         Ok(())
     }
@@ -140,7 +201,10 @@ impl WorkRegistry {
         }
         for (id, task) in &self.preparations {
             // 未完成准备始终保留；交接后有子任务时只保留子任务。
-            if !self.handed_off.contains(id) || !represented.contains(id.as_str()) || task.status == WorkStatus::Failed {
+            if !self.handed_off.contains(id)
+                || !represented.contains(id.as_str())
+                || task.status == WorkStatus::Failed
+            {
                 result.push(task.clone());
             }
         }
@@ -151,14 +215,20 @@ impl WorkRegistry {
         if force || summarize_unfinished(&self.snapshots(running)).total == 0 {
             self.accepting = false;
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 
-    pub fn cancel_quit(&mut self) { self.accepting = true; }
+    pub fn cancel_quit(&mut self) {
+        self.accepting = true;
+    }
 
     pub fn clear_finished(&mut self) {
-        self.preparations.retain(|_, task| task.status.is_unfinished());
-        self.handed_off.retain(|id| self.preparations.contains_key(id));
+        self.preparations
+            .retain(|_, task| task.status.is_unfinished());
+        self.handed_off
+            .retain(|id| self.preparations.contains_key(id));
         // 运行中的执行器仍需要操作关联，不能在清除历史展示时移除 owners。
     }
 }

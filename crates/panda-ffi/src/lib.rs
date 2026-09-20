@@ -19,7 +19,7 @@ pub use ffi_adapter::{sftp_child_path, sftp_directory_path};
 
 mod ffi_workspace;
 pub use ffi_workspace::{
-    preconnect_tofu_register_waiter, preconnect_tofu_resolve, preconnect_tofu_reset,
+    preconnect_tofu_register_waiter, preconnect_tofu_reset, preconnect_tofu_resolve,
     terminal_session_close, terminal_session_get, terminal_session_is_stale,
     terminal_session_phase, terminal_session_register, terminal_session_retry,
     terminal_session_transition_to_failed, terminal_session_transition_to_shell,
@@ -27,27 +27,27 @@ pub use ffi_workspace::{
     workspace_close_other_tabs, workspace_close_tab, workspace_confirm_close,
     workspace_host_connection_status, workspace_open_tab, workspace_pending_close,
     workspace_report_connection_status, workspace_reset, workspace_select_tab,
-    workspace_set_host_names, workspace_tab_list,
-    CloseConfirmationRecord, ConnectionStatusEnum, HostNameMapping, TabKindEnum,
-    TerminalFailureCategoryEnum, TerminalPhaseEnum, TerminalSessionRecord, WorkspaceTabRecord,
+    workspace_set_host_names, workspace_tab_list, CloseConfirmationRecord, ConnectionStatusEnum,
+    HostNameMapping, TabKindEnum, TerminalFailureCategoryEnum, TerminalPhaseEnum,
+    TerminalSessionRecord, WorkspaceTabRecord,
 };
 
 mod ffi_telemetry;
 pub use ffi_telemetry::{
     connection_failure_classify, connection_health_check, connection_lifecycle_drain,
-    connection_telemetry_list, log_clear, log_entries, log_write,
-    ChannelKindEnum, ChannelStateEnum, ChannelTelemetryRecord, ConnectionFailureFFIRecord,
-    ConnectionLifecycleRecord, ConnectionStateEnum, ConnectionTelemetryRecord,
-    FailureCategoryEnum, HealthStateEnum, LogLevelEnum, LogEntryRecord, SshConnectionStateEnum,
+    connection_telemetry_list, log_clear, log_entries, log_write, ChannelKindEnum,
+    ChannelStateEnum, ChannelTelemetryRecord, ConnectionFailureFFIRecord,
+    ConnectionLifecycleRecord, ConnectionStateEnum, ConnectionTelemetryRecord, FailureCategoryEnum,
+    HealthStateEnum, LogEntryRecord, LogLevelEnum, SshConnectionStateEnum,
 };
 
 mod ffi_transfers;
 pub use ffi_transfers::{
     aggregate_task_groups_ffi, batch_transfer_cancel, batch_transfer_list,
     batch_transfer_resolve_conflict, batch_transfer_status, scan_local_batch, scan_remote_batch,
-    start_transfer, transfer_cancel, transfer_change_counter, transfer_groups, transfer_list,
-    transfer_pause, transfer_resume, transfer_retry, transfer_status, start_batch_download,
-    start_batch_upload, AggregationResultRecord, BatchConflictRecord, BatchItemRecord,
+    start_batch_download, start_batch_upload, start_transfer, transfer_cancel,
+    transfer_change_counter, transfer_groups, transfer_list, transfer_pause, transfer_resume,
+    transfer_retry, transfer_status, AggregationResultRecord, BatchConflictRecord, BatchItemRecord,
     BatchTransferDirectionEnum, BatchTransferStatusEnum, BatchTransferStatusRecord,
     TaskGroupRecord, TaskItemRecord, TransferDirectionEnum, TransferGroupRecord,
     TransferStatusEnum, TransferStatusRecord,
@@ -56,22 +56,25 @@ pub use ffi_transfers::{
 mod ffi_store;
 pub use ffi_store::{
     accept_unknown_host_key, config_export, config_import, credential_protection_enabled,
-    credential_resolve, delete_credential, delete_group, delete_host, delete_snippet,
-    group_path, host_key_status, init_snippets, init_store, list_groups, list_hosts,
-    list_snippets, move_group, preconnect_evaluate, read_credential, save_credential,
-    save_group, save_host, save_snippet, search_hosts, set_credential_protection_key,
-    sidebar_tree,
-    ExportManifestRecord, ImportResultRecord, PreconnectActionEnum, ResolvedCredentialEnum,
-    SidebarNodeFFIRecord, SnippetRecord,
+    credential_protection_status, credential_resolve, credential_unlock_only,
+    default_terminal_buffer_lines, delete_credential, delete_group, delete_host, delete_snippet,
+    group_path, host_key_status, init_snippets, init_store, list_groups, list_hosts, list_snippets,
+    move_group, preconnect_evaluate, read_credential, save_credential, save_group, save_host,
+    save_snippet, search_hosts, set_credential_protection_key, sidebar_tree,
+    validate_credential_protection_input, validate_terminal_buffer_lines, ExportManifestRecord,
+    ImportResultRecord, PreconnectActionEnum, ProtectionActionEnum, ProtectionInputErrorEnum,
+    ProtectionStatusEnum, ResolvedCredentialEnum, SidebarNodeFFIRecord, SnippetRecord,
+    TerminalBufferErrorEnum,
 };
 
 mod ffi_sessions;
 pub use ffi_sessions::{
     sftp_check_download_conflict, sftp_check_upload_conflict, sftp_create_dir, sftp_download,
-    sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file, sftp_session_check_download_conflict,
-    sftp_session_check_upload_conflict, sftp_session_close, sftp_session_create_dir,
-    sftp_session_list, sftp_session_open, sftp_session_remove_dir, sftp_session_remove_file,
-    sftp_upload, shell_close, shell_open, shell_read, shell_resize, shell_write, test_connection,
+    sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file,
+    sftp_session_check_download_conflict, sftp_session_check_upload_conflict, sftp_session_close,
+    sftp_session_create_dir, sftp_session_list, sftp_session_open, sftp_session_remove_dir,
+    sftp_session_remove_file, sftp_upload, shell_close, shell_open, shell_read, shell_resize,
+    shell_write, test_connection,
 };
 
 // ---------------------------------------------------------------------------
@@ -248,7 +251,6 @@ pub struct RemoteFileConflictRecord {
     pub target_size: u64,
     pub target_mtime: Option<u64>,
 }
-
 
 impl From<panda_core::FileConflictInfo> for RemoteFileConflictRecord {
     fn from(info: panda_core::FileConflictInfo) -> Self {

@@ -38,11 +38,7 @@ fn aggregate_returns_groups_for_selected_dirs() {
 
 #[test]
 fn aggregate_empty_input_returns_empty() {
-    let result = aggregate_task_groups_ffi(
-        vec![],
-        vec![],
-        BatchTransferDirectionEnum::Download,
-    );
+    let result = aggregate_task_groups_ffi(vec![], vec![], BatchTransferDirectionEnum::Download);
     assert_eq!(result.groups.len(), 0);
     assert_eq!(result.standalone_items.len(), 0);
 }

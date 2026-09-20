@@ -210,8 +210,17 @@ final class AppModel: ObservableObject {
         sidebarPage = .connectionMonitor
         #endif
     }
-    func showSettings() { sidebarPage = .settings }
+    func showSettings() {
+        #if os(iOS)
+        isPresentingSettings = true
+        #else
+        sidebarPage = .settings
+        #endif
+    }
     func showLogs() { sidebarPage = .logs }
+
+    /// iPad 全屏设置呈现状态。
+    @Published var isPresentingSettings = false
 
     // MARK: 主机
 

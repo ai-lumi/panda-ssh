@@ -182,6 +182,8 @@ struct MainWindowChrome: NSViewRepresentable {
         private let metrics: MacOSWorkspaceChromeMetrics
         private weak var observedWindow: NSWindow?
         private var observations: [NSObjectProtocol] = []
+        /// 已禁用内容视图的自动窗口拖动；空白区由 WindowDragView 手动 performDrag。
+        private var didDisableHostingViewDrag = false
 
         init(metrics: MacOSWorkspaceChromeMetrics) {
             self.metrics = metrics
@@ -195,6 +197,8 @@ struct MainWindowChrome: NSViewRepresentable {
             if observedWindow !== window {
                 observations.forEach(NotificationCenter.default.removeObserver)
                 observations = []
+                // 窗口切换时重置标记，确保新窗口也会禁用自动拖窗。
+                didDisableHostingViewDrag = false
             }
             defer { observedWindow = window }
             guard let window else { return }
@@ -244,6 +248,12 @@ struct MainWindowChrome: NSViewRepresentable {
             if policy.keepsStandardWindowButtonsVisible {
                 restoreStandardWindowButtons(in: window)
             }
+            // 禁用 NSHostingView 的自动窗口拖动，防止页签拖放时窗口跟随移动。
+            // 空白区拖窗由 WindowDragView 通过 window.performDrag(with:) 手动处理。
+            if !didDisableHostingViewDrag {
+                disableHostingViewWindowDrag(in: window)
+                didDisableHostingViewDrag = true
+            }
             metrics.update(window: window)
             DispatchQueue.main.async { [weak self, weak window] in
                 guard let self, let window, self.observedWindow === window else { return }
@@ -264,17 +274,74 @@ struct MainWindowChrome: NSViewRepresentable {
             }
         }
 
+        /// 查找窗口内容视图层级中的 NSHostingView 并禁用自动窗口拖动。
+        /// 页签按钮的 `.onDrag` 使用独立的拖拽会话，不受此属性影响。
+        private func disableHostingViewWindowDrag(in window: NSWindow) {
+            guard let contentView = window.contentView else { return }
+            // mouseDownCanMoveWindow 是只读属性，需通过 ObjC 运行时创建子类覆盖。
+            // 将内容视图的 isa 替换为返回 false 的子类，阻止 AppKit 自动窗口拖动。
+            // mouseDown 仍转发给子视图，确保 SwiftUI 手势（含 .onDrag）正常工作。
+            let subclass: AnyClass = NoWindowDragContentView.ensureSubclass(
+                basedOn: type(of: contentView)
+            )
+            object_setClass(contentView, subclass)
+        }
+
     }
 }
 
-/// 窗口拖拽区:透明视图,mouseDownCanMoveWindow = true。
-/// 顶部自绘区域的空白处用它保留拖拽窗口能力。
+/// 顶部自绘区域的空白拖窗区。
+/// 它自行处理鼠标按下：单击显式拖动窗口，双击执行标准缩放/还原。
+/// 不使用 mouseDownCanMoveWindow，避免事件被传给上层窗口后与页签拖放竞争。
 struct WindowDragView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { DragView() }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     final class DragView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
+        /// 测试注入点：非 nil 时替代窗口 performZoom 调用。
+        var performZoomAction: (() -> Void)?
+        /// 测试注入点：非 nil 时替代窗口的系统拖动调用。
+        var performWindowDragAction: ((NSEvent) -> Void)?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount >= 2, let window, window.standardWindowButton(.zoomButton) != nil {
+                performZoomAction?()
+                if performZoomAction == nil {
+                    window.performZoom(nil)
+                }
+                return
+            }
+            guard let window else { return }
+            if let performWindowDragAction {
+                performWindowDragAction(event)
+            } else {
+                window.performDrag(with: event)
+            }
+        }
+    }
+}
+
+/// 通过 ObjC 运行时动态创建的 NSView 子类，覆盖 `mouseDownCanMoveWindow` 返回 false。
+/// 用于将窗口内容视图的 isa 替换为该类，阻止 AppKit 在非空白区自动拖动窗口。
+/// 继承自内容视图的实际类（NSHostingView），保留所有既有方法。
+private enum NoWindowDragContentView {
+    private static var registeredSubclass: AnyClass?
+
+    static func ensureSubclass(basedOn superclass: AnyClass) -> AnyClass {
+        if let existing = registeredSubclass { return existing }
+        let name = "PandaNoWindowDragContentView"
+        guard let subclass = objc_allocateClassPair(superclass, name, 0) else {
+            return superclass
+        }
+        let block: @convention(block) (Any) -> Bool = { _ in false }
+        let imp = imp_implementationWithBlock(block)
+        let selector = #selector(getter: NSView.mouseDownCanMoveWindow)
+        class_addMethod(subclass, selector, imp, "B16@0:8")
+        objc_registerClassPair(subclass)
+        registeredSubclass = subclass
+        return subclass
     }
 }
 #endif

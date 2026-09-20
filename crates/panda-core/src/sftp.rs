@@ -140,18 +140,27 @@ impl SftpClient {
         let channel = match session.open_channel().await {
             Ok(channel) => channel,
             Err(error) => {
-                global_registry().fail_with_event(telemetry_id, crate::telemetry::LifecycleKind::TransportError);
+                global_registry().fail_with_event(
+                    telemetry_id,
+                    crate::telemetry::LifecycleKind::TransportError,
+                );
                 return Err(error);
             }
         };
         if let Err(error) = channel.request_subsystem(true, "sftp").await {
-            global_registry().fail_with_event(telemetry_id, crate::telemetry::LifecycleKind::TransportError);
+            global_registry().fail_with_event(
+                telemetry_id,
+                crate::telemetry::LifecycleKind::TransportError,
+            );
             return Err(error.into());
         }
         let sftp_session = match SftpSession::new(channel.into_stream()).await {
             Ok(session) => session,
             Err(error) => {
-                global_registry().fail_with_event(telemetry_id, crate::telemetry::LifecycleKind::TransportError);
+                global_registry().fail_with_event(
+                    telemetry_id,
+                    crate::telemetry::LifecycleKind::TransportError,
+                );
                 return Err(error.into());
             }
         };
@@ -190,11 +199,8 @@ impl SftpClient {
 
     /// List the entries of a remote directory.
     pub async fn list_dir(&self, path: &str) -> Result<Vec<RemoteFile>> {
-        let entries = self.observe(self
-            .session
-            .read_dir(path)
-            .await
-            .map_err(Into::into))?
+        let entries = self
+            .observe(self.session.read_dir(path).await.map_err(Into::into))?
             .map(|entry| {
                 let meta = entry.metadata();
                 RemoteFile {

@@ -206,12 +206,7 @@ struct WorkspaceView: View {
             case .connectionMonitor: ConnectionMonitorView()
             case .transfers: TransferPageView(store: transfers)
             case .snippets: SnippetsView()
-            case .settings:
-                #if os(iOS)
-                SettingsView()
-                #else
-                Color.clear
-                #endif
+            case .settings: Color.clear
             case .logs: LogView(logger: Logger.shared)
             case .hosts: Color.clear.allowsHitTesting(false)
             }

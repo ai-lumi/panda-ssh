@@ -39,6 +39,17 @@ final class TabStripViewportStateTests: XCTestCase {
         XCTAssertFalse(viewport.needsScroll)
     }
 
+    func test内容未溢出时保留页签后的空白拖窗宽度() {
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: 360,
+            viewportWidth: 600,
+            offset: 0
+        )
+
+        XCTAssertFalse(viewport.needsScroll)
+        XCTAssertEqual(viewport.trailingEmptyWidth, 240)
+    }
+
     func test大量页签的视口偏移和活动页签显露始终夹取() {
         let viewport = TabStripViewportState.resolve(
             contentWidth: 100_000,
@@ -211,5 +222,175 @@ final class TabStripViewportStateTests: XCTestCase {
         let target = viewport.scrollTarget(for: 258, among: frames) // 258 = 658 - 400
         XCTAssertEqual(target?.tabID, last)
         XCTAssertEqual(target?.anchorX ?? -1, 1.0, accuracy: 0.001)
+    }
+
+    // MARK: - 文档自然宽度与单向布局
+
+    func test文档自然宽度偏好键合并保留最新值() {
+        var result: [UUID: CGFloat] = NaturalDocumentWidthPreference.defaultValue
+        let first: [UUID: CGFloat] = [UUID(): 200]
+        let second: [UUID: CGFloat] = [UUID(): 350]
+        NaturalDocumentWidthPreference.reduce(value: &result, nextValue: { first })
+        NaturalDocumentWidthPreference.reduce(value: &result, nextValue: { second })
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.values.first, 350)
+    }
+
+    func test文档自然宽度偏好键默认值为空字典() {
+        XCTAssertTrue(NaturalDocumentWidthPreference.defaultValue.isEmpty)
+    }
+
+    func test未测量文档宽度回退容器宽度不产生零宽空白() {
+        // 首次布局尚未获得文档自然宽度时，视图应以容器宽度作为临时可视区，
+        // 避免把未测量当成真实零宽去预留整栏空白。
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: 0,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(viewport.needsScroll)
+        XCTAssertEqual(viewport.contentWidth, 0)
+        XCTAssertEqual(viewport.viewportWidth, 600)
+        XCTAssertEqual(viewport.trailingEmptyWidth, 600)
+        XCTAssertEqual(viewport.maximumOffset, 0)
+    }
+
+    func test溢出判定基于自然文档宽度与完整容器宽度() {
+        // 自然文档宽度 500 < 容器 600：不溢出
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: 500,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(viewport.needsScroll)
+        XCTAssertEqual(viewport.trailingEmptyWidth, 100)
+    }
+
+    func test溢出判定自然宽度超过容器时启用滚动() {
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: 700,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertTrue(viewport.needsScroll)
+        XCTAssertEqual(viewport.trailingEmptyWidth, 0)
+        XCTAssertEqual(viewport.maximumOffset, 100)
+    }
+
+    func test浏览按钮出现后可见宽度重新计算滚动边界() {
+        // 自然文档 700 > 容器 600，浏览按钮占用 56 (28×2)
+        // 可见宽度 = 600 - 56 = 544，最大偏移 = 700 - 544 = 156
+        let browseButtonTotal = 56.0
+        let visibleWidth = 600.0 - browseButtonTotal
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: 700,
+            viewportWidth: visibleWidth,
+            offset: 0
+        )
+        XCTAssertTrue(viewport.needsScroll)
+        XCTAssertEqual(viewport.maximumOffset, 156)
+    }
+
+    func test新增页签后自然宽度增加触发溢出() {
+        let single = TabStripViewportState.resolve(
+            contentWidth: 300,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(single.needsScroll)
+
+        let multiple = TabStripViewportState.resolve(
+            contentWidth: 650,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertTrue(multiple.needsScroll)
+    }
+
+    func test关闭页签后自然宽度减少退出溢出() {
+        let overflowing = TabStripViewportState.resolve(
+            contentWidth: 700,
+            viewportWidth: 600,
+            offset: 50
+        )
+        XCTAssertTrue(scrollNeeded(overflowing))
+
+        let afterClose = TabStripViewportState.resolve(
+            contentWidth: 500,
+            viewportWidth: 600,
+            offset: 50
+        )
+        XCTAssertFalse(afterClose.needsScroll)
+        XCTAssertEqual(afterClose.maximumOffset, 0)
+        XCTAssertEqual(afterClose.offset, 0)
+    }
+
+    func test新增关闭再新增不锁定宽度() {
+        let round1 = TabStripViewportState.resolve(
+            contentWidth: 400,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(round1.needsScroll)
+        XCTAssertEqual(round1.trailingEmptyWidth, 200)
+
+        let round2 = TabStripViewportState.resolve(
+            contentWidth: 200,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(round2.needsScroll)
+        XCTAssertEqual(round2.trailingEmptyWidth, 400)
+
+        let round3 = TabStripViewportState.resolve(
+            contentWidth: 500,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(round3.needsScroll)
+        XCTAssertEqual(round3.trailingEmptyWidth, 100)
+    }
+
+    func test容器宽度变化导致溢出状态翻转() {
+        let wide = TabStripViewportState.resolve(
+            contentWidth: 500,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertFalse(wide.needsScroll)
+
+        let narrow = TabStripViewportState.resolve(
+            contentWidth: 500,
+            viewportWidth: 400,
+            offset: 0
+        )
+        XCTAssertTrue(narrow.needsScroll)
+        XCTAssertEqual(narrow.maximumOffset, 100)
+    }
+
+    func test零容器宽度安全归一化不崩溃() {
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: 500,
+            viewportWidth: 0,
+            offset: 0
+        )
+        // 零宽容器不启用滚动（无可滚动区域），但 maximumOffset 保留内容宽度
+        XCTAssertFalse(viewport.needsScroll)
+        XCTAssertEqual(viewport.maximumOffset, 500)
+        XCTAssertEqual(viewport.offset, 0)
+    }
+
+    func test非有限文档宽度安全归一化() {
+        let viewport = TabStripViewportState.resolve(
+            contentWidth: .nan,
+            viewportWidth: 600,
+            offset: 0
+        )
+        XCTAssertEqual(viewport.contentWidth, 0)
+        XCTAssertFalse(viewport.needsScroll)
+    }
+
+    private func scrollNeeded(_ viewport: TabStripViewportState) -> Bool {
+        viewport.needsScroll
     }
 }

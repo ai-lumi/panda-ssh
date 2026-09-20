@@ -585,8 +585,14 @@ mod tests {
 
         let snapshot = registry.snapshot().pop().unwrap();
         assert_eq!(snapshot.transport_state, super::TransportState::Failed);
-        assert_eq!(snapshot.last_error.as_deref(), Some("Socket 读取失败：连接被重置"));
-        assert_eq!(registry.drain_events()[0].kind, super::LifecycleKind::ReadError);
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("Socket 读取失败：连接被重置")
+        );
+        assert_eq!(
+            registry.drain_events()[0].kind,
+            super::LifecycleKind::ReadError
+        );
     }
 
     #[test]
@@ -636,9 +642,14 @@ mod tests {
         let id = registry.register_connection("h".into(), address.into());
         registry.set_owner(id, "终端", "tab-direct-log");
 
-        assert!(crate::logger::global_logger().entries(100).iter().any(|entry| {
-            entry.module == "SSH" && entry.message.contains(address) && entry.message.contains("连接成功")
-        }));
+        assert!(crate::logger::global_logger()
+            .entries(100)
+            .iter()
+            .any(|entry| {
+                entry.module == "SSH"
+                    && entry.message.contains(address)
+                    && entry.message.contains("连接成功")
+            }));
     }
     use super::*;
 

@@ -34,6 +34,21 @@ struct HostListView: View {
         .sheet(item: $model.sidebarSheet) { kind in
             kind.sheetContent(model: model, workspace: workspace, toast: toast)
         }
+        .fullScreenCover(isPresented: $model.isPresentingSettings) {
+            NavigationStack {
+                SettingsView()
+                    .environmentObject(model)
+                    .environmentObject(workspace)
+                    .environmentObject(toast)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                model.isPresentingSettings = false
+                            }
+                        }
+                    }
+            }
+        }
         #endif
     }
 }

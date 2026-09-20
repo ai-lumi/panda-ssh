@@ -1,46 +1,36 @@
-# 保留断开会话的标签页上下文
-
 ## Why
 
-已建立的 SSH 或 SFTP 会话断开时，当前工作区会用包含「重试」与「关闭标签」的错误页替换原内容。SSH 错误页既丢失可见的终端上下文，也仅显示泛化摘要；SFTP 错误页会丢失目录浏览上下文。这使用户无法判断断开前发生了什么，必须依赖另行打开日志窗口排查。
-
-公开产品的交互提供了可复核的方向：MobaXterm 会把已断开的终端标签以红色显示，并可在会话结束后提示重连；Termius 的自动重连也复用原终端标签并保留此前终端进度。两者均把「会话已结束」作为原工作上下文中的状态，而不是切换至独立错误页面。
+SSH 已建立后断开时，工作区会以错误页替换终端视图，导致用户无法查看断开前的 shell 输出与滚动上下文。SSH 建连提示也另建内容页，令同一页签在生命周期中反复替换画布。SFTP 已建立后断开同样不应丢弃已有目录浏览上下文。
 
 ## What Changes
 
-- SSH 已进入 shell 后发生正常或异常结束时，保留终端画布与已缓存滚动历史；输入立即失效，并在终端末尾追加安全、结构化的结束原因和手动重新连接入口。标签状态图标显示红色。
-- SFTP 已进入可浏览状态后发生会话级断开时，保留当前本地/远程目录快照、路径和选中状态；不以错误页替换浏览器，标签状态图标显示红色。远程操作须明确告知会话已断开并提供手动重新连接入口。
-- 初次建连失败继续使用现有错误页；本地显式关闭标签继续移除标签，均不适用本提案的保留规则。
-- 复用 `fix-ssh-session-failure-diagnostics` 的安全结构化终态模型。所谓“原始原因”只表示保留可安全呈现的类别、阶段、退出码/信号类别或系统错误码；不得将任意远端文本、终端输出、命令、凭据或 panic 载荷直接回显。
-- 单个 SFTP 文件操作的权限、路径、冲突等业务错误不得误判为会话断开；只有已确认本标签 SFTP 会话或其底层 SSH Transport 不可再用时才标红。
+- SSH 页签在凭据与主机密钥门控通过后 SHALL 持续使用同一个终端画布；连接中、已连接、正常结束及异常断开均以该画布中的本地状态提示呈现，不再以独立状态页替换终端。
+- SSH 已建立后的正常结束或异常断开 SHALL 保留已接收的终端输出与滚动上下文，立即禁用输入与其它写入型终端操作，并追加安全的终态提示。
+- SFTP 已建立后的会话级断开 SHALL 保留本地/远程目录快照、路径和选中状态；依赖远程会话的操作不可用。
+- SSH 与 SFTP 的重新连接 SHALL 仅由现有页签操作触发；终端画布、SFTP 内容区、初次连接失败页和断连提示均 MUST NOT 提供重复的重新连接按钮。
+- 初次连接失败仍可显示可区分的失败摘要，但重连入口同样收敛到页签操作。
 
 ## Non-goals
 
-- 不实现自动重连、重放命令/传输或恢复远端 shell 状态。
+- 不实现自动重连、命令重放、传输重放或远端 shell 状态恢复。
 - 不改变连接所有权、标签关闭、后台传输、主机密钥或凭据语义。
-- 不承诺诊断能够提供任意远端程序的自由文本原因；安全边界优先于完整原始载荷。
-- 不在本提案阶段修改代码、合并主规格或执行真实服务器操作。
+- 不显示任意远端自由文本、终端输出、命令、凭据或 panic 载荷作为诊断原因。
+- 本提案不实施代码、不合并主规格，也不执行真实服务器操作。
 
 ## Capabilities
 
 ### New Capabilities
 
-无；扩展现有工作区、终端内容页和终端会话能力。
+无。
 
 ### Modified Capabilities
 
-- `workspace`：区分初次建连失败与已建立会话的后续断开，定义标签红色失败状态及 SFTP 快照保留语义。
-- `ssh-content-page`：已连接后断开时继续使用终端画布，而非居中错误页。
-- `shell-terminal`：将安全终态原因追加到保留的终端上下文，且保持输入不可用与手动重连。
+- `workspace`：定义已建立会话断开后的页签状态、内容保留与页签唯一重连入口。
+- `ssh-content-page`：SSH 连接中与已建立后终态均复用持续存在的终端画布。
+- `shell-terminal`：终态后的输出保留、输入禁用、安全提示及页签重连语义。
 
 ## Impact
 
-- SwiftUI：`TerminalTabView`、`TerminalSessionStore`、`SftpTabView`、`SftpSessionStore` 和工作区标签状态映射需要调整；不得在 Swift 重复诊断分类业务逻辑。
-- Rust / FFI：优先复用既有结构化 shell 终态；若 SFTP 无法区分会话级失效与单次业务错误，才以最小 FFI 契约补足该区分，保持同步导出及既有全局 Tokio runtime。
-- 测试：先写 Swift XCTest / Rust fake 的失败用例，覆盖正常、意外与边界场景；既有 `fix-ssh-session-failure-diagnostics` 未完成时，本提案依赖其安全原因模型而不复制其错误分类。
-
-## References
-
-- MobaXterm release notes: terminal disconnection tracking marks inactive disconnected terminal-tab titles red; session settings include an end-of-session reconnection message. <https://mobaxterm.mobatek.net/download-home-edition.html>
-- MobaXterm documentation: “Display reconnection message at session end”. <https://mobaxterm.mobatek.net/documentation.html>
-- Termius: auto-reconnect keeps prior progress in the same terminal tab. <https://termius.com/blog/stay-connected-with-auto-reconnect>
+- SwiftUI：`TerminalTabView`、`TerminalSessionStore`、`SftpTabView`、`SftpSessionStore`、页签操作和状态映射需要调整，macOS 与 iPadOS 共享同一业务行为。
+- Rust / FFI：优先复用既有结构化 shell 终态；仅在 SFTP 无法可靠区分会话级失效时以最小 FFI 契约补足区分，保持同步导出及既有全局 Tokio runtime。
+- 测试：先写 Swift XCTest / Rust fake 的失败用例，覆盖正常、意外与边界场景；不得在 Swift 通过错误字符串猜测断开原因。

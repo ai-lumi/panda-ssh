@@ -288,10 +288,15 @@ pub fn sidebar_tree(
     let group_ids: HashSet<&str> = groups.iter().map(|g| g.id.as_str()).collect();
 
     // 按分组 id 收集主机
-    let mut hosts_by_group: std::collections::BTreeMap<Option<&str>, Vec<&crate::config::HostConfig>> =
-        std::collections::BTreeMap::new();
+    let mut hosts_by_group: std::collections::BTreeMap<
+        Option<&str>,
+        Vec<&crate::config::HostConfig>,
+    > = std::collections::BTreeMap::new();
     for host in hosts {
-        let key = host.group_id.as_deref().filter(|gid| group_ids.contains(gid));
+        let key = host
+            .group_id
+            .as_deref()
+            .filter(|gid| group_ids.contains(gid));
         hosts_by_group.entry(key).or_default().push(host);
     }
 
@@ -333,7 +338,11 @@ pub fn sidebar_tree(
             name: group.name.clone(),
             host: None,
             group: Some(group.clone()),
-            children: if children.is_empty() { None } else { Some(children) },
+            children: if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            },
         }
     }
 
@@ -773,10 +782,7 @@ type = "password"
     #[test]
     fn group_path_cycle_defense() {
         // 脏数据环:a → b → a
-        let groups = vec![
-            group("a", "A", Some("b")),
-            group("b", "B", Some("a")),
-        ];
+        let groups = vec![group("a", "A", Some("b")), group("b", "B", Some("a"))];
         // 不应无限循环,结果应包含两个名称
         let path = group_path(&groups, "b");
         assert!(path.contains("A"));
@@ -804,10 +810,7 @@ type = "password"
 
     #[test]
     fn sidebar_tree_standard_with_groups_and_hosts() {
-        let groups = vec![
-            group("g1", "生产", None),
-            group("g2", "华东", Some("g1")),
-        ];
+        let groups = vec![group("g1", "生产", None), group("g2", "华东", Some("g1"))];
         let hosts = vec![
             sidebar_host("h1", "web", Some("g2")),
             sidebar_host("h2", "db", Some("g1")),

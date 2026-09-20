@@ -9,14 +9,14 @@ pub mod delete_tasks;
 pub mod groups;
 pub mod hostkey;
 pub mod logger;
+pub mod preconnect;
 pub mod sftp;
 pub mod sftp_path;
 pub mod snippets;
 pub mod ssh;
+pub mod task_aggregation;
 pub mod telemetry;
 pub mod transfer_speed;
-pub mod task_aggregation;
-pub mod preconnect;
 pub mod workspace;
 
 pub use batch::{
@@ -24,28 +24,38 @@ pub use batch::{
     BatchConflictCallback, BatchItem, BatchOutcome, BatchPlan, BatchProgressCallback,
     BatchTransferOptions, ConflictResolution, ScanOptions,
 };
-pub use config::{AuthMethod, ConfigStore, HostConfig, TomlConfigStore, search_hosts};
-pub use credentials::{CredentialStore, ResolvedCredential, credential_resolve};
+pub use config::{
+    default_terminal_buffer_lines, search_hosts, validate_terminal_buffer_lines, AuthMethod,
+    ConfigStore, HostConfig, TerminalBufferError, TomlConfigStore, DEFAULT_TERMINAL_BUFFER_LINES,
+    MAX_TERMINAL_BUFFER_LINES, MIN_TERMINAL_BUFFER_LINES,
+};
+pub use credentials::{
+    credential_resolve, validate_protection_input, CredentialStore, ProtectionAction,
+    ProtectionInputError, ProtectionStatus, ResolvedCredential,
+};
 pub use groups::{
-    delete_group_cascade, descendant_ids, group_path, move_group, sidebar_tree, Group,
-    GroupStore, SidebarNodeRecord, TomlGroupStore, MAX_GROUP_DEPTH,
+    delete_group_cascade, descendant_ids, group_path, move_group, sidebar_tree, Group, GroupStore,
+    SidebarNodeRecord, TomlGroupStore, MAX_GROUP_DEPTH,
 };
 pub use hostkey::{fingerprint_sha256, HostKeyStatus, KnownHostStatus, KnownHosts};
+pub use preconnect::{preconnect_evaluate, PreconnectAction, PresentedKey};
 pub use sftp::{FileConflictInfo, RemoteFile, SftpClient};
 pub use snippets::{Snippet, SnippetStore};
-pub use ssh::{Credentials, ExecOutput, FailureCategory, ShellSession, SshSession, UnknownHostKeyPolicy, connection_failure_classify};
-pub use transfer_speed::TransferSpeedTracker;
+pub use ssh::{
+    connection_failure_classify, Credentials, ExecOutput, FailureCategory, ShellSession,
+    SshSession, UnknownHostKeyPolicy,
+};
 pub use task_aggregation::{
-    AggregationResult, TaskGroup, TaskItem, TaskStatus, TransferDirection,
-    aggregate_task_groups, group_cancel_plan, group_retry_plan,
+    aggregate_task_groups, group_cancel_plan, group_retry_plan, AggregationResult, TaskGroup,
+    TaskItem, TaskStatus, TransferDirection,
 };
+pub use transfer_speed::TransferSpeedTracker;
 pub use workspace::{
-    CloseConfirmation, ConnectionStatus, ShellExitClassification, TabKind, TerminalFailureCategory,
-    TerminalPhase, TerminalSessionState, WorkspaceTab, aggregate_connection_status,
-    classify_shell_exit, compute_disambiguated_titles, is_stale, next_active_tab_after_close,
-    transition_to_connecting, transition_to_failed, transition_to_shell,
+    aggregate_connection_status, classify_shell_exit, compute_disambiguated_titles, is_stale,
+    next_active_tab_after_close, transition_to_connecting, transition_to_failed,
+    transition_to_shell, CloseConfirmation, ConnectionStatus, ShellExitClassification, TabKind,
+    TerminalFailureCategory, TerminalPhase, TerminalSessionState, WorkspaceTab,
 };
-pub use preconnect::{PreconnectAction, PresentedKey, preconnect_evaluate};
 
 /// Unified error type for the core crate.
 #[derive(Debug, thiserror::Error)]

@@ -29,6 +29,12 @@ struct TabStripViewportState: Equatable {
         viewportWidth > 0 && maximumOffset > 0.5
     }
 
+    /// 内容未溢出时，页签文档末尾可交给窗口 chrome 的显式空白宽度。
+    /// 溢出时由滚动容器占满视口，返回零，外层独立拖窗区仍可用。
+    var trailingEmptyWidth: Double {
+        needsScroll ? 0 : max(0, viewportWidth - contentWidth)
+    }
+
     static func resolve(
         contentWidth: Double,
         viewportWidth: Double,

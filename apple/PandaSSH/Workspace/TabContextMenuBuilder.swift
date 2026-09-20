@@ -46,34 +46,10 @@ enum TabMenuItem: Equatable {
         }
     }
 
-    /// 快捷键字符。
-    var keyEquivalent: String {
-        switch self {
-        case .reconnect: return "r"
-        case .closeTab: return "w"
-        case .closeOthers: return "w"
-        case .closeAll: return "w"
-        case .newGroup, .moveToGroup, .ungroup, .deleteGroup: return ""
-        }
-    }
+    /// 快捷键字符。右键上下文菜单不使用快捷键，统一返回空字符串。
+    var keyEquivalent: String { "" }
 
 }
-
-#if os(macOS)
-extension TabMenuItem {
-    /// macOS NSMenu 的快捷键修饰键。iPadOS 长按菜单不展示快捷键，
-    /// 因此不得让 AppKit 类型泄漏到共享业务菜单模型。
-    var keyModifiers: NSEvent.ModifierFlags {
-        switch self {
-        case .reconnect: return .command
-        case .closeTab: return .command
-        case .closeOthers: return [.command, .option]
-        case .closeAll: return [.command, .option, .shift]
-        case .newGroup, .moveToGroup, .ungroup, .deleteGroup: return []
-        }
-    }
-}
-#endif
 
 /// 页签右键菜单纯值构建器。
 ///
@@ -152,7 +128,6 @@ extension TabContextMenuBuilder {
                     action: action,
                     keyEquivalent: item.keyEquivalent
                 )
-                menuItem.keyEquivalentModifierMask = item.keyModifiers
                 menuItem.target = target
                 menuItem.representedObject = TabMenuPayload(tabID: tabID, item: item)
                 if let image = NSImage(
@@ -247,7 +222,7 @@ final class TabMenuActionHandler: NSObject {
         case .closeAll:
             workspace?.requestCloseAll()
         case .newGroup:
-            workspace?.createGroup(forTabID: payload.tabID)
+            _ = workspace?.createGroup(forTabID: payload.tabID)
         case .moveToGroup(let groupID, _):
             workspace?.moveTab(payload.tabID, toGroup: groupID)
         case .ungroup:

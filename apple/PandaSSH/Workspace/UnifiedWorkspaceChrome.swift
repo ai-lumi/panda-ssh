@@ -108,13 +108,15 @@ struct UnifiedWorkspaceChrome: View {
 }
 
 #if os(macOS)
-private extension View {
+extension View {
     func macOSWindowDragRegion() -> some View {
-        background(WindowDragView())
+        // 拖窗视图必须位于透明占位视图的命中测试前景。放在 background
+        // 时，SwiftUI 的前景宿主可能先命中，导致 DragView 收不到鼠标按下。
+        overlay(WindowDragView())
     }
 }
 #else
-private extension View {
+extension View {
     func macOSWindowDragRegion() -> some View { self }
 }
 #endif

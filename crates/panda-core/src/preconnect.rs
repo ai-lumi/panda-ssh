@@ -134,9 +134,7 @@ mod tests {
     #[test]
     fn unknown_host_with_missing_credentials_still_returns_confirm_tofu() {
         // 密钥状态优先于凭据状态：即使凭据缺失，未知主机也应先弹 TOFU 确认
-        let host = make_host_config(AuthMethod::Password {
-            password_ref: None,
-        });
+        let host = make_host_config(AuthMethod::Password { password_ref: None });
         let key_status = KnownHostStatus::Unknown;
         let cred_status = ResolvedCredential::NeedsPassword;
 
@@ -146,9 +144,7 @@ mod tests {
 
     #[test]
     fn known_host_needs_password_returns_ask_password() {
-        let host = make_host_config(AuthMethod::Password {
-            password_ref: None,
-        });
+        let host = make_host_config(AuthMethod::Password { password_ref: None });
         let key_status = KnownHostStatus::Known {
             fingerprint: "SHA256:abc:123".into(),
             key_type: "ssh-ed25519".into(),

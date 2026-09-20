@@ -90,13 +90,58 @@ pub(crate) fn credentials_for(
 pub fn init_store(config_dir: String) -> Result<(), PandaError> {
     let dir = PathBuf::from(config_dir);
     std::fs::create_dir_all(&dir)?;
-    *STORES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Stores {
+    fix_permissions(&dir)?;
+    *STORES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Stores {
         config: TomlConfigStore::new(dir.join("hosts.toml")),
         groups: TomlGroupStore::new(dir.join("groups.toml")),
         known_hosts: KnownHosts::new(dir.join("known_hosts")),
         credentials: CredentialStore::new(dir.join("credentials.toml")),
     }));
     panda_core::logger::configure_global_file_path(dir.join("logs").join("panda-ssh.log"))?;
+    Ok(())
+}
+
+/// Unix 平台：将 Panda SSH 专属配置目录收紧为 `0700`，
+/// 并将已存在的 `credentials.toml` 收紧为 `0600`。
+#[cfg(unix)]
+fn fix_permissions(dir: &std::path::Path) -> Result<(), PandaError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if should_restrict_config_directory_permissions() {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let cred_path = dir.join("credentials.toml");
+    match std::fs::symlink_metadata(&cred_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::set_permissions(&cred_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(_) => {
+            return Err(PandaError::Core("credentials.toml 必须是常规文件".into()));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    // 旧版本使用固定临时文件名；仅对常规遗留文件收紧权限，绝不跟随链接。
+    let legacy_tmp = dir.join("credentials.tmp");
+    match std::fs::symlink_metadata(&legacy_tmp) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::set_permissions(&legacy_tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(_) | Err(_) => {}
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn should_restrict_config_directory_permissions() -> bool {
+    !cfg!(target_os = "ios")
+}
+
+#[cfg(not(unix))]
+fn fix_permissions(_dir: &std::path::Path) -> Result<(), PandaError> {
     Ok(())
 }
 
@@ -197,6 +242,136 @@ pub fn credential_protection_enabled() -> Result<bool, PandaError> {
     Ok(stores()?.credentials.is_protected()?)
 }
 
+/// 凭据保护的可信状态（FFI 友好枚举）。
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ProtectionStatusEnum {
+    /// 凭据文件为明文格式或不存在。
+    Unprotected,
+    /// 凭据文件已加密，当前进程尚未解锁。
+    ProtectedLocked,
+    /// 凭据文件已加密且当前进程已解锁。
+    ProtectedUnlocked,
+}
+
+/// 查询凭据保护的可信状态。
+#[uniffi::export]
+pub fn credential_protection_status() -> Result<ProtectionStatusEnum, PandaError> {
+    Ok(match stores()?.credentials.protection_status()? {
+        panda_core::ProtectionStatus::Unprotected => ProtectionStatusEnum::Unprotected,
+        panda_core::ProtectionStatus::ProtectedLocked => ProtectionStatusEnum::ProtectedLocked,
+        panda_core::ProtectionStatus::ProtectedUnlocked => ProtectionStatusEnum::ProtectedUnlocked,
+    })
+}
+
+/// 只解锁：验证候选密钥但不改写凭据文件。
+#[uniffi::export]
+pub fn credential_unlock_only(candidate_key: String) -> Result<ProtectionStatusEnum, PandaError> {
+    Ok(match stores()?.credentials.unlock_only(&candidate_key)? {
+        panda_core::ProtectionStatus::Unprotected => ProtectionStatusEnum::Unprotected,
+        panda_core::ProtectionStatus::ProtectedLocked => ProtectionStatusEnum::ProtectedLocked,
+        panda_core::ProtectionStatus::ProtectedUnlocked => ProtectionStatusEnum::ProtectedUnlocked,
+    })
+}
+
+/// 保护动作输入验证结果（FFI 友好枚举）。
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ProtectionActionEnum {
+    /// 启用保护。
+    Enable,
+    /// 更换密钥。
+    ChangeKey,
+    /// 移除保护。
+    Remove,
+}
+
+/// 保护动作输入验证错误（FFI 友好枚举）。
+#[derive(Debug, Clone, uniffi::Error)]
+pub enum ProtectionInputErrorEnum {
+    /// 新密码与确认密码不一致。
+    ConfirmMismatch,
+    /// 更换或移除操作需要提供当前密码。
+    CurrentKeyRequired,
+    /// 凭据未受保护且未提供新密钥。
+    AlreadyUnprotected,
+}
+
+impl std::fmt::Display for ProtectionInputErrorEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConfirmMismatch => write!(f, "新密码与确认密码不一致"),
+            Self::CurrentKeyRequired => write!(f, "需要提供当前密码"),
+            Self::AlreadyUnprotected => write!(f, "凭据未受保护"),
+        }
+    }
+}
+
+/// 验证保护动作的输入参数。
+#[uniffi::export]
+pub fn validate_credential_protection_input(
+    current_key: Option<String>,
+    new_key: Option<String>,
+    confirm_key: Option<String>,
+    is_protected: bool,
+) -> Result<ProtectionActionEnum, ProtectionInputErrorEnum> {
+    panda_core::validate_protection_input(
+        current_key.as_deref(),
+        new_key.as_deref(),
+        confirm_key.as_deref(),
+        is_protected,
+    )
+    .map(|action| match action {
+        panda_core::ProtectionAction::Enable => ProtectionActionEnum::Enable,
+        panda_core::ProtectionAction::ChangeKey => ProtectionActionEnum::ChangeKey,
+        panda_core::ProtectionAction::Remove => ProtectionActionEnum::Remove,
+    })
+    .map_err(|error| match error {
+        panda_core::ProtectionInputError::ConfirmMismatch => {
+            ProtectionInputErrorEnum::ConfirmMismatch
+        }
+        panda_core::ProtectionInputError::CurrentKeyRequired => {
+            ProtectionInputErrorEnum::CurrentKeyRequired
+        }
+        panda_core::ProtectionInputError::AlreadyUnprotected => {
+            ProtectionInputErrorEnum::AlreadyUnprotected
+        }
+    })
+}
+
+/// 返回终端缓冲区行数的默认值。
+#[uniffi::export]
+pub fn default_terminal_buffer_lines() -> u32 {
+    panda_core::default_terminal_buffer_lines()
+}
+
+/// 终端缓冲区行数校验错误（FFI 友好枚举）。
+#[derive(Debug, Clone, uniffi::Error)]
+pub enum TerminalBufferErrorEnum {
+    /// 输入不是有效整数。
+    NotANumber,
+    /// 输入超出允许范围。
+    OutOfRange,
+}
+
+impl std::fmt::Display for TerminalBufferErrorEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotANumber => write!(f, "输入不是有效整数"),
+            Self::OutOfRange => write!(f, "输入超出允许范围 1000–100000"),
+        }
+    }
+}
+
+/// 校验并规范化终端缓冲区行数的原始文本输入。
+#[uniffi::export]
+pub fn validate_terminal_buffer_lines(
+    raw: String,
+) -> Result<u32, TerminalBufferErrorEnum> {
+    panda_core::validate_terminal_buffer_lines(&raw).map_err(|error| match error {
+        panda_core::TerminalBufferError::NotANumber => TerminalBufferErrorEnum::NotANumber,
+        panda_core::TerminalBufferError::OutOfRange => TerminalBufferErrorEnum::OutOfRange,
+    })
+}
+
 /// 凭据解析结果（FFI 友好枚举）。
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum ResolvedCredentialEnum {
@@ -215,14 +390,22 @@ pub enum ResolvedCredentialEnum {
 #[uniffi::export]
 pub fn credential_resolve(host_id: String) -> Result<ResolvedCredentialEnum, PandaError> {
     let s = stores()?;
-    let host = s.config.get(&host_id)?
+    let host = s
+        .config
+        .get(&host_id)?
         .ok_or_else(|| PandaError::Core(format!("host not found: {host_id}")))?;
     match panda_core::credential_resolve(&s.credentials, &host)? {
-        panda_core::ResolvedCredential::Available { password, passphrase } => {
-            Ok(ResolvedCredentialEnum::Available { password, passphrase })
-        }
+        panda_core::ResolvedCredential::Available {
+            password,
+            passphrase,
+        } => Ok(ResolvedCredentialEnum::Available {
+            password,
+            passphrase,
+        }),
         panda_core::ResolvedCredential::NeedsPassword => Ok(ResolvedCredentialEnum::NeedsPassword),
-        panda_core::ResolvedCredential::NeedsPassphrase => Ok(ResolvedCredentialEnum::NeedsPassphrase),
+        panda_core::ResolvedCredential::NeedsPassphrase => {
+            Ok(ResolvedCredentialEnum::NeedsPassphrase)
+        }
     }
 }
 
@@ -303,7 +486,9 @@ fn map_preconnect_action(action: panda_core::PreconnectAction) -> PreconnectActi
 #[uniffi::export]
 pub fn preconnect_evaluate(host_id: String) -> Result<PreconnectActionEnum, PandaError> {
     let s = stores()?;
-    let host = s.config.get(&host_id)?
+    let host = s
+        .config
+        .get(&host_id)?
         .ok_or_else(|| PandaError::Core(format!("host not found: {host_id}")))?;
 
     // 检查主机密钥状态
@@ -385,7 +570,9 @@ fn convert_sidebar_node(node: panda_core::SidebarNodeRecord) -> SidebarNodeFFIRe
         name: node.name,
         host: node.host.map(HostConfigRecord::from),
         group: node.group.map(GroupRecord::from),
-        children: node.children.map(|cs| cs.into_iter().map(convert_sidebar_node).collect()),
+        children: node
+            .children
+            .map(|cs| cs.into_iter().map(convert_sidebar_node).collect()),
     }
 }
 
@@ -552,6 +739,7 @@ pub(crate) mod tests {
     use crate::test_support::global_test_lock;
     use crate::test_support::GlobalTestGuard;
     use crate::AuthMethodEnum;
+    use std::io::Write;
 
     /// 合法 `<keytype> <base64>` 格式的测试公钥；指纹计算只解码不校验密钥内容。
     const TEST_KEY: &str =
@@ -643,7 +831,10 @@ pub(crate) mod tests {
         save_host(password_host("with-pw", "带密码", "a.example.com")).unwrap();
         save_credential("host.with-pw.password".into(), "secret".into()).unwrap();
         match credential_resolve("with-pw".into()).unwrap() {
-            ResolvedCredentialEnum::Available { password, passphrase } => {
+            ResolvedCredentialEnum::Available {
+                password,
+                passphrase,
+            } => {
                 assert_eq!(password.as_deref(), Some("secret"));
                 assert_eq!(passphrase, None);
             }
@@ -658,7 +849,12 @@ pub(crate) mod tests {
         ));
 
         // 公钥认证带加密私钥但口令未保存 → NeedsPassphrase
-        save_host(key_host("locked-key", "加密私钥", Some("host.locked-key.passphrase".into()))).unwrap();
+        save_host(key_host(
+            "locked-key",
+            "加密私钥",
+            Some("host.locked-key.passphrase".into()),
+        ))
+        .unwrap();
         assert!(matches!(
             credential_resolve("locked-key".into()).unwrap(),
             ResolvedCredentialEnum::NeedsPassphrase
@@ -667,7 +863,10 @@ pub(crate) mod tests {
         // 公钥认证无加密私钥 → Available(None, None)
         save_host(key_host("plain-key", "明文私钥", None)).unwrap();
         match credential_resolve("plain-key".into()).unwrap() {
-            ResolvedCredentialEnum::Available { password, passphrase } => {
+            ResolvedCredentialEnum::Available {
+                password,
+                passphrase,
+            } => {
                 assert_eq!(password, None);
                 assert_eq!(passphrase, None);
             }
@@ -689,15 +888,23 @@ pub(crate) mod tests {
 
         accept_unknown_host_key("tofu.example.com".into(), 22, TEST_KEY.into()).unwrap();
         match host_key_status("tofu.example.com".into(), 22).unwrap() {
-            KnownHostStatusEnum::Known { fingerprint, key_type } => {
-                assert!(fingerprint.starts_with("SHA256:"), "指纹应为 SHA256 冒号格式");
+            KnownHostStatusEnum::Known {
+                fingerprint,
+                key_type,
+            } => {
+                assert!(
+                    fingerprint.starts_with("SHA256:"),
+                    "指纹应为 SHA256 冒号格式"
+                );
                 assert_eq!(key_type, "ssh-ed25519");
             }
             other => panic!("期望 Known，实际 {other:?}"),
         }
 
         // 格式非法的密钥被拒绝
-        assert!(accept_unknown_host_key("tofu.example.com".into(), 22, "not-a-key".into()).is_err());
+        assert!(
+            accept_unknown_host_key("tofu.example.com".into(), 22, "not-a-key".into()).is_err()
+        );
     }
 
     #[test]
@@ -728,7 +935,12 @@ pub(crate) mod tests {
         ));
 
         // 密钥已知 + 加密私钥无口令 → AskPassphrase
-        save_host(key_host("ask-pp", "要口令", Some("host.ask-pp.passphrase".into()))).unwrap();
+        save_host(key_host(
+            "ask-pp",
+            "要口令",
+            Some("host.ask-pp.passphrase".into()),
+        ))
+        .unwrap();
         accept_unknown_host_key("ask-pp.example.com".into(), 22, TEST_KEY.into()).unwrap();
         assert!(matches!(
             preconnect_evaluate("ask-pp".into()).unwrap(),
@@ -785,14 +997,18 @@ pub(crate) mod tests {
         set_credential_protection_key(None, Some("key1".into())).unwrap();
         assert!(credential_protection_enabled().unwrap());
         assert_eq!(
-            read_credential("host.protected.password".into()).unwrap().as_deref(),
+            read_credential("host.protected.password".into())
+                .unwrap()
+                .as_deref(),
             Some("secret")
         );
 
         // 旧密钥解锁后以新密钥重写
         set_credential_protection_key(Some("key1".into()), Some("key2".into())).unwrap();
         assert_eq!(
-            read_credential("host.protected.password".into()).unwrap().as_deref(),
+            read_credential("host.protected.password".into())
+                .unwrap()
+                .as_deref(),
             Some("secret")
         );
 
@@ -800,7 +1016,9 @@ pub(crate) mod tests {
         set_credential_protection_key(Some("key2".into()), None).unwrap();
         assert!(!credential_protection_enabled().unwrap());
         assert_eq!(
-            read_credential("host.protected.password".into()).unwrap().as_deref(),
+            read_credential("host.protected.password".into())
+                .unwrap()
+                .as_deref(),
             Some("secret")
         );
     }
@@ -895,7 +1113,10 @@ pub(crate) mod tests {
         let archive_path = archive_dir.path().join("backup.zip");
 
         let manifest = config_export(archive_path.to_string_lossy().into_owned()).unwrap();
-        assert!(manifest.file_count >= 2, "至少导出 hosts.toml 与 groups.toml");
+        assert!(
+            manifest.file_count >= 2,
+            "至少导出 hosts.toml 与 groups.toml"
+        );
         assert_eq!(manifest.version, 1);
 
         // 切换到全新空目录后导入（复用已持有的锁，验证 init_store 可重新初始化）
@@ -911,6 +1132,45 @@ pub(crate) mod tests {
         let hosts = list_hosts().unwrap();
         assert_eq!(hosts.len(), 2);
         assert!(hosts.iter().any(|h| h.name == "主机一"));
+        drop(lock);
+    }
+
+    /// 2.3 FFI 回归测试：恶意归档通过 FFI 返回 PandaError::Core 错误。
+    #[test]
+    fn config_import_rejects_unsafe_archive_via_ffi() {
+        let (lock, _dir) = init_test_store();
+
+        // 构建含路径逃逸条目的恶意归档
+        let archive_dir = tempfile::tempdir().unwrap();
+        let zip_path = archive_dir.path().join("evil.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("manifest.json", options).unwrap();
+            zip.write_all(
+                b"{\"version\": 1, \"timestamp\": \"\", \"device_name\": \"\", \"file_count\": 2}",
+            )
+            .unwrap();
+            zip.start_file("hosts.toml", options).unwrap();
+            zip.write_all(b"").unwrap();
+            zip.start_file("groups.toml", options).unwrap();
+            zip.write_all(b"").unwrap();
+            zip.start_file("../攻击者控制的名称\\n伪造提示", options)
+                .unwrap();
+            zip.write_all(b"pwned").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let err = config_import(zip_path.to_string_lossy().into_owned()).unwrap_err();
+        assert!(
+            matches!(err, PandaError::Core(ref msg) if msg == "unsafe archive entry"),
+            "FFI 应透传 core 安全错误，实际：{err:?}"
+        );
+
+        // 失败导入后 store 仍可正常操作（不污染后续合法导入）
+        let hosts = list_hosts().unwrap();
+        assert!(hosts.is_empty(), "失败导入不应产生主机");
         drop(lock);
     }
 
@@ -941,10 +1201,240 @@ pub(crate) mod tests {
 
         delete_host("victim".into()).unwrap();
         assert!(list_hosts().unwrap().iter().all(|h| h.id != "victim"));
-        assert_eq!(read_credential("host.victim.password".into()).unwrap(), None);
-        assert_eq!(read_credential("host.victim.passphrase".into()).unwrap(), None);
+        assert_eq!(
+            read_credential("host.victim.password".into()).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_credential("host.victim.passphrase".into()).unwrap(),
+            None
+        );
 
         // 未知 id 也为可删除的 no-op（config.delete 对不存在条目不报错）
         delete_host("ghost".into()).unwrap();
+    }
+
+    // --- Unix 文件权限测试 ---
+
+    #[cfg(unix)]
+    fn dir_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn file_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_init_store_creates_directory_with_restricted_permissions() {
+        let lock = global_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("panda-config");
+        // 目录尚不存在
+        assert!(!config_dir.exists());
+
+        init_store(config_dir.to_string_lossy().into_owned()).unwrap();
+
+        assert!(config_dir.exists());
+        assert_eq!(
+            dir_mode(&config_dir),
+            0o700,
+            "init_store 创建的专属配置目录权限应为 0700"
+        );
+        drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_init_store_tightens_existing_loose_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let lock = global_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("panda-config");
+        // 预置宽松权限的配置目录
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(dir_mode(&config_dir), 0o755);
+
+        init_store(config_dir.to_string_lossy().into_owned()).unwrap();
+
+        assert_eq!(
+            dir_mode(&config_dir),
+            0o700,
+            "init_store 应将既有宽松目录收紧为 0700"
+        );
+        drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_init_store_fixes_existing_loose_credential_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let lock = global_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("panda-config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let cred_path = config_dir.join("credentials.toml");
+        // 预置宽松权限的凭据文件
+        std::fs::write(
+            &cred_path,
+            "version = 1\n[entries]\n\"host.a.password\" = \"legacy\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cred_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(file_mode(&cred_path), 0o644);
+
+        init_store(config_dir.to_string_lossy().into_owned()).unwrap();
+
+        assert_eq!(
+            file_mode(&cred_path),
+            0o600,
+            "init_store 应将既有宽松凭据文件收紧为 0600"
+        );
+        // 内容不变
+        let text = std::fs::read_to_string(&cred_path).unwrap();
+        assert!(text.contains("legacy"));
+        drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_init_store_succeeds_without_credential_file() {
+        let lock = global_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("panda-config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        // 不存在 credentials.toml — 边界情况，不应报错
+        assert!(!config_dir.join("credentials.toml").exists());
+
+        init_store(config_dir.to_string_lossy().into_owned()).unwrap();
+
+        assert_eq!(dir_mode(&config_dir), 0o700);
+        drop(lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_directory_permission_policy_matches_platform_container_ownership() {
+        assert_eq!(
+            should_restrict_config_directory_permissions(),
+            !cfg!(target_os = "ios")
+        );
+    }
+
+    // --- 保护状态与只解锁 FFI 测试 ---
+
+    #[test]
+    fn protection_status_unprotected_by_default() {
+        let (_lock, _dir) = init_test_store();
+        assert!(matches!(
+            credential_protection_status().unwrap(),
+            ProtectionStatusEnum::Unprotected
+        ));
+    }
+
+    #[test]
+    fn protection_status_locked_after_restart_and_unlock_with_correct_key() {
+        let (_lock, _dir) = init_test_store();
+        save_credential("host.test.password".into(), "secret".into()).unwrap();
+        set_credential_protection_key(None, Some("protect".into())).unwrap();
+
+        // 重新初始化模拟重启
+        init_store(_dir.path().to_string_lossy().into_owned()).unwrap();
+        assert!(matches!(
+            credential_protection_status().unwrap(),
+            ProtectionStatusEnum::ProtectedLocked
+        ));
+
+        // 错误密钥不解锁
+        let status = credential_unlock_only("wrong".into()).unwrap();
+        assert!(matches!(status, ProtectionStatusEnum::ProtectedLocked));
+
+        // 正确密钥解锁
+        let status = credential_unlock_only("protect".into()).unwrap();
+        assert!(matches!(status, ProtectionStatusEnum::ProtectedUnlocked));
+
+        // 解锁后可读取
+        assert_eq!(
+            read_credential("host.test.password".into()).unwrap().as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn protection_status_does_not_mask_corrupted_file() {
+        let (lock, dir) = init_test_store();
+        let cred_path = dir.path().join("credentials.toml");
+        std::fs::write(&cred_path, "[broken").unwrap();
+        drop(lock);
+
+        assert!(credential_protection_status().is_err());
+    }
+
+    #[test]
+    fn validate_protection_input_enable_change_remove_via_ffi() {
+        // 启用
+        let action = validate_credential_protection_input(
+            None,
+            Some("new".into()),
+            Some("new".into()),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(action, ProtectionActionEnum::Enable));
+
+        // 不一致
+        let err = validate_credential_protection_input(
+            None,
+            Some("a".into()),
+            Some("b".into()),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProtectionInputErrorEnum::ConfirmMismatch));
+
+        // 更换
+        let action = validate_credential_protection_input(
+            Some("old".into()),
+            Some("new".into()),
+            Some("new".into()),
+            true,
+        )
+        .unwrap();
+        assert!(matches!(action, ProtectionActionEnum::ChangeKey));
+
+        // 移除
+        let action =
+            validate_credential_protection_input(Some("old".into()), None, None, true).unwrap();
+        assert!(matches!(action, ProtectionActionEnum::Remove));
+
+        // 未保护时移除
+        let err = validate_credential_protection_input(None, None, None, false).unwrap_err();
+        assert!(matches!(err, ProtectionInputErrorEnum::AlreadyUnprotected));
+    }
+
+    #[test]
+    fn terminal_buffer_default_and_validate_via_ffi() {
+        assert_eq!(default_terminal_buffer_lines(), 10000);
+
+        assert_eq!(validate_terminal_buffer_lines("5000".into()).unwrap(), 5000);
+        assert_eq!(validate_terminal_buffer_lines("".into()).unwrap(), 10000);
+
+        assert!(matches!(
+            validate_terminal_buffer_lines("abc".into()),
+            Err(TerminalBufferErrorEnum::NotANumber)
+        ));
+        assert!(matches!(
+            validate_terminal_buffer_lines("500".into()),
+            Err(TerminalBufferErrorEnum::OutOfRange)
+        ));
+        assert!(matches!(
+            validate_terminal_buffer_lines("200000".into()),
+            Err(TerminalBufferErrorEnum::OutOfRange)
+        ));
     }
 }

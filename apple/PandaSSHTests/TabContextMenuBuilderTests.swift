@@ -75,12 +75,12 @@ final class TabContextMenuBuilderTests: XCTestCase {
         XCTAssertEqual(TabMenuItem.closeAll.symbolName, "xmark.circle.fill")
     }
 
-    /// 每个条目携带正确的快捷键。
-    func testKeyEquivalent_allItems_haveCorrectShortcuts() {
-        XCTAssertEqual(TabMenuItem.reconnect.keyEquivalent, "r")
-        XCTAssertEqual(TabMenuItem.closeTab.keyEquivalent, "w")
-        XCTAssertEqual(TabMenuItem.closeOthers.keyEquivalent, "w")
-        XCTAssertEqual(TabMenuItem.closeAll.keyEquivalent, "w")
+    /// 所有条目不绑定快捷键字符（右键菜单不使用快捷键）。
+    func testKeyEquivalent_allItems_areEmpty() {
+        XCTAssertEqual(TabMenuItem.reconnect.keyEquivalent, "")
+        XCTAssertEqual(TabMenuItem.closeTab.keyEquivalent, "")
+        XCTAssertEqual(TabMenuItem.closeOthers.keyEquivalent, "")
+        XCTAssertEqual(TabMenuItem.closeAll.keyEquivalent, "")
     }
 
     // MARK: - 边界条件
@@ -122,20 +122,6 @@ import AppKit
 
 extension TabContextMenuBuilderTests {
 
-    /// 快捷键修饰键是 AppKit 菜单展示属性，仅 macOS 需要验证。
-    func testKeyModifiers_allItems_haveCorrectModifiers() {
-        XCTAssertEqual(TabMenuItem.reconnect.keyModifiers, .command)
-        XCTAssertEqual(TabMenuItem.closeTab.keyModifiers, .command)
-        XCTAssertEqual(TabMenuItem.closeOthers.keyModifiers, [.command, .option])
-        XCTAssertEqual(TabMenuItem.closeAll.keyModifiers, [.command, .option, .shift])
-
-        let groupID = UUID()
-        XCTAssertEqual(TabMenuItem.newGroup.keyModifiers, [])
-        XCTAssertEqual(TabMenuItem.moveToGroup(groupID: groupID, groupName: "开发").keyModifiers, [])
-        XCTAssertEqual(TabMenuItem.ungroup.keyModifiers, [])
-        XCTAssertEqual(TabMenuItem.deleteGroup(groupID: groupID).keyModifiers, [])
-    }
-
     /// 终端标签 NSMenu：4 关闭/重连条目 + 2 分隔线 + 分组操作区（新建分组 + 未分组）。
     func testBuildNSMenu_terminal_hasGroupSectionWithSeparators() {
         let tabID = UUID()
@@ -153,12 +139,12 @@ extension TabContextMenuBuilderTests {
         XCTAssertFalse(reconnect.isSeparatorItem)
         XCTAssertEqual(reconnect.title, "重连")
         XCTAssertNotNil(reconnect.image, "重连项应有图标")
-        XCTAssertEqual(reconnect.keyEquivalent, "r")
+        XCTAssertEqual(reconnect.keyEquivalent, "")
 
         // 关闭标签页 / 关闭其他 / 关闭全部
         XCTAssertEqual(menu.items[2].title, "关闭标签页")
         XCTAssertNotNil(menu.items[2].image)
-        XCTAssertEqual(menu.items[2].keyEquivalent, "w")
+        XCTAssertEqual(menu.items[2].keyEquivalent, "")
         XCTAssertEqual(menu.items[3].title, "关闭其他标签页")
         XCTAssertNotNil(menu.items[3].image)
         XCTAssertEqual(menu.items[4].title, "关闭全部标签页")
@@ -218,21 +204,5 @@ extension TabContextMenuBuilderTests {
         }
     }
 
-    /// NSMenu 中快捷键修饰键正确设置。
-    func testBuildNSMenu_keyEquivalentModifierMasks() {
-        let tabID = UUID()
-        let menu = TabContextMenuBuilder.buildNSMenu(
-            tabID: tabID, tabKind: .terminal, workspace: makeStore()
-        )
-
-        // 重连：⌘
-        XCTAssertEqual(menu.items[0].keyEquivalentModifierMask, .command)
-        // 关闭标签页：⌘
-        XCTAssertEqual(menu.items[2].keyEquivalentModifierMask, .command)
-        // 关闭其他：⌥⌘
-        XCTAssertEqual(menu.items[3].keyEquivalentModifierMask, [.command, .option])
-        // 关闭全部：⇧⌘⌥
-        XCTAssertEqual(menu.items[4].keyEquivalentModifierMask, [.command, .option, .shift])
-    }
 }
 #endif

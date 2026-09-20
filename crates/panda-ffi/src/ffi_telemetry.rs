@@ -458,8 +458,14 @@ mod tests {
         // HostKeyMismatch 经错误码字符串表不可达（变体携带参数），
         // 但映射必须保持完整，直接对映射函数验证。
         let core_to_ffi = [
-            (panda_core::FailureCategory::Timeout, FailureCategoryEnum::Timeout),
-            (panda_core::FailureCategory::AuthFailed, FailureCategoryEnum::AuthFailed),
+            (
+                panda_core::FailureCategory::Timeout,
+                FailureCategoryEnum::Timeout,
+            ),
+            (
+                panda_core::FailureCategory::AuthFailed,
+                FailureCategoryEnum::AuthFailed,
+            ),
             (
                 panda_core::FailureCategory::MissingCredential,
                 FailureCategoryEnum::MissingCredential,
@@ -468,7 +474,10 @@ mod tests {
                 panda_core::FailureCategory::HostKeyMismatch,
                 FailureCategoryEnum::HostKeyMismatch,
             ),
-            (panda_core::FailureCategory::Other, FailureCategoryEnum::Other),
+            (
+                panda_core::FailureCategory::Other,
+                FailureCategoryEnum::Other,
+            ),
         ];
         for (core, ffi) in core_to_ffi {
             assert_eq!(map_failure_category(core), ffi);
@@ -479,10 +488,22 @@ mod tests {
     fn log_write_entries_and_clear_roundtrip_all_levels() {
         let _test_guard = global_test_lock();
         log_clear();
-        log_write(LogLevelEnum::Debug, "ffi-log-test".into(), "调试消息".into());
+        log_write(
+            LogLevelEnum::Debug,
+            "ffi-log-test".into(),
+            "调试消息".into(),
+        );
         log_write(LogLevelEnum::Info, "ffi-log-test".into(), "信息消息".into());
-        log_write(LogLevelEnum::Warning, "ffi-log-test".into(), "警告消息".into());
-        log_write(LogLevelEnum::Error, "ffi-log-test".into(), "错误消息".into());
+        log_write(
+            LogLevelEnum::Warning,
+            "ffi-log-test".into(),
+            "警告消息".into(),
+        );
+        log_write(
+            LogLevelEnum::Error,
+            "ffi-log-test".into(),
+            "错误消息".into(),
+        );
 
         // 全局 logger 可能被其他测试写入：只断言本测试写入的条目，按时间倒序
         let mine: Vec<LogEntryRecord> = log_entries(100)

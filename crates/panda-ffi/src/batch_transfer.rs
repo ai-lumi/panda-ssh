@@ -228,8 +228,7 @@ pub fn scan_remote_batch(
             .await?;
             session.set_owner("批量扫描", host_id.clone());
             let sftp = SftpClient::new(&session).await?;
-            let plan =
-                scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
+            let plan = scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
             let _ = sftp.close().await;
             Ok(plan
                 .items
@@ -373,16 +372,17 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
             // 使用 block_in_place 将当前 worker 线程标记为阻塞线程，
             // tokio 会补充新的 worker，避免线程饥饿。
             // 异步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
-            let resolution = tokio::task::block_in_place(|| {
-                match tokio::runtime::Handle::current()
-                    .block_on(tokio::time::timeout(Duration::from_secs(300), rx))
-                {
-                    Ok(Ok(ConflictResolution::Overwrite)) => ConflictResolution::Overwrite,
-                    Ok(Ok(ConflictResolution::Skip)) | Ok(Err(_)) | Err(_) => {
-                        ConflictResolution::Skip
+            let resolution =
+                tokio::task::block_in_place(|| {
+                    match tokio::runtime::Handle::current()
+                        .block_on(tokio::time::timeout(Duration::from_secs(300), rx))
+                    {
+                        Ok(Ok(ConflictResolution::Overwrite)) => ConflictResolution::Overwrite,
+                        Ok(Ok(ConflictResolution::Skip)) | Ok(Err(_)) | Err(_) => {
+                            ConflictResolution::Skip
+                        }
                     }
-                }
-            });
+                });
             // 超时或取消也清除待决策快照；由执行循环决定最终状态。
             *pending_conflict.lock().unwrap() = None;
             *task_status.lock().unwrap() = BatchTransferStatusEnum::Running;
@@ -469,7 +469,7 @@ async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostC
             } else {
                 *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
                 *task.error.lock().unwrap() = Some(e.to_string());
-            notify_transfer_changed();
+                notify_transfer_changed();
             }
         }
     }

@@ -1,0 +1,16 @@
+#!/bin/sh
+# 本地化完整性统一审计入口（OpenSpec 变更: add-app-internationalization 任务 1.5/1.6）。
+#
+# 组合检查：
+#   1. 审计工具自身单元测试（scripts/localization/test_audit.py）；
+#   2. String Catalog 双语完整性/参数模式/键命名/所有者规则；
+#   3. 生产 Swift 提示出口硬编码扫描（逐条排除清单见 scripts/localization/exclusions.json）；
+#   4. Rust/FFI message code 与声明式消息清单、Messages catalog 的一致性。
+#
+# 任何活动 OpenSpec 变更新增应用提示时，必须在合并前登记资源键并通过本检查。
+# 退出码：0=通过；1=存在未解决问题（迁移完成前预期为失败状态，不伪造完成）。
+set -e
+cd "$(dirname "$0")/.."
+
+python3 -m unittest discover -s scripts/localization -p "test_*.py" -q
+python3 scripts/localization/audit.py

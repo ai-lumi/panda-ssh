@@ -12,8 +12,9 @@ struct UnifiedWorkspaceTabStrip: View {
     @State private var browseAnchorID: UUID?
     @State private var tabFrames: [UUID: CGRect] = [:]
     @State private var viewportWidth = 0.0
+    @State private var measuredDocumentWidth = 0.0
     @State private var viewportOffset = 0.0
-    @State private var draggingTabID: UUID?
+    @StateObject private var dragReorder = TabDragReorderSession()
 
     private static let documentCoordinateSpace = "unified-workspace-tab-document"
     private static let documentHorizontalPadding = TabStripViewportState.revealPadding
@@ -36,79 +37,50 @@ struct UnifiedWorkspaceTabStrip: View {
                 } else {
                     GeometryReader { containerProxy in
                         let containerWidth = containerProxy.size.width
-                        let contentW = TabStripViewportState.contentWidth(from: tabFrames)
-                        // 内容能完整放进容器时无需滚动；超出时预留两侧浏览按钮宽度
-                        let needsScroll = containerWidth > 0 && (contentW - containerWidth) > 0.5
-                        let reservedWidth = needsScroll ? Self.browseButtonWidth * 2 : 0
-                        let scrollViewMaxWidth = max(0, containerWidth - reservedWidth)
+                        // 使用文档自然宽度判断溢出；未测量时回退容器宽度，
+                        // 避免把未测量当成真实零宽去预留整栏空白。
+                        let effectiveContentWidth = measuredDocumentWidth > 0
+                            ? measuredDocumentWidth
+                            : containerWidth
+                        let viewport = TabStripViewportState.resolve(
+                            contentWidth: effectiveContentWidth,
+                            viewportWidth: containerWidth,
+                            offset: viewportOffset
+                        )
 
-                        HStack(spacing: 0) {
-                            if needsScroll {
+                        if viewport.needsScroll {
+                            // 内容溢出时由滚动容器占满页签区，并保留外层独立拖窗区。
+                            HStack(spacing: 0) {
                                 browseButton(systemName: "chevron.left", direction: -1, proxy: proxy)
-                            }
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 4) {
-                                    // 渲染分组页签
-                                    ForEach(Array(workspace.groups.enumerated()), id: \.element.id) { groupIndex, group in
-                                        if groupIndex > 0 || !workspace.ungroupedTabIDs.isEmpty {
-                                            groupSeparator
-                                        }
-                                        groupLabel(group.name)
-                                        ForEach(Array(group.tabIDs.enumerated()), id: \.element) { index, tabID in
-                                            if let tab = workspace.tabs.first(where: { $0.id == tabID }) {
-                                                let displayIndex = workspace.displayedTabs.firstIndex(where: { $0.id == tabID }) ?? 0
-                                                tabButton(tab)
-                                                    .id(tab.id)
-                                                    .background(tabFrameReporter(for: tab.id))
-                                                    .opacity(draggingTabID == tab.id ? 0.5 : 1.0)
-                                                    .onDrag {
-                                                        draggingTabID = tab.id
-                                                        return NSItemProvider(object: tab.id.uuidString as NSString)
-                                                    }
-                                                    .onDrop(of: [.text], delegate: TabDropDelegate(
-                                                        targetTabID: tab.id,
-                                                        targetIndex: displayIndex,
-                                                        workspace: workspace,
-                                                        draggingTabID: $draggingTabID
-                                                    ))
-                                            }
-                                        }
-                                    }
-                                    // 渲染未分组页签
-                                    if !workspace.ungroupedTabIDs.isEmpty && !workspace.groups.isEmpty {
-                                        groupSeparator
-                                    }
-                                    ForEach(Array(workspace.ungroupedTabIDs.enumerated()), id: \.element) { index, tabID in
-                                        if let tab = workspace.tabs.first(where: { $0.id == tabID }) {
-                                            let displayIndex = workspace.displayedTabs.firstIndex(where: { $0.id == tabID }) ?? 0
-                                            tabButton(tab)
-                                                .id(tab.id)
-                                                .background(tabFrameReporter(for: tab.id))
-                                                .opacity(draggingTabID == tab.id ? 0.5 : 1.0)
-                                                .onDrag {
-                                                    draggingTabID = tab.id
-                                                    return NSItemProvider(object: tab.id.uuidString as NSString)
-                                                }
-                                                .onDrop(of: [.text], delegate: TabDropDelegate(
-                                                    targetTabID: tab.id,
-                                                    targetIndex: displayIndex,
-                                                    workspace: workspace,
-                                                    draggingTabID: $draggingTabID
-                                                ))
-                                        }
-                                    }
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    tabDocument
+                                        .fixedSize(horizontal: true, vertical: false)
+                                        .padding(.horizontal, Self.documentHorizontalPadding)
+                                        .padding(.vertical, 5)
+                                        .coordinateSpace(name: Self.documentCoordinateSpace)
+                                        .background(documentWidthReporter)
                                 }
-                                .padding(.horizontal, Self.documentHorizontalPadding)
-                                .padding(.vertical, 5)
-                                .coordinateSpace(name: Self.documentCoordinateSpace)
-                            }
-                            .frame(maxWidth: scrollViewMaxWidth)
-                            .background(viewportWidthReporter)
-                            if needsScroll {
+                                .frame(maxWidth: max(0, containerWidth - Self.browseButtonWidth * 2))
                                 browseButton(systemName: "chevron.right", direction: 1, proxy: proxy)
+                            }
+                        } else {
+                            // 不溢出时，文档按内容自然展开，空白占据剩余区域。
+                            // 空白是布局结果而非约束，不再通过历史测量值反向压缩文档。
+                            HStack(spacing: 0) {
+                                tabDocument
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.horizontal, Self.documentHorizontalPadding)
+                                    .padding(.vertical, 5)
+                                    .coordinateSpace(name: Self.documentCoordinateSpace)
+                                    .background(documentWidthReporter)
+                                Spacer(minLength: 0)
+                                    .contentShape(Rectangle())
+                                    .frame(maxHeight: .infinity)
+                                    .macOSWindowDragRegion()
                             }
                         }
                     }
+                    .background(containerWidthReporter)
                 }
             }
             .macOSTabStripWheelBridge { input in
@@ -124,8 +96,56 @@ struct UnifiedWorkspaceTabStrip: View {
                 tabFrames = frames
                 revealActiveTab(using: proxy, animated: false)
             }
+            .onPreferenceChange(NaturalDocumentWidthPreference.self) { widthMap in
+                let width = widthMap.values.first ?? 0
+                if abs(width - measuredDocumentWidth) > 0.5 {
+                    measuredDocumentWidth = width
+                }
+            }
         }
+        .onDisappear { dragReorder.cancel(workspace: workspace) }
         .accessibilityIdentifier("unified-workspace-tab-strip")
+    }
+
+    @ViewBuilder
+    private var tabDocument: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(workspace.groups.enumerated()), id: \.element.id) { groupIndex, group in
+                if groupIndex > 0 || !workspace.ungroupedTabIDs.isEmpty {
+                    groupSeparator
+                }
+                groupLabel(group.name)
+                ForEach(group.tabIDs, id: \.self) { tabID in
+                    if let tab = workspace.tabs.first(where: { $0.id == tabID }) {
+                        draggableTabButton(tab)
+                    }
+                }
+            }
+            if !workspace.ungroupedTabIDs.isEmpty && !workspace.groups.isEmpty {
+                groupSeparator
+            }
+            ForEach(workspace.ungroupedTabIDs, id: \.self) { tabID in
+                if let tab = workspace.tabs.first(where: { $0.id == tabID }) {
+                    draggableTabButton(tab)
+                }
+            }
+        }
+    }
+
+    private func draggableTabButton(_ tab: WorkspaceTab) -> some View {
+        tabButton(tab)
+            .id(tab.id)
+            .background(tabFrameReporter(for: tab.id))
+            .opacity(dragReorder.draggingTabID == tab.id ? 0.5 : 1.0)
+            .onDrag {
+                dragReorder.begin(tabID: tab.id, workspace: workspace)
+                return NSItemProvider(object: tab.id.uuidString as NSString)
+            }
+            .onDrop(of: [.text], delegate: TabDropDelegate(
+                targetTabID: tab.id,
+                workspace: workspace,
+                dragReorder: dragReorder
+            ))
     }
 
     private func browseButton(
@@ -361,8 +381,11 @@ struct UnifiedWorkspaceTabStrip: View {
     }
 
     private var currentViewport: TabStripViewportState {
-        TabStripViewportState.resolve(
-            contentWidth: TabStripViewportState.contentWidth(from: tabFrames),
+        let effectiveContentWidth = measuredDocumentWidth > 0
+            ? measuredDocumentWidth
+            : viewportWidth
+        return TabStripViewportState.resolve(
+            contentWidth: effectiveContentWidth,
             viewportWidth: viewportWidth,
             offset: viewportOffset
         )
@@ -406,7 +429,16 @@ struct UnifiedWorkspaceTabStrip: View {
         }
     }
 
-    private var viewportWidthReporter: some View {
+    private var documentWidthReporter: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: NaturalDocumentWidthPreference.self,
+                value: [UUID(): proxy.size.width]
+            )
+        }
+    }
+
+    private var containerWidthReporter: some View {
         GeometryReader { proxy in
             Color.clear
                 .onAppear { viewportWidth = proxy.size.width }
@@ -513,17 +545,28 @@ private struct UnifiedTabFramePreference: PreferenceKey {
     }
 }
 
+/// 报告页签文档的自然宽度（含 padding），用于判断是否需要滚动。
+/// 与 UnifiedTabFramePreference 不同，它测量的是整个文档的未压缩宽度，
+/// 而非单个页签在文档坐标系中的帧。
+struct NaturalDocumentWidthPreference: PreferenceKey {
+    static var defaultValue: [UUID: CGFloat] = [:]
+
+    static func reduce(value: inout [UUID: CGFloat], nextValue: () -> [UUID: CGFloat]) {
+        value = nextValue()
+    }
+}
+
 /// 页签拖拽放置代理：处理页签拖拽排序。
+/// 使用事务模式：dropEntered 仅更新预览，performDrop 才提交。
 private struct TabDropDelegate: DropDelegate {
     let targetTabID: UUID
-    let targetIndex: Int
     let workspace: WorkspaceStore
-    @Binding var draggingTabID: UUID?
+    let dragReorder: TabDragReorderSession
 
     func dropEntered(info: DropInfo) {
-        guard let draggingID = draggingTabID,
+        guard let draggingID = dragReorder.draggingTabID,
               draggingID != targetTabID else { return }
-        workspace.moveTabInDisplayOrder(draggingID, toIndex: targetIndex)
+        workspace.previewTabMove(draggingID, before: targetTabID)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -531,7 +574,55 @@ private struct TabDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        draggingTabID = nil
+        dragReorder.commit(workspace: workspace)
         return true
+    }
+}
+
+/// 单次页签拖放的 UI 生命周期。macOS 使用本地事件监视器捕获任何未提交的
+/// 鼠标抬起或 Escape；回调延后一个主循环，确保目标的 performDrop 可先提交。
+@MainActor
+private final class TabDragReorderSession: ObservableObject {
+    @Published private(set) var draggingTabID: UUID?
+    private var eventMonitor: Any?
+
+    deinit {
+        #if os(macOS)
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        #endif
+    }
+
+    func begin(tabID: UUID, workspace: WorkspaceStore) {
+        cancel(workspace: workspace)
+        draggingTabID = tabID
+        _ = workspace.beginTabReorder(for: tabID)
+        #if os(macOS)
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .keyDown]) { [weak self, weak workspace] event in
+            guard event.type == .leftMouseUp || event.keyCode == 53 else { return event }
+            DispatchQueue.main.async {
+                guard let self, let workspace else { return }
+                self.cancel(workspace: workspace)
+            }
+            return event
+        }
+        #endif
+    }
+
+    func commit(workspace: WorkspaceStore) {
+        workspace.commitPendingTabReorder()
+        finish()
+    }
+
+    func cancel(workspace: WorkspaceStore) {
+        workspace.cancelPendingTabReorder()
+        finish()
+    }
+
+    private func finish() {
+        #if os(macOS)
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        #endif
+        eventMonitor = nil
+        draggingTabID = nil
     }
 }

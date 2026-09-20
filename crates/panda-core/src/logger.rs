@@ -88,7 +88,10 @@ impl Logger {
 
         // 写入环形缓冲
         {
-            let mut buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut buffer = self
+                .buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if buffer.len() >= self.capacity {
                 buffer.remove(0);
             }
@@ -128,24 +131,36 @@ impl Logger {
 
     /// 获取最近的日志条目（按时间倒序）。
     pub fn entries(&self, limit: usize) -> Vec<LogEntry> {
-        let buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         buffer.iter().rev().take(limit).cloned().collect()
     }
 
     /// 清空环形缓冲。
     pub fn clear(&self) {
-        let mut buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         buffer.clear();
     }
 
     /// 当前缓冲条目数。
     pub fn len(&self) -> usize {
-        self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
+        self.buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     /// 缓冲是否为空。
     pub fn is_empty(&self) -> bool {
-        self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty()
+        self.buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
     }
 
     /// 在配置目录就绪后启用文件持久化，并按原始顺序补写此前仅存在内存中的日志。
@@ -197,7 +212,10 @@ impl Logger {
             module: "Config".into(),
             message: "日志文件不可写，当前仅保留内存日志".into(),
         };
-        let mut buffer = self.buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if buffer.len() >= self.capacity {
             buffer.remove(0);
         }
@@ -217,7 +235,10 @@ impl Logger {
 
         // 检查是否需要轮转
         {
-            let mut size = self.file_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut size = self
+                .file_size
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if *size + bytes.len() as i64 > self.rotation_threshold {
                 self.rotate_file(path)?;
                 *size = 0;
@@ -227,7 +248,10 @@ impl Logger {
         // 追加写入
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(bytes)?;
-        let mut size = self.file_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut size = self
+            .file_size
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *size += bytes.len() as i64;
         Ok(())
     }
@@ -283,7 +307,20 @@ fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
         year += 1;
     }
     let leap = is_leap_year(year);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u32;
     for &md in &month_days {
         if days < md {
@@ -398,11 +435,12 @@ mod tests {
         fs::write(&occupied_parent, "file").unwrap();
         let logger = Logger::new(None);
 
-        logger.configure_file_path(occupied_parent.join("panda-ssh.log")).unwrap();
+        logger
+            .configure_file_path(occupied_parent.join("panda-ssh.log"))
+            .unwrap();
 
         assert!(logger.entries(10).iter().any(|entry| {
-            entry.level == LogLevel::Error
-                && entry.message == "日志文件不可写，当前仅保留内存日志"
+            entry.level == LogLevel::Error && entry.message == "日志文件不可写，当前仅保留内存日志"
         }));
     }
 
@@ -419,8 +457,7 @@ mod tests {
         logger.info("ssh", "失败后仅保留内存日志");
 
         assert!(logger.entries(10).iter().any(|entry| {
-            entry.level == LogLevel::Error
-                && entry.message == "日志文件不可写，当前仅保留内存日志"
+            entry.level == LogLevel::Error && entry.message == "日志文件不可写，当前仅保留内存日志"
         }));
         assert_eq!(logger.len(), 3);
     }

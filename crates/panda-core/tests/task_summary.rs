@@ -6,10 +6,23 @@ fn task(id: &str, status: WorkStatus) -> WorkSnapshot {
 
 #[test]
 fn unfinished_includes_preparation_pause_and_decisions_but_not_terminal_records() {
-    let states = [WorkStatus::Preparing, WorkStatus::Scanning, WorkStatus::Queued,
-        WorkStatus::Running, WorkStatus::Paused, WorkStatus::WaitingForDecision,
-        WorkStatus::Cancelling, WorkStatus::Completed, WorkStatus::Failed, WorkStatus::Cancelled];
-    let tasks: Vec<_> = states.into_iter().enumerate().map(|(i, s)| task(&i.to_string(), s)).collect();
+    let states = [
+        WorkStatus::Preparing,
+        WorkStatus::Scanning,
+        WorkStatus::Queued,
+        WorkStatus::Running,
+        WorkStatus::Paused,
+        WorkStatus::WaitingForDecision,
+        WorkStatus::Cancelling,
+        WorkStatus::Completed,
+        WorkStatus::Failed,
+        WorkStatus::Cancelled,
+    ];
+    let tasks: Vec<_> = states
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| task(&i.to_string(), s))
+        .collect();
     assert_eq!(summarize_unfinished(&tasks).total, 7);
     assert_eq!(summarize_unfinished(&[]).total, 0);
 }
@@ -17,7 +30,9 @@ fn unfinished_includes_preparation_pause_and_decisions_but_not_terminal_records(
 #[test]
 fn group_children_and_preparation_handoff_are_counted_once() {
     let mut registry = WorkRegistry::default();
-    registry.begin(task("operation", WorkStatus::Preparing)).unwrap();
+    registry
+        .begin(task("operation", WorkStatus::Preparing))
+        .unwrap();
     let mut a = task("a", WorkStatus::Running);
     a.group_id = Some("group".into());
     let mut b = task("b", WorkStatus::Paused);
@@ -25,7 +40,10 @@ fn group_children_and_preparation_handoff_are_counted_once() {
     assert_eq!(summarize_unfinished(&[a.clone(), b.clone()]).total, 1);
     registry.attach("operation", "a").unwrap();
     registry.attach("operation", "b").unwrap();
-    assert_eq!(summarize_unfinished(&registry.snapshots(&[a.clone(), b.clone()])).total, 1);
+    assert_eq!(
+        summarize_unfinished(&registry.snapshots(&[a.clone(), b.clone()])).total,
+        1
+    );
     registry.finish_preparation("operation", None).unwrap();
     assert_eq!(summarize_unfinished(&registry.snapshots(&[a, b])).total, 1);
 }
@@ -33,9 +51,13 @@ fn group_children_and_preparation_handoff_are_counted_once() {
 #[test]
 fn preparation_failure_is_visible_and_does_not_remain_active() {
     let mut registry = WorkRegistry::default();
-    registry.begin(task("operation", WorkStatus::Preparing)).unwrap();
+    registry
+        .begin(task("operation", WorkStatus::Preparing))
+        .unwrap();
     assert_eq!(summarize_unfinished(&registry.snapshots(&[])).total, 1);
-    registry.finish_preparation("operation", Some("扫描失败".into())).unwrap();
+    registry
+        .finish_preparation("operation", Some("扫描失败".into()))
+        .unwrap();
     let snapshots = registry.snapshots(&[]);
     assert_eq!(snapshots[0].status, WorkStatus::Failed);
     assert_eq!(snapshots[0].errors[0].message, "扫描失败");
@@ -52,16 +74,25 @@ fn final_quit_gate_rechecks_and_cancel_reopens_registration() {
     registry.begin(task("new", WorkStatus::Preparing)).unwrap();
     assert!(!registry.confirm_quit(&[], false));
     assert!(registry.confirm_quit(&[], true));
-    assert!(registry.begin(task("blocked", WorkStatus::Preparing)).is_err());
+    assert!(registry
+        .begin(task("blocked", WorkStatus::Preparing))
+        .is_err());
     registry.cancel_quit();
-    registry.begin(task("accepted", WorkStatus::Preparing)).unwrap();
+    registry
+        .begin(task("accepted", WorkStatus::Preparing))
+        .unwrap();
     assert_eq!(summarize_unfinished(&registry.snapshots(&[])).total, 2);
 }
 
 #[test]
 fn empty_preparation_completes_and_local_delete_needs_no_host() {
     let mut registry = WorkRegistry::default();
-    let local = WorkSnapshot::new("local".into(), WorkKind::LocalDelete, WorkStatus::Scanning, "/fixture".into());
+    let local = WorkSnapshot::new(
+        "local".into(),
+        WorkKind::LocalDelete,
+        WorkStatus::Scanning,
+        "/fixture".into(),
+    );
     assert!(local.host_id.is_none());
     assert_eq!(local.total, None);
     assert_eq!(local.unit, ProgressUnit::Items);

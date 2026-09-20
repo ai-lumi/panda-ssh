@@ -1530,6 +1530,7 @@ dependencies = [
  "tokio",
  "uniffi",
  "uuid",
+ "zip",
 ]
 
 [[package]]

@@ -1,0 +1,37 @@
+{
+  "catalogs": {
+    "localizable": "apple/PandaSSH/Resources/Localizable.xcstrings",
+    "messages": "apple/PandaSSH/Resources/Messages.xcstrings"
+  },
+  "swift_sources": [
+    "apple/PandaSSH"
+  ],
+  "rust_sources": [
+    "crates/panda-core/src",
+    "crates/panda-ffi/src"
+  ],
+  "exclude_paths": [
+    "apple/PandaSSHTests",
+    "crates/panda-ffi/src/test_support.rs",
+    "crates/panda-ffi/src/bin"
+  ],
+  "exclusions": "scripts/localization/exclusions.json",
+  "messages": "crates/panda-ffi/messages.json",
+  "swift_approved_patterns": [
+    "\\bl10n\\.(?:str|text|count)\\(\\s*\"([a-z0-9_.]+)\"",
+    "\\bLocalizedTextResolver\\.(?:shared|main)\\.(?:string|text|count)\\(\\s*\"([a-z0-9_.]+)\""
+  ],
+  "rust_approved_patterns": [
+    "\\bmsg_code\\("
+  ],
+  "key_modules": [
+    "app", "settings", "host", "group", "snippet", "workspace", "terminal",
+    "sftp", "transfer", "monitor", "log", "auth", "error"
+  ],
+  "key_purpose_tokens": [
+    "title", "detail", "action", "label", "placeholder", "help",
+    "accessibility_label", "confirm", "count", "status", "toast", "hint",
+    "section", "menu", "subtitle", "message", "header", "empty", "unit",
+    "tooltip", "name", "summary", "description", "subtitle"
+  ]
+}

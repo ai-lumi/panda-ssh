@@ -5,6 +5,7 @@ options:
     macOS: "14.0"
     iOS: "17.0"
   xcodeVersion: "16.0"
+  developmentLanguage: zh-Hans
 
 packages:
   SwiftTerm:

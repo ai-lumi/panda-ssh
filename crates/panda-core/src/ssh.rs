@@ -331,7 +331,8 @@ impl SshSession {
                     return Err(Error::Ssh(russh::Error::IO(error)));
                 }
                 Err(_) => {
-                    global_registry().fail_with_event(telemetry_id, LifecycleKind::ConnectionTimeout);
+                    global_registry()
+                        .fail_with_event(telemetry_id, LifecycleKind::ConnectionTimeout);
                     return Err(Error::Timeout);
                 }
             };
@@ -369,7 +370,8 @@ impl SshSession {
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                global_registry().fail_with_event(telemetry_id, LifecycleKind::AuthenticationFailed);
+                global_registry()
+                    .fail_with_event(telemetry_id, LifecycleKind::AuthenticationFailed);
                 return Err(error);
             }
             Err(_) => {
@@ -523,7 +525,8 @@ impl SshSession {
                     break;
                 }
                 None => {
-                    global_registry().fail_with_event(self.telemetry_id, LifecycleKind::TransportError);
+                    global_registry()
+                        .fail_with_event(self.telemetry_id, LifecycleKind::TransportError);
                     global_registry().update_channel(
                         self.telemetry_id,
                         channel_id,

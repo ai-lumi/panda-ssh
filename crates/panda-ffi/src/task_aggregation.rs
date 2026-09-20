@@ -1,8 +1,7 @@
 //! 任务聚合的 FFI 导出。
 
 use panda_core::{
-    AggregationResult, TaskGroup, TaskItem, TransferDirection,
-    aggregate_task_groups,
+    aggregate_task_groups, AggregationResult, TaskGroup, TaskItem, TransferDirection,
 };
 
 use super::BatchTransferDirectionEnum;

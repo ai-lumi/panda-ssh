@@ -1492,7 +1492,10 @@ async fn shell_session_reports_nonzero_remote_exit_status() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let result = shell.read(1024);
-    assert!(matches!(result, Err(Error::ShellExitStatus(7))), "{result:?}");
+    assert!(
+        matches!(result, Err(Error::ShellExitStatus(7))),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]

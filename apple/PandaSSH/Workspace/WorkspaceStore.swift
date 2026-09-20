@@ -451,6 +451,107 @@ final class WorkspaceStore: ObservableObject {
         ungroupedTabIDs = displayOrder.filter { !groupedTabIDs.contains($0) }
     }
 
+    // MARK: - 拖放事务
+
+    /// 拖放开始时的快照，用于取消时恢复原始顺序。
+    struct TabReorderSnapshot {
+        let tabID: UUID
+        let ungroupedTabIDs: [UUID]
+        let groupStates: [(groupID: UUID, tabIDs: [UUID])]
+    }
+
+    /// 是否存在未提交或未回滚的拖放预览。
+    var hasPendingTabReorder: Bool { activeReorderSnapshot != nil }
+
+    /// 当前进行中的拖放快照；nil 表示无拖放。
+    private var activeReorderSnapshot: TabReorderSnapshot?
+
+    /// 开始拖放时捕获受影响容器的当前顺序快照。
+    /// 返回的快照应在 `commitTabReorder` 或 `rollbackTabReorder` 中传回。
+    func beginTabReorder(for tabID: UUID) -> TabReorderSnapshot {
+        let snapshot = TabReorderSnapshot(
+            tabID: tabID,
+            ungroupedTabIDs: ungroupedTabIDs,
+            groupStates: groups.map { ($0.id, $0.tabIDs) }
+        )
+        activeReorderSnapshot = snapshot
+        return snapshot
+    }
+
+    /// 拖放过程中的临时预览：按实际渲染容器更新未分组或同组顺序。
+    /// 跨组目标不提交排序（不在本变更范围内）。
+    func previewTabMove(_ tabID: UUID, before targetTabID: UUID) {
+        guard tabID != targetTabID else { return }
+
+        if ungroupedTabIDs.contains(tabID), ungroupedTabIDs.contains(targetTabID) {
+            moveTabInUngrouped(tabID, before: targetTabID)
+        } else if let sourceGroupID = groupID(forTabID: tabID),
+                  sourceGroupID == groupID(forTabID: targetTabID) {
+            moveTabInGroup(tabID, before: targetTabID, groupID: sourceGroupID)
+        }
+        // 跨组目标不提交排序
+    }
+
+    /// 提交拖放结果：清除拖拽状态，保留当前顺序。
+    func commitTabReorder(_ snapshot: TabReorderSnapshot) {
+        activeReorderSnapshot = nil
+        _ = snapshot
+    }
+
+    /// 提交当前未完成的拖放；没有活动会话时为 no-op。
+    func commitPendingTabReorder() {
+        guard let snapshot = activeReorderSnapshot else { return }
+        commitTabReorder(snapshot)
+    }
+
+    /// 取消拖放：恢复到开始前的顺序，清除拖拽反馈。
+    func rollbackTabReorder(_ snapshot: TabReorderSnapshot) {
+        restoreTabReorder(snapshot)
+        activeReorderSnapshot = nil
+    }
+
+    /// 取消当前未提交的拖放。视图层无需持有快照，即可在鼠标抬起、Escape
+    /// 或拖放会话中断时恢复开始前顺序。
+    func cancelPendingTabReorder() {
+        guard let snapshot = activeReorderSnapshot else { return }
+        restoreTabReorder(snapshot)
+        activeReorderSnapshot = nil
+    }
+
+    private func restoreTabReorder(_ snapshot: TabReorderSnapshot) {
+        guard tabs.contains(where: { $0.id == snapshot.tabID }) else { return }
+        let validTabIDs = Set(tabs.map(\.id))
+        ungroupedTabIDs = snapshot.ungroupedTabIDs.filter { validTabIDs.contains($0) }
+        for saved in snapshot.groupStates {
+            guard let idx = groups.firstIndex(where: { $0.id == saved.groupID }) else { continue }
+            groups[idx].tabIDs = saved.tabIDs.filter { validTabIDs.contains($0) }
+        }
+    }
+
+    /// 在 ungroupedTabIDs 中将 tabID 移动到 targetTabID 前。
+    private func moveTabInUngrouped(_ tabID: UUID, before targetTabID: UUID) {
+        guard let from = ungroupedTabIDs.firstIndex(of: tabID) else { return }
+        guard let to = ungroupedTabIDs.firstIndex(of: targetTabID) else { return }
+        ungroupedTabIDs.remove(at: from)
+        let adjustedTo = to > from ? to - 1 : to
+        ungroupedTabIDs.insert(tabID, at: adjustedTo)
+    }
+
+    /// 在指定分组的 tabIDs 中将 tabID 移动到 targetTabID 前。
+    private func moveTabInGroup(_ tabID: UUID, before targetTabID: UUID, groupID: UUID) {
+        guard let idx = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        guard let from = groups[idx].tabIDs.firstIndex(of: tabID) else { return }
+        guard let to = groups[idx].tabIDs.firstIndex(of: targetTabID) else { return }
+        groups[idx].tabIDs.remove(at: from)
+        let adjustedTo = to > from ? to - 1 : to
+        groups[idx].tabIDs.insert(tabID, at: adjustedTo)
+    }
+
+    /// 查询页签所在分组的 ID；未分组返回 nil。
+    private func groupID(forTabID tabID: UUID) -> UUID? {
+        groups.first(where: { $0.tabIDs.contains(tabID) })?.id
+    }
+
     // MARK: - 内部
 
     private func open(hostID: String, kind: WorkspaceTab.Kind) -> UUID {
@@ -479,23 +580,24 @@ final class WorkspaceStore: ObservableObject {
         }
         let newTabIDs = Set(newTabs.map(\.id))
 
+        // 防御性去重 tabs：防止 FFI 返回重复记录导致 UI 渲染重复页签
+        var seenTabIDs = Set<UUID>()
+        let dedupedTabs = newTabs.filter { seenTabIDs.insert($0.id).inserted }
+
         // 更新 displayOrder：移除已关闭的页签，新增的追加到末尾
         displayOrder.removeAll(where: { !newTabIDs.contains($0) })
-        for tab in newTabs {
+        for tab in dedupedTabs {
             if !displayOrder.contains(tab.id) {
                 displayOrder.append(tab.id)
             }
         }
+        // 防御性去重并保留顺序：防止任何路径导致 displayOrder 含重复 UUID
+        var seen = Set<UUID>()
+        displayOrder = displayOrder.filter { seen.insert($0).inserted }
 
-        // 更新 ungroupedTabIDs：移除已关闭的页签
-        ungroupedTabIDs.removeAll(where: { !newTabIDs.contains($0) })
-        // 新增的未分组页签追加到 ungroupedTabIDs
+        // 彻底重建 ungroupedTabIDs：只保留既存在又未被分组的页签
         let groupedTabIDs = Set(groups.flatMap(\.tabIDs))
-        for tabID in displayOrder {
-            if !groupedTabIDs.contains(tabID) && !ungroupedTabIDs.contains(tabID) {
-                ungroupedTabIDs.append(tabID)
-            }
-        }
+        ungroupedTabIDs = displayOrder.filter { newTabIDs.contains($0) && !groupedTabIDs.contains($0) }
 
         // 清理分组中已关闭的页签
         for i in groups.indices {
@@ -503,7 +605,7 @@ final class WorkspaceStore: ObservableObject {
         }
         groups.removeAll(where: { $0.isEmpty })
 
-        tabs = newTabs
+        tabs = dedupedTabs
         if let activeStr = workspaceActiveTabId() {
             activeTabID = UUID(uuidString: activeStr)
         } else {

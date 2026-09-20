@@ -66,28 +66,41 @@ pub struct PendingBatchClose {
     pub connected_terminal_count: u32,
 }
 
-/// 为同主机多标签页计算消歧标题。
+/// 为页签保留既有标题，并为尚未命名的页签分配同主机消歧标题。
 ///
-/// 规则：按 `tabs` 数组顺序遍历，同一 `host_id` 第一个标签不带序号，
-/// 后续追加 `(2)`、`(3)` 等。`host_name_provider` 查不到主机名时回退为 `host_id`。
+/// 规则：非空 `title` 表示页签已在创建时获得标题，必须原样保留。空标题按
+/// `tabs` 数组顺序使用该主机未占用的最小序号：第一个为主机名，后续为
+/// `(2)`、`(3)` 等。`host_name_provider` 查不到主机名时回退为 `host_id`。
 ///
 /// 返回与 `tabs` 等长的标题 `Vec`。
 pub fn compute_disambiguated_titles(
     tabs: &[WorkspaceTab],
     host_name_provider: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<String> {
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut used_titles: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
     let mut titles = Vec::with_capacity(tabs.len());
 
     for tab in tabs {
         let base = host_name_provider(&tab.host_id).unwrap_or_else(|| tab.host_id.clone());
-        let ordinal = counts.entry(tab.host_id.clone()).or_insert(0);
-        *ordinal += 1;
-        let title = if *ordinal == 1 {
-            base
+        let used = used_titles.entry(tab.host_id.clone()).or_default();
+        let title = if tab.title.is_empty() {
+            let mut ordinal = 1;
+            loop {
+                let candidate = if ordinal == 1 {
+                    base.clone()
+                } else {
+                    format!("{base} ({ordinal})")
+                };
+                if !used.contains(&candidate) {
+                    break candidate;
+                }
+                ordinal += 1;
+            }
         } else {
-            format!("{base} ({ordinal})")
+            tab.title.clone()
         };
+        used.insert(title.clone());
         titles.push(title);
     }
 
@@ -269,20 +282,21 @@ pub fn classify_shell_exit(error_message: Option<&str>) -> ShellExitClassificati
             failure_category: TerminalFailureCategory::Other,
         },
         Some(msg) => {
-            let category = if msg.contains("shell session closed") || msg.contains("ShellSessionClosed") {
-                // 正常退出：远端 shell 进程结束
-                // 注意：虽然 is_normal_exit 为 false（因为确实有错误消息），
-                // 但分类为 Other，由调用方根据上下文判断是否为正常退出
-                TerminalFailureCategory::Other
-            } else if msg.contains("timeout") || msg.contains("timed out") {
-                TerminalFailureCategory::Timeout
-            } else if msg.contains("auth") || msg.contains("authentication") {
-                TerminalFailureCategory::AuthFailed
-            } else if msg.contains("host key") {
-                TerminalFailureCategory::HostKeyMismatch
-            } else {
-                TerminalFailureCategory::Other
-            };
+            let category =
+                if msg.contains("shell session closed") || msg.contains("ShellSessionClosed") {
+                    // 正常退出：远端 shell 进程结束
+                    // 注意：虽然 is_normal_exit 为 false（因为确实有错误消息），
+                    // 但分类为 Other，由调用方根据上下文判断是否为正常退出
+                    TerminalFailureCategory::Other
+                } else if msg.contains("timeout") || msg.contains("timed out") {
+                    TerminalFailureCategory::Timeout
+                } else if msg.contains("auth") || msg.contains("authentication") {
+                    TerminalFailureCategory::AuthFailed
+                } else if msg.contains("host key") {
+                    TerminalFailureCategory::HostKeyMismatch
+                } else {
+                    TerminalFailureCategory::Other
+                };
             ShellExitClassification {
                 is_normal_exit: false,
                 failure_category: category,
@@ -342,16 +356,40 @@ mod tests {
     }
 
     #[test]
-    fn closing_middle_tab_renumbers_remaining() {
-        // 初始：server, server (2), server (3)
-        // 关闭 server (2) 后：server, server (2)
+    fn closing_middle_tab_preserves_remaining_titles() {
+        // 初始：server, server (2), server (3)。关闭中间页签后，第三个页签
+        // 仍是创建时获得的 server (3)，而不是按剩余列表重编号为 server (2)。
         let tabs = vec![
             make_tab("1", "server", TabKind::Terminal),
-            make_tab("3", "server", TabKind::Terminal),
+            WorkspaceTab {
+                title: "server (3)".to_string(),
+                ..make_tab("3", "server", TabKind::Terminal)
+            },
         ];
         let names = |_id: &str| -> Option<String> { Some("server".to_string()) };
         let titles = compute_disambiguated_titles(&tabs, &names);
-        assert_eq!(titles, vec!["server", "server (2)"]);
+        assert_eq!(titles, vec!["server", "server (3)"]);
+    }
+
+    #[test]
+    fn empty_title_uses_smallest_unused_suffix_for_its_host() {
+        let tabs = vec![
+            WorkspaceTab {
+                title: "server".to_string(),
+                ..make_tab("1", "server", TabKind::Terminal)
+            },
+            WorkspaceTab {
+                title: "server (3)".to_string(),
+                ..make_tab("2", "server", TabKind::Terminal)
+            },
+            make_tab("3", "server", TabKind::Sftp),
+            make_tab("4", "other", TabKind::Terminal),
+        ];
+        let names = |id: &str| -> Option<String> { Some(id.to_string()) };
+
+        let titles = compute_disambiguated_titles(&tabs, &names);
+
+        assert_eq!(titles, vec!["server", "server (3)", "server (2)", "other"]);
     }
 
     #[test]
@@ -381,7 +419,10 @@ mod tests {
             ConnectionStatus::Connected,
             ConnectionStatus::Connecting,
         ];
-        assert_eq!(aggregate_connection_status(&statuses), ConnectionStatus::Connected);
+        assert_eq!(
+            aggregate_connection_status(&statuses),
+            ConnectionStatus::Connected
+        );
     }
 
     #[test]
@@ -391,13 +432,19 @@ mod tests {
             ConnectionStatus::Failed,
             ConnectionStatus::Connecting,
         ];
-        assert_eq!(aggregate_connection_status(&statuses), ConnectionStatus::Connecting);
+        assert_eq!(
+            aggregate_connection_status(&statuses),
+            ConnectionStatus::Connecting
+        );
     }
 
     #[test]
     fn aggregate_failed_wins_over_inactive() {
         let statuses = vec![ConnectionStatus::Inactive, ConnectionStatus::Failed];
-        assert_eq!(aggregate_connection_status(&statuses), ConnectionStatus::Failed);
+        assert_eq!(
+            aggregate_connection_status(&statuses),
+            ConnectionStatus::Failed
+        );
     }
 
     #[test]
@@ -512,9 +559,16 @@ mod tests {
     #[test]
     fn transition_to_failed_from_connecting() {
         let session = make_session("tab-1", "host-1");
-        let result = transition_to_failed(&session, TerminalFailureCategory::Timeout, "连接超时".into());
+        let result = transition_to_failed(
+            &session,
+            TerminalFailureCategory::Timeout,
+            "连接超时".into(),
+        );
         assert_eq!(result.phase, TerminalPhase::Failed);
-        assert_eq!(result.failure_category, Some(TerminalFailureCategory::Timeout));
+        assert_eq!(
+            result.failure_category,
+            Some(TerminalFailureCategory::Timeout)
+        );
         assert_eq!(result.failure_message, Some("连接超时".into()));
         assert_eq!(result.attempt, 0);
     }
@@ -525,9 +579,16 @@ mod tests {
             phase: TerminalPhase::Shell,
             ..make_session("tab-1", "host-1")
         };
-        let result = transition_to_failed(&session, TerminalFailureCategory::Other, "连接异常断开".into());
+        let result = transition_to_failed(
+            &session,
+            TerminalFailureCategory::Other,
+            "连接异常断开".into(),
+        );
         assert_eq!(result.phase, TerminalPhase::Failed);
-        assert_eq!(result.failure_category, Some(TerminalFailureCategory::Other));
+        assert_eq!(
+            result.failure_category,
+            Some(TerminalFailureCategory::Other)
+        );
     }
 
     #[test]
@@ -538,8 +599,15 @@ mod tests {
             failure_message: Some("旧错误".into()),
             ..make_session("tab-1", "host-1")
         };
-        let result = transition_to_failed(&session, TerminalFailureCategory::AuthFailed, "新错误".into());
-        assert_eq!(result.failure_category, Some(TerminalFailureCategory::AuthFailed));
+        let result = transition_to_failed(
+            &session,
+            TerminalFailureCategory::AuthFailed,
+            "新错误".into(),
+        );
+        assert_eq!(
+            result.failure_category,
+            Some(TerminalFailureCategory::AuthFailed)
+        );
         assert_eq!(result.failure_message, Some("新错误".into()));
     }
 
@@ -580,13 +648,18 @@ mod tests {
     fn multiple_retries_increment_attempt() {
         let session = make_session("tab-1", "host-1");
         // 第一次失败
-        let failed1 = transition_to_failed(&session, TerminalFailureCategory::Timeout, "超时".into());
+        let failed1 =
+            transition_to_failed(&session, TerminalFailureCategory::Timeout, "超时".into());
         assert_eq!(failed1.attempt, 0);
         // 第一次重试
         let retry1 = transition_to_connecting(&failed1).unwrap();
         assert_eq!(retry1.attempt, 1);
         // 第二次失败
-        let failed2 = transition_to_failed(&retry1, TerminalFailureCategory::AuthFailed, "认证失败".into());
+        let failed2 = transition_to_failed(
+            &retry1,
+            TerminalFailureCategory::AuthFailed,
+            "认证失败".into(),
+        );
         assert_eq!(failed2.attempt, 1);
         // 第二次重试
         let retry2 = transition_to_connecting(&failed2).unwrap();
@@ -618,7 +691,8 @@ mod tests {
         // 代次 0 发起握手
         let request_generation = session.attempt;
         // 握手期间用户重试
-        let failed = transition_to_failed(&session, TerminalFailureCategory::Timeout, "超时".into());
+        let failed =
+            transition_to_failed(&session, TerminalFailureCategory::Timeout, "超时".into());
         let retried = transition_to_connecting(&failed).unwrap();
         // 旧握手结果到达，应被判定为过期
         assert!(is_stale(&retried, request_generation));
@@ -658,7 +732,10 @@ mod tests {
     fn classify_shell_exit_host_key_mismatch() {
         let result = classify_shell_exit(Some("host key verification failed"));
         assert!(!result.is_normal_exit);
-        assert_eq!(result.failure_category, TerminalFailureCategory::HostKeyMismatch);
+        assert_eq!(
+            result.failure_category,
+            TerminalFailureCategory::HostKeyMismatch
+        );
     }
 
     #[test]
@@ -678,7 +755,8 @@ mod tests {
         assert_eq!(session.attempt, 0);
 
         // 连接失败
-        let failed = transition_to_failed(&session, TerminalFailureCategory::Timeout, "超时".into());
+        let failed =
+            transition_to_failed(&session, TerminalFailureCategory::Timeout, "超时".into());
         assert_eq!(failed.phase, TerminalPhase::Failed);
         assert_eq!(failed.attempt, 0);
 
@@ -700,7 +778,11 @@ mod tests {
         let gen0 = session.attempt;
 
         // 连接失败
-        let failed = transition_to_failed(&session, TerminalFailureCategory::AuthFailed, "认证失败".into());
+        let failed = transition_to_failed(
+            &session,
+            TerminalFailureCategory::AuthFailed,
+            "认证失败".into(),
+        );
 
         // 重试，代次变为 1
         let retry = transition_to_connecting(&failed).unwrap();

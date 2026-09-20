@@ -3307,7 +3307,10 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
     .unwrap();
 
     let record = wait_for_batch_conflict(&task_id);
-    assert!(panda_ffi::transfer_change_counter() > revision_before_start, "批量创建/等待决策必须发布修订");
+    assert!(
+        panda_ffi::transfer_change_counter() > revision_before_start,
+        "批量创建/等待决策必须发布修订"
+    );
     let conflict = record.pending_conflict.expect("应携带冲突信息");
     assert_eq!(conflict.item_source, file.to_string_lossy().into_owned());
     assert_eq!(conflict.item_destination, "/remote/a.txt");
@@ -3319,7 +3322,10 @@ fn ffi_batch_upload_conflict_waits_and_overwrites() {
     // 决策覆盖 → 任务完成，目标内容被替换。
     let revision_before_resolve = panda_ffi::transfer_change_counter();
     batch_transfer_resolve_conflict(task_id.clone(), true).unwrap();
-    assert!(panda_ffi::transfer_change_counter() > revision_before_resolve, "决策必须发布修订");
+    assert!(
+        panda_ffi::transfer_change_counter() > revision_before_resolve,
+        "决策必须发布修订"
+    );
     wait_for_batch_status(&task_id, BatchTransferStatusEnum::Completed);
 
     let back = dir.join("back.txt");
@@ -3554,10 +3560,7 @@ fn ffi_scan_local_batch_concurrent_does_not_deadlock() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
-    let dir = std::env::temp_dir().join(format!(
-        "panda-ffi-scan-concurrent-{}",
-        Uuid::new_v4()
-    ));
+    let dir = std::env::temp_dir().join(format!("panda-ffi-scan-concurrent-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     for i in 0..5 {
         std::fs::write(dir.join(format!("f{i}.txt")), b"data").unwrap();
@@ -3592,10 +3595,7 @@ fn ffi_scan_local_batch_does_not_starve_runtime() {
     let port = start_server();
     let host = save_test_host(port, "scan-starve");
 
-    let dir = std::env::temp_dir().join(format!(
-        "panda-ffi-scan-starve-{}",
-        Uuid::new_v4()
-    ));
+    let dir = std::env::temp_dir().join(format!("panda-ffi-scan-starve-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     for i in 0..10 {
         std::fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
@@ -3739,10 +3739,7 @@ fn ffi_batch_upload_conflict_cancel_wakes_waiter() {
     let port = start_server();
     let host = save_test_host(port, "conflict-cancel-async");
 
-    let dir = std::env::temp_dir().join(format!(
-        "panda-ffi-conflict-cancel-a-{}",
-        Uuid::new_v4()
-    ));
+    let dir = std::env::temp_dir().join(format!("panda-ffi-conflict-cancel-a-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("c.txt");
     std::fs::write(&file, b"content").unwrap();

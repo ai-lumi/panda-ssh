@@ -7,17 +7,24 @@ import XCTest
 #endif
 
 final class SettingsTabTests: XCTestCase {
-    func test设置标签目录在双端一致() {
+    func test设置标签仅保留已实现分类() {
         XCTAssertEqual(
             SettingsTab.allCases.map(\.title),
-            ["通用", "外观", "连接", "终端", "高级"]
+            ["通用", "终端"]
         )
     }
 
     func test设置标签均有稳定的系统图标() {
         XCTAssertEqual(
             SettingsTab.allCases.map(\.systemImage),
-            ["gear", "paintbrush", "link", "terminal", "gearshape.2"]
+            ["gear", "terminal"]
         )
+    }
+
+    func test占位分类已移除() {
+        let titles = SettingsTab.allCases.map(\.rawValue)
+        XCTAssertFalse(titles.contains("appearance"))
+        XCTAssertFalse(titles.contains("connection"))
+        XCTAssertFalse(titles.contains("advanced"))
     }
 }

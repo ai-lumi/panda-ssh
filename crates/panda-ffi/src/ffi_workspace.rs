@@ -124,9 +124,15 @@ impl From<TerminalFailureCategoryEnum> for panda_core::TerminalFailureCategory {
     fn from(c: TerminalFailureCategoryEnum) -> Self {
         match c {
             TerminalFailureCategoryEnum::Timeout => panda_core::TerminalFailureCategory::Timeout,
-            TerminalFailureCategoryEnum::AuthFailed => panda_core::TerminalFailureCategory::AuthFailed,
-            TerminalFailureCategoryEnum::MissingCredential => panda_core::TerminalFailureCategory::MissingCredential,
-            TerminalFailureCategoryEnum::HostKeyMismatch => panda_core::TerminalFailureCategory::HostKeyMismatch,
+            TerminalFailureCategoryEnum::AuthFailed => {
+                panda_core::TerminalFailureCategory::AuthFailed
+            }
+            TerminalFailureCategoryEnum::MissingCredential => {
+                panda_core::TerminalFailureCategory::MissingCredential
+            }
+            TerminalFailureCategoryEnum::HostKeyMismatch => {
+                panda_core::TerminalFailureCategory::HostKeyMismatch
+            }
             TerminalFailureCategoryEnum::Other => panda_core::TerminalFailureCategory::Other,
         }
     }
@@ -136,9 +142,15 @@ impl From<panda_core::TerminalFailureCategory> for TerminalFailureCategoryEnum {
     fn from(c: panda_core::TerminalFailureCategory) -> Self {
         match c {
             panda_core::TerminalFailureCategory::Timeout => TerminalFailureCategoryEnum::Timeout,
-            panda_core::TerminalFailureCategory::AuthFailed => TerminalFailureCategoryEnum::AuthFailed,
-            panda_core::TerminalFailureCategory::MissingCredential => TerminalFailureCategoryEnum::MissingCredential,
-            panda_core::TerminalFailureCategory::HostKeyMismatch => TerminalFailureCategoryEnum::HostKeyMismatch,
+            panda_core::TerminalFailureCategory::AuthFailed => {
+                TerminalFailureCategoryEnum::AuthFailed
+            }
+            panda_core::TerminalFailureCategory::MissingCredential => {
+                TerminalFailureCategoryEnum::MissingCredential
+            }
+            panda_core::TerminalFailureCategory::HostKeyMismatch => {
+                TerminalFailureCategoryEnum::HostKeyMismatch
+            }
             panda_core::TerminalFailureCategory::Other => TerminalFailureCategoryEnum::Other,
         }
     }
@@ -185,18 +197,20 @@ struct InternalTab {
     id: String,
     host_id: String,
     kind: panda_core::TabKind,
+    /// 页签创建时确定的显示标题，在其生命周期内保持不变。
+    title: String,
     connection_status: panda_core::ConnectionStatus,
     /// 终端标签页是否已连接（用于关闭确认判断）。
     terminal_connected: bool,
 }
 
 impl InternalTab {
-    fn to_workspace_tab(&self, title: String) -> panda_core::WorkspaceTab {
+    fn to_workspace_tab(&self) -> panda_core::WorkspaceTab {
         panda_core::WorkspaceTab {
             id: self.id.clone(),
             host_id: self.host_id.clone(),
             kind: self.kind,
-            title,
+            title: self.title.clone(),
             connection_status: self.connection_status,
         }
     }
@@ -249,31 +263,35 @@ impl WorkspaceState {
         }
     }
 
-    /// 计算当前标签页列表（含消歧标题）。
+    /// 返回当前标签页列表（标题在创建时已确定）。
     fn tab_list(&self) -> Vec<panda_core::WorkspaceTab> {
-        let workspace_tabs: Vec<panda_core::WorkspaceTab> = self
-            .tabs
-            .iter()
-            .map(|t| t.to_workspace_tab(String::new()))
-            .collect();
-        let titles = panda_core::compute_disambiguated_titles(
-            &workspace_tabs,
-            &|host_id| self.host_names.get(host_id).cloned(),
-        );
         self.tabs
             .iter()
-            .zip(titles.into_iter())
-            .map(|(t, title)| t.to_workspace_tab(title))
+            .map(InternalTab::to_workspace_tab)
             .collect()
     }
 
     /// 打开新标签页，返回标签页 id。
     fn open_tab(&mut self, host_id: String, kind: panda_core::TabKind) -> String {
         let id = Uuid::new_v4().to_string();
+        let mut tabs = self.tab_list();
+        tabs.push(panda_core::WorkspaceTab {
+            id: id.clone(),
+            host_id: host_id.clone(),
+            kind,
+            title: String::new(),
+            connection_status: panda_core::ConnectionStatus::Connecting,
+        });
+        let title = panda_core::compute_disambiguated_titles(&tabs, &|current_host_id| {
+            self.host_names.get(current_host_id).cloned()
+        })
+        .pop()
+        .expect("new tab must receive a title");
         self.tabs.push(InternalTab {
             id: id.clone(),
             host_id,
             kind,
+            title,
             connection_status: panda_core::ConnectionStatus::Connecting,
             terminal_connected: false,
         });
@@ -282,11 +300,7 @@ impl WorkspaceState {
     }
 
     /// 更新标签页连接状态。
-    fn report_connection_status(
-        &mut self,
-        tab_id: &str,
-        status: panda_core::ConnectionStatus,
-    ) {
+    fn report_connection_status(&mut self, tab_id: &str, status: panda_core::ConnectionStatus) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             tab.connection_status = status;
             if tab.kind == panda_core::TabKind::Terminal {
@@ -322,8 +336,7 @@ impl WorkspaceState {
             self.terminal_sessions.remove(tab_id);
             if self.active_tab_id.as_deref() == Some(tab_id) {
                 let remaining_ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
-                self.active_tab_id =
-                    panda_core::next_active_tab_after_close(&remaining_ids, index);
+                self.active_tab_id = panda_core::next_active_tab_after_close(&remaining_ids, index);
             }
         }
     }
@@ -392,11 +405,7 @@ impl WorkspaceState {
 
     /// 请求关闭其他标签页。
     fn request_close_others(&mut self, keeping: &str) {
-        let others: Vec<_> = self
-            .tabs
-            .iter()
-            .filter(|t| t.id != keeping)
-            .collect();
+        let others: Vec<_> = self.tabs.iter().filter(|t| t.id != keeping).collect();
         let connected_count = others
             .iter()
             .filter(|t| t.kind == panda_core::TabKind::Terminal && t.terminal_connected)
@@ -723,7 +732,10 @@ pub fn terminal_session_is_stale(tab_id: String, request_generation: u32) -> boo
 #[uniffi::export]
 pub fn terminal_session_get(tab_id: String) -> Option<TerminalSessionRecord> {
     let state = workspace_state().lock().unwrap();
-    state.terminal_sessions.get(&tab_id).map(|s| s.clone().into())
+    state
+        .terminal_sessions
+        .get(&tab_id)
+        .map(|s| s.clone().into())
 }
 
 // ---------------------------------------------------------------------------
@@ -777,11 +789,14 @@ mod tests {
         assert_eq!(list[1].id, id2);
         assert_eq!(list[2].id, id3);
         assert_eq!(list[0].kind, panda_core::TabKind::Terminal);
-        assert_eq!(list[0].connection_status, panda_core::ConnectionStatus::Connecting);
+        assert_eq!(
+            list[0].connection_status,
+            panda_core::ConnectionStatus::Connecting
+        );
     }
 
     #[test]
-    fn workspace_close_tab_renumbers_remaining() {
+    fn workspace_close_tab_preserves_remaining_titles() {
         let mut state = make_state(&[("h1", "server")]);
         let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
         let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
@@ -791,9 +806,12 @@ mod tests {
 
         let list = state.tab_list();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].title, "server");
-        assert_eq!(list[1].title, "server (2)");
+        assert_eq!(list[0].title, "server (2)");
+        assert_eq!(list[1].title, "server (3)");
         assert!(list.iter().any(|t| t.id == id3));
+
+        state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        assert_eq!(state.tab_list()[2].title, "server");
     }
 
     #[test]
@@ -1061,10 +1079,16 @@ mod tests {
         let _test_guard = reset_workspace();
         let tab_id = unique_tab_id("phase");
         terminal_session_register("host-1".into(), tab_id.clone());
-        assert_eq!(terminal_session_phase(tab_id.clone()), Some(TerminalPhaseEnum::Connecting));
+        assert_eq!(
+            terminal_session_phase(tab_id.clone()),
+            Some(TerminalPhaseEnum::Connecting)
+        );
 
         terminal_session_transition_to_shell(tab_id.clone());
-        assert_eq!(terminal_session_phase(tab_id.clone()), Some(TerminalPhaseEnum::Shell));
+        assert_eq!(
+            terminal_session_phase(tab_id.clone()),
+            Some(TerminalPhaseEnum::Shell)
+        );
         terminal_session_close(tab_id);
     }
 
@@ -1112,7 +1136,10 @@ mod tests {
 
         let record = terminal_session_get(tab_id.clone()).unwrap();
         assert_eq!(record.phase, TerminalPhaseEnum::Failed);
-        assert_eq!(record.failure_category, Some(TerminalFailureCategoryEnum::Timeout));
+        assert_eq!(
+            record.failure_category,
+            Some(TerminalFailureCategoryEnum::Timeout)
+        );
         assert_eq!(record.failure_message, Some("连接超时".into()));
         terminal_session_close(tab_id);
     }
@@ -1179,7 +1206,10 @@ mod tests {
     #[test]
     fn terminal_session_is_stale_returns_true_for_unknown_tab() {
         let _test_guard = reset_workspace();
-        assert!(terminal_session_is_stale(unique_tab_id("nonexistent-stale"), 0));
+        assert!(terminal_session_is_stale(
+            unique_tab_id("nonexistent-stale"),
+            0
+        ));
     }
 
     #[test]
@@ -1283,23 +1313,47 @@ mod tests {
     #[test]
     fn ffi_enum_mappings_cover_every_core_variant() {
         use panda_core::TabKind;
-        assert!(matches!(TabKind::from(TabKindEnum::Terminal), TabKind::Terminal));
+        assert!(matches!(
+            TabKind::from(TabKindEnum::Terminal),
+            TabKind::Terminal
+        ));
         assert!(matches!(TabKind::from(TabKindEnum::Sftp), TabKind::Sftp));
-        assert!(matches!(TabKindEnum::from(TabKind::Terminal), TabKindEnum::Terminal));
-        assert!(matches!(TabKindEnum::from(TabKind::Sftp), TabKindEnum::Sftp));
+        assert!(matches!(
+            TabKindEnum::from(TabKind::Terminal),
+            TabKindEnum::Terminal
+        ));
+        assert!(matches!(
+            TabKindEnum::from(TabKind::Sftp),
+            TabKindEnum::Sftp
+        ));
 
         for (ffi, core) in [
-            (ConnectionStatusEnum::Inactive, panda_core::ConnectionStatus::Inactive),
-            (ConnectionStatusEnum::Connecting, panda_core::ConnectionStatus::Connecting),
-            (ConnectionStatusEnum::Connected, panda_core::ConnectionStatus::Connected),
-            (ConnectionStatusEnum::Failed, panda_core::ConnectionStatus::Failed),
+            (
+                ConnectionStatusEnum::Inactive,
+                panda_core::ConnectionStatus::Inactive,
+            ),
+            (
+                ConnectionStatusEnum::Connecting,
+                panda_core::ConnectionStatus::Connecting,
+            ),
+            (
+                ConnectionStatusEnum::Connected,
+                panda_core::ConnectionStatus::Connected,
+            ),
+            (
+                ConnectionStatusEnum::Failed,
+                panda_core::ConnectionStatus::Failed,
+            ),
         ] {
             assert!(matches!(panda_core::ConnectionStatus::from(ffi), c if c == core));
             assert!(matches!(ConnectionStatusEnum::from(core), f if f == ffi));
         }
 
         for (ffi, core) in [
-            (TerminalPhaseEnum::Connecting, panda_core::TerminalPhase::Connecting),
+            (
+                TerminalPhaseEnum::Connecting,
+                panda_core::TerminalPhase::Connecting,
+            ),
             (TerminalPhaseEnum::Shell, panda_core::TerminalPhase::Shell),
             (TerminalPhaseEnum::Failed, panda_core::TerminalPhase::Failed),
         ] {
@@ -1308,11 +1362,26 @@ mod tests {
         }
 
         for (ffi, core) in [
-            (TerminalFailureCategoryEnum::Timeout, panda_core::TerminalFailureCategory::Timeout),
-            (TerminalFailureCategoryEnum::AuthFailed, panda_core::TerminalFailureCategory::AuthFailed),
-            (TerminalFailureCategoryEnum::MissingCredential, panda_core::TerminalFailureCategory::MissingCredential),
-            (TerminalFailureCategoryEnum::HostKeyMismatch, panda_core::TerminalFailureCategory::HostKeyMismatch),
-            (TerminalFailureCategoryEnum::Other, panda_core::TerminalFailureCategory::Other),
+            (
+                TerminalFailureCategoryEnum::Timeout,
+                panda_core::TerminalFailureCategory::Timeout,
+            ),
+            (
+                TerminalFailureCategoryEnum::AuthFailed,
+                panda_core::TerminalFailureCategory::AuthFailed,
+            ),
+            (
+                TerminalFailureCategoryEnum::MissingCredential,
+                panda_core::TerminalFailureCategory::MissingCredential,
+            ),
+            (
+                TerminalFailureCategoryEnum::HostKeyMismatch,
+                panda_core::TerminalFailureCategory::HostKeyMismatch,
+            ),
+            (
+                TerminalFailureCategoryEnum::Other,
+                panda_core::TerminalFailureCategory::Other,
+            ),
         ] {
             assert!(matches!(panda_core::TerminalFailureCategory::from(ffi), c if c == core));
             assert!(matches!(TerminalFailureCategoryEnum::from(core), f if f == ffi));
@@ -1327,7 +1396,10 @@ mod tests {
         let tab = workspace_open_tab(host.clone(), TabKindEnum::Terminal);
         assert_eq!(tab.host_id, host);
         assert!(matches!(tab.kind, TabKindEnum::Terminal));
-        assert!(matches!(tab.connection_status, ConnectionStatusEnum::Connecting));
+        assert!(matches!(
+            tab.connection_status,
+            ConnectionStatusEnum::Connecting
+        ));
         assert_eq!(workspace_active_tab_id(), Some(tab.id.clone()));
 
         workspace_open_tab(host.clone(), TabKindEnum::Sftp);
@@ -1338,7 +1410,8 @@ mod tests {
             name: "别名机".into(),
         }]);
         let list = workspace_tab_list();
-        assert_eq!(list[0].title, "别名机");
+        // 主机名称在页签创建后更新，不得改写已有页签的稳定标题。
+        assert_eq!(list[0].title, host);
 
         workspace_select_tab(list[1].id.clone());
         assert_eq!(workspace_active_tab_id(), Some(list[1].id.clone()));

@@ -451,14 +451,21 @@ pub fn transfer_groups() -> Result<Vec<TransferGroupRecord>, PandaError> {
     let tasks = transfer_tasks().lock().unwrap();
     let mut groups: std::collections::HashMap<
         String,
-        (String, TransferDirectionEnum, Vec<TransferStatusEnum>, u64, u64, u32),
+        (
+            String,
+            TransferDirectionEnum,
+            Vec<TransferStatusEnum>,
+            u64,
+            u64,
+            u32,
+        ),
     > = std::collections::HashMap::new();
 
     for task in tasks.values() {
         if let (Some(gid), Some(gname)) = (&task.group_id, &task.group_name) {
-            let entry = groups.entry(gid.clone()).or_insert_with(|| {
-                (gname.clone(), task.direction, Vec::new(), 0, 0, 0)
-            });
+            let entry = groups
+                .entry(gid.clone())
+                .or_insert_with(|| (gname.clone(), task.direction, Vec::new(), 0, 0, 0));
             let status = *task.status.lock().unwrap();
             entry.2.push(status);
             entry.3 += task.size;
@@ -469,29 +476,31 @@ pub fn transfer_groups() -> Result<Vec<TransferGroupRecord>, PandaError> {
 
     let mut result: Vec<TransferGroupRecord> = groups
         .into_iter()
-        .map(|(gid, (gname, dir, statuses, total_bytes, transferred_bytes, total_count))| {
-            let completed_count = statuses
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s,
-                        TransferStatusEnum::Completed
-                            | TransferStatusEnum::Failed
-                            | TransferStatusEnum::Cancelled
-                    )
-                })
-                .count() as u32;
-            TransferGroupRecord {
-                group_id: gid,
-                group_name: gname,
-                direction: dir,
-                total_count,
-                completed_count,
-                total_bytes,
-                transferred_bytes,
-                status: group_status_priority(&statuses),
-            }
-        })
+        .map(
+            |(gid, (gname, dir, statuses, total_bytes, transferred_bytes, total_count))| {
+                let completed_count = statuses
+                    .iter()
+                    .filter(|s| {
+                        matches!(
+                            s,
+                            TransferStatusEnum::Completed
+                                | TransferStatusEnum::Failed
+                                | TransferStatusEnum::Cancelled
+                        )
+                    })
+                    .count() as u32;
+                TransferGroupRecord {
+                    group_id: gid,
+                    group_name: gname,
+                    direction: dir,
+                    total_count,
+                    completed_count,
+                    total_bytes,
+                    transferred_bytes,
+                    status: group_status_priority(&statuses),
+                }
+            },
+        )
         .collect();
     result.sort_by(|a, b| a.group_name.cmp(&b.group_name));
     Ok(result)
@@ -675,7 +684,10 @@ mod tests {
         for done in [1, 512, 1024] {
             let before = transfer_change_counter();
             progress(done, 1024);
-            assert!(transfer_change_counter() > before, "仅字节进度也必须通知订阅方");
+            assert!(
+                transfer_change_counter() > before,
+                "仅字节进度也必须通知订阅方"
+            );
             assert_eq!(task.snapshot().transferred, done);
         }
     }
@@ -770,7 +782,10 @@ mod tests {
         assert!(c3 >= c2 + 1, "cancel should bump counter by at least 1");
 
         // 总共至少递增了 3 次
-        assert!(c3 >= c0 + 3, "three transitions should bump counter by at least 3");
+        assert!(
+            c3 >= c0 + 3,
+            "three transitions should bump counter by at least 3"
+        );
 
         remove_test_task(&id);
     }
@@ -823,7 +838,10 @@ mod tests {
     fn group_status_priority_prefers_running_over_all_terminal_states() {
         let _test_guard = global_test_lock();
         use TransferStatusEnum as S;
-        assert_eq!(group_status_priority(&[S::Failed, S::Running, S::Completed]), S::Running);
+        assert_eq!(
+            group_status_priority(&[S::Failed, S::Running, S::Completed]),
+            S::Running
+        );
         assert_eq!(group_status_priority(&[S::Completed, S::Paused]), S::Paused);
         assert_eq!(group_status_priority(&[S::Completed, S::Queued]), S::Queued);
         assert_eq!(group_status_priority(&[S::Cancelled, S::Failed]), S::Failed);
@@ -849,7 +867,12 @@ mod tests {
         };
 
         let running = mk(Some(("g1", "备份")), TransferStatusEnum::Running, 100, 10);
-        let done = mk(Some(("g1", "备份")), TransferStatusEnum::Completed, 200, 200);
+        let done = mk(
+            Some(("g1", "备份")),
+            TransferStatusEnum::Completed,
+            200,
+            200,
+        );
         let cancelled = mk(Some(("g2", "同步")), TransferStatusEnum::Cancelled, 50, 0);
         let lone = mk(None, TransferStatusEnum::Running, 10, 0);
         for t in [&running, &done, &cancelled, &lone] {
@@ -866,11 +889,15 @@ mod tests {
         assert_eq!(backup.completed_count, 1);
         assert_eq!(backup.total_bytes, 300);
         assert_eq!(backup.transferred_bytes, 210);
-        assert_eq!(backup.status, TransferStatusEnum::Running, "running 优先于 completed");
-        assert!(matches!(
-            backup.direction,
-            TransferDirectionEnum::Download
-        ), "组方向应取首个成员的方向");
+        assert_eq!(
+            backup.status,
+            TransferStatusEnum::Running,
+            "running 优先于 completed"
+        );
+        assert!(
+            matches!(backup.direction, TransferDirectionEnum::Download),
+            "组方向应取首个成员的方向"
+        );
 
         let sync = groups.iter().find(|g| g.group_name == "同步").unwrap();
         assert_eq!(sync.status, TransferStatusEnum::Cancelled);
@@ -891,7 +918,9 @@ mod tests {
         task.paused.store(true, Ordering::Relaxed);
         let handle = runtime().spawn({
             let t = task.clone();
-            async move { wait_while_paused(&t).await; }
+            async move {
+                wait_while_paused(&t).await;
+            }
         });
 
         let mut paused_seen = false;
@@ -1035,13 +1064,23 @@ mod tests {
         insert_test_task(&task);
 
         let version_before = task.version.load(Ordering::Relaxed);
+        // 占满并发槽位，稳定验证重试后在真正获准执行前保持 Queued。
+        // 若不这样做，后台任务可能在下一个断言前已抢到许可证并进入 Running。
+        let permits = runtime()
+            .block_on(transfer_semaphore().acquire_many(TRANSFER_CONCURRENCY as u32))
+            .unwrap();
         let retried = transfer_retry(id.to_string()).unwrap();
         assert_eq!(retried, id.to_string());
-        assert_eq!(*task.status.lock().unwrap(), TransferStatusEnum::Queued, "重试应重置为排队");
+        assert_eq!(
+            *task.status.lock().unwrap(),
+            TransferStatusEnum::Queued,
+            "重试应重置为排队"
+        );
         assert!(task.error.lock().unwrap().is_none(), "重试应清空上次错误");
         assert!(task.version.load(Ordering::Relaxed) > version_before);
 
         // 重试后的任务会真正执行并因连接被拒绝进入 Failed 终态
+        drop(permits);
         let mut terminal = false;
         for _ in 0..300 {
             if *task.status.lock().unwrap() == TransferStatusEnum::Failed {

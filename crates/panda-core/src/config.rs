@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::groups::{group_path, Group};
 use crate::Error;
-use crate::groups::{Group, group_path};
 
 /// How to authenticate against a host.
 ///
@@ -42,6 +42,44 @@ pub struct HostConfig {
 
 fn default_port() -> u16 {
     22
+}
+
+/// 终端缓冲区行数的默认值。
+pub const DEFAULT_TERMINAL_BUFFER_LINES: u32 = 10_000;
+/// 终端缓冲区行数的最小允许值。
+pub const MIN_TERMINAL_BUFFER_LINES: u32 = 1_000;
+/// 终端缓冲区行数的最大允许值。
+pub const MAX_TERMINAL_BUFFER_LINES: u32 = 100_000;
+
+/// 终端缓冲区行数校验错误。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalBufferError {
+    /// 输入不是有效整数。
+    NotANumber,
+    /// 输入超出允许范围。
+    OutOfRange,
+}
+
+/// 返回终端缓冲区行数的默认值（10000）。
+pub fn default_terminal_buffer_lines() -> u32 {
+    DEFAULT_TERMINAL_BUFFER_LINES
+}
+
+/// 校验并规范化终端缓冲区行数的原始文本输入。
+///
+/// 成功返回范围内的 `u32`；失败返回可区分的错误类型。
+/// Swift 侧 MUST 将未解析的表单文本和 UserDefaults 原始值交给此函数，
+/// 不在 Swift 侧重复解析或夹限。
+pub fn validate_terminal_buffer_lines(raw: &str) -> std::result::Result<u32, TerminalBufferError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_TERMINAL_BUFFER_LINES);
+    }
+    let value: u32 = trimmed.parse().map_err(|_| TerminalBufferError::NotANumber)?;
+    if value < MIN_TERMINAL_BUFFER_LINES || value > MAX_TERMINAL_BUFFER_LINES {
+        return Err(TerminalBufferError::OutOfRange);
+    }
+    Ok(value)
 }
 
 impl HostConfig {
@@ -427,8 +465,19 @@ mod tests {
 
     // --- search_hosts ---
 
-    fn make_host(id: &str, name: &str, host: &str, user: &str, group_id: Option<&str>) -> HostConfig {
-        let mut h = HostConfig::new(name, host, user, AuthMethod::Password { password_ref: None });
+    fn make_host(
+        id: &str,
+        name: &str,
+        host: &str,
+        user: &str,
+        group_id: Option<&str>,
+    ) -> HostConfig {
+        let mut h = HostConfig::new(
+            name,
+            host,
+            user,
+            AuthMethod::Password { password_ref: None },
+        );
         h.id = id.into();
         h.group_id = group_id.map(str::to_string);
         h
@@ -436,8 +485,16 @@ mod tests {
 
     fn test_groups() -> Vec<crate::groups::Group> {
         vec![
-            crate::groups::Group { id: "g1".into(), name: "生产环境".into(), parent_id: None },
-            crate::groups::Group { id: "g2".into(), name: "华东".into(), parent_id: Some("g1".into()) },
+            crate::groups::Group {
+                id: "g1".into(),
+                name: "生产环境".into(),
+                parent_id: None,
+            },
+            crate::groups::Group {
+                id: "g2".into(),
+                name: "华东".into(),
+                parent_id: Some("g1".into()),
+            },
         ]
     }
 
@@ -498,9 +555,7 @@ mod tests {
 
     #[test]
     fn search_hosts_case_insensitive() {
-        let hosts = vec![
-            make_host("h1", "WebServer", "10.0.0.1", "Root", None),
-        ];
+        let hosts = vec![make_host("h1", "WebServer", "10.0.0.1", "Root", None)];
         let result = search_hosts(&hosts, &[], "webserver");
         assert_eq!(result.len(), 1);
         let result2 = search_hosts(&hosts, &[], "ROOT");
@@ -509,10 +564,71 @@ mod tests {
 
     #[test]
     fn search_hosts_no_match_returns_empty() {
-        let hosts = vec![
-            make_host("h1", "server", "10.0.0.1", "root", None),
-        ];
+        let hosts = vec![make_host("h1", "server", "10.0.0.1", "root", None)];
         let result = search_hosts(&hosts, &[], "nonexistent");
         assert!(result.is_empty());
+    }
+
+    // --- 终端缓冲区行数配置测试 ---
+
+    #[test]
+    fn terminal_buffer_default_is_10000() {
+        assert_eq!(default_terminal_buffer_lines(), 10_000);
+    }
+
+    #[test]
+    fn terminal_buffer_valid_input_returns_normalized_integer() {
+        assert_eq!(validate_terminal_buffer_lines("1000").unwrap(), 1000);
+        assert_eq!(validate_terminal_buffer_lines("10000").unwrap(), 10000);
+        assert_eq!(validate_terminal_buffer_lines("100000").unwrap(), 100000);
+        assert_eq!(validate_terminal_buffer_lines("50000").unwrap(), 50000);
+    }
+
+    #[test]
+    fn terminal_buffer_empty_input_returns_default() {
+        assert_eq!(validate_terminal_buffer_lines("").unwrap(), 10000);
+        assert_eq!(validate_terminal_buffer_lines("  ").unwrap(), 10000);
+    }
+
+    #[test]
+    fn terminal_buffer_rejects_non_numeric() {
+        assert_eq!(
+            validate_terminal_buffer_lines("abc").unwrap_err(),
+            TerminalBufferError::NotANumber
+        );
+        assert_eq!(
+            validate_terminal_buffer_lines("12.5").unwrap_err(),
+            TerminalBufferError::NotANumber
+        );
+        assert_eq!(
+            validate_terminal_buffer_lines("-1").unwrap_err(),
+            TerminalBufferError::NotANumber
+        );
+    }
+
+    #[test]
+    fn terminal_buffer_rejects_out_of_range() {
+        assert_eq!(
+            validate_terminal_buffer_lines("0").unwrap_err(),
+            TerminalBufferError::OutOfRange
+        );
+        assert_eq!(
+            validate_terminal_buffer_lines("999").unwrap_err(),
+            TerminalBufferError::OutOfRange
+        );
+        assert_eq!(
+            validate_terminal_buffer_lines("100001").unwrap_err(),
+            TerminalBufferError::OutOfRange
+        );
+        assert_eq!(
+            validate_terminal_buffer_lines("999999").unwrap_err(),
+            TerminalBufferError::OutOfRange
+        );
+    }
+
+    #[test]
+    fn terminal_buffer_boundary_values_accepted() {
+        assert_eq!(validate_terminal_buffer_lines("1000").unwrap(), 1000);
+        assert_eq!(validate_terminal_buffer_lines("100000").unwrap(), 100000);
     }
 }

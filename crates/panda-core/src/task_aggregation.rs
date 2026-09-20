@@ -76,22 +76,40 @@ impl TaskGroup {
         if total == 0 {
             return 1.0;
         }
-        let done: u64 = self.items.iter().map(|item| transferred(&item.source)).sum();
+        let done: u64 = self
+            .items
+            .iter()
+            .map(|item| transferred(&item.source))
+            .sum();
         (done as f64 / total as f64).min(1.0)
     }
 
     /// 聚合状态：按 running > paused > queued > failed > cancelled > done 优先级。
     pub fn aggregate_status(&self, status_of: &dyn Fn(&str) -> TaskStatus) -> TaskStatus {
-        let statuses: Vec<TaskStatus> = self.items.iter().map(|item| status_of(&item.source)).collect();
+        let statuses: Vec<TaskStatus> = self
+            .items
+            .iter()
+            .map(|item| status_of(&item.source))
+            .collect();
         if statuses.is_empty() {
             return TaskStatus::Done;
         }
         let status_set = |s: TaskStatus| statuses.contains(&s);
-        if status_set(TaskStatus::Running) { return TaskStatus::Running; }
-        if status_set(TaskStatus::Paused) { return TaskStatus::Paused; }
-        if status_set(TaskStatus::Queued) { return TaskStatus::Queued; }
-        if status_set(TaskStatus::Failed) { return TaskStatus::Failed; }
-        if status_set(TaskStatus::Cancelled) { return TaskStatus::Cancelled; }
+        if status_set(TaskStatus::Running) {
+            return TaskStatus::Running;
+        }
+        if status_set(TaskStatus::Paused) {
+            return TaskStatus::Paused;
+        }
+        if status_set(TaskStatus::Queued) {
+            return TaskStatus::Queued;
+        }
+        if status_set(TaskStatus::Failed) {
+            return TaskStatus::Failed;
+        }
+        if status_set(TaskStatus::Cancelled) {
+            return TaskStatus::Cancelled;
+        }
         TaskStatus::Done
     }
 }
@@ -144,8 +162,7 @@ pub fn aggregate_task_groups(
                 .iter()
                 .filter(|item| {
                     !item.is_dir
-                        && (item.source == *dir_path
-                            || is_descendant_of(&item.source, dir_path))
+                        && (item.source == *dir_path || is_descendant_of(&item.source, dir_path))
                 })
                 .cloned()
                 .collect();
@@ -166,19 +183,12 @@ pub fn aggregate_task_groups(
 
 /// 组级取消计划：返回组内所有非终态任务的源路径。
 pub fn group_cancel_plan(group: &TaskGroup) -> Vec<String> {
-    group
-        .items
-        .iter()
-        .map(|item| item.source.clone())
-        .collect()
+    group.items.iter().map(|item| item.source.clone()).collect()
 }
 
 /// 组级重试计划：返回组内所有失败任务的源路径。
 /// 需要外部提供每个 item 的当前状态。
-pub fn group_retry_plan(
-    group: &TaskGroup,
-    status_of: &dyn Fn(&str) -> TaskStatus,
-) -> Vec<String> {
+pub fn group_retry_plan(group: &TaskGroup, status_of: &dyn Fn(&str) -> TaskStatus) -> Vec<String> {
     group
         .items
         .iter()
@@ -195,9 +205,10 @@ fn filter_top_level_dirs<'a>(dirs: &[&'a str]) -> Vec<&'a str> {
     dirs.iter()
         .copied()
         .filter(|dir| {
-            !dirs.iter().copied().any(|other| {
-                other != *dir && is_descendant_of(*dir, other)
-            })
+            !dirs
+                .iter()
+                .copied()
+                .any(|other| other != *dir && is_descendant_of(*dir, other))
         })
         .collect()
 }
@@ -207,10 +218,7 @@ fn is_descendant_of(path: &str, ancestor: &str) -> bool {
 }
 
 fn extract_name(path: &str) -> String {
-    path.rsplit('/')
-        .next()
-        .unwrap_or(path)
-        .to_string()
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 #[cfg(test)]
@@ -255,10 +263,7 @@ mod tests {
 
     #[test]
     fn files_only_no_groups() {
-        let selected = vec![
-            "/a/file1.txt".to_string(),
-            "/a/file2.txt".to_string(),
-        ];
+        let selected = vec!["/a/file1.txt".to_string(), "/a/file2.txt".to_string()];
         let items = vec![
             file_item("/a/file1.txt", "/remote/file1.txt", 100),
             file_item("/a/file2.txt", "/remote/file2.txt", 200),
@@ -283,22 +288,26 @@ mod tests {
         let items = vec![
             dir_item("/a/project", "/remote/project"),
             dir_item("/a/project/src", "/remote/project/src"),
-            file_item("/a/project/src/main.swift", "/remote/project/src/main.swift", 300),
+            file_item(
+                "/a/project/src/main.swift",
+                "/remote/project/src/main.swift",
+                300,
+            ),
             file_item("/a/project/README.md", "/remote/project/README.md", 100),
         ];
         let result = aggregate_task_groups(&selected, &items, TransferDirection::Upload);
         assert_eq!(result.groups.len(), 1);
         assert_eq!(result.groups[0].name, "project");
-        assert!(result.groups[0].items.iter().all(|i| !i.source.ends_with("/src")));
+        assert!(result.groups[0]
+            .items
+            .iter()
+            .all(|i| !i.source.ends_with("/src")));
         assert_eq!(result.groups[0].items.len(), 2);
     }
 
     #[test]
     fn mixed_dirs_and_files() {
-        let selected = vec![
-            "/a/dirA".to_string(),
-            "/a/readme.md".to_string(),
-        ];
+        let selected = vec!["/a/dirA".to_string(), "/a/readme.md".to_string()];
         let items = vec![
             dir_item("/a/dirA", "/remote/dirA"),
             file_item("/a/dirA/file1.txt", "/remote/dirA/file1.txt", 100),
@@ -327,14 +336,15 @@ mod tests {
 
     #[test]
     fn nested_selection_only_outermost_dir() {
-        let selected = vec![
-            "/a/project".to_string(),
-            "/a/project/src".to_string(),
-        ];
+        let selected = vec!["/a/project".to_string(), "/a/project/src".to_string()];
         let items = vec![
             dir_item("/a/project", "/remote/project"),
             dir_item("/a/project/src", "/remote/project/src"),
-            file_item("/a/project/src/main.swift", "/remote/project/src/main.swift", 300),
+            file_item(
+                "/a/project/src/main.swift",
+                "/remote/project/src/main.swift",
+                300,
+            ),
         ];
         let result = aggregate_task_groups(&selected, &items, TransferDirection::Upload);
         assert_eq!(result.groups.len(), 1);
@@ -382,7 +392,11 @@ mod tests {
             ],
         };
         let transferred = |src: &str| -> u64 {
-            if src == "/a/f1.txt" { 100 } else { 0 }
+            if src == "/a/f1.txt" {
+                100
+            } else {
+                0
+            }
         };
         let progress = group.aggregate_progress(&transferred);
         assert!((progress - 0.5).abs() < f64::EPSILON);
@@ -426,7 +440,11 @@ mod tests {
             ],
         };
         let status_of = |src: &str| -> TaskStatus {
-            if src == "/a/f1.txt" { TaskStatus::Running } else { TaskStatus::Failed }
+            if src == "/a/f1.txt" {
+                TaskStatus::Running
+            } else {
+                TaskStatus::Failed
+            }
         };
         assert_eq!(group.aggregate_status(&status_of), TaskStatus::Running);
     }
@@ -455,7 +473,11 @@ mod tests {
             ],
         };
         let status_of = |src: &str| -> TaskStatus {
-            if src == "/a/f1.txt" { TaskStatus::Failed } else { TaskStatus::Cancelled }
+            if src == "/a/f1.txt" {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Cancelled
+            }
         };
         assert_eq!(group.aggregate_status(&status_of), TaskStatus::Failed);
     }
@@ -532,10 +554,7 @@ mod tests {
 
     #[test]
     fn delete_direction_same_grouping_rules() {
-        let selected = vec![
-            "/a/dirA".to_string(),
-            "/a/file.txt".to_string(),
-        ];
+        let selected = vec!["/a/dirA".to_string(), "/a/file.txt".to_string()];
         let items = vec![
             dir_item("/a/dirA", "/remote/dirA"),
             file_item("/a/dirA/f1.txt", "/remote/dirA/f1.txt", 100),
