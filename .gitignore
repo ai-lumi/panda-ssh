@@ -8,6 +8,7 @@ apple/DerivedData/
 apple/PandaSSH.xcodeproj/
 apple/Rust/PandaCoreFFI.xcframework/
 apple/Rust/Generated/
+apple/DerivedData-TerminalResize/
 xcuserdata/
 *.xcuserstate
 
