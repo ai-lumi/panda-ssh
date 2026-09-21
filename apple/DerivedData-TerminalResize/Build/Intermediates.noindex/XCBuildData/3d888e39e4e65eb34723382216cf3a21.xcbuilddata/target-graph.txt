@@ -1,0 +1,11 @@
+Target dependency graph (5 targets)
+Target 'PandaSSH-macOSTests' in project 'PandaSSH'
+➜ Explicit dependency on target 'PandaSSH-macOS' in project 'PandaSSH'
+Target 'PandaSSH-macOS' in project 'PandaSSH'
+➜ Explicit dependency on target 'SwiftTerm-product' in project 'SwiftTerm'
+Target 'SwiftTerm-product' in project 'SwiftTerm'
+➜ Explicit dependency on target 'SwiftTerm' in project 'SwiftTerm'
+➜ Explicit dependency on target 'SwiftTerm_SwiftTerm' in project 'SwiftTerm'
+Target 'SwiftTerm' in project 'SwiftTerm'
+➜ Explicit dependency on target 'SwiftTerm_SwiftTerm' in project 'SwiftTerm'
+Target 'SwiftTerm_SwiftTerm' in project 'SwiftTerm' (no dependencies)

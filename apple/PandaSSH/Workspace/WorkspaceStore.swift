@@ -278,10 +278,21 @@ final class WorkspaceStore: ObservableObject {
         for id in ids { close(tabID: id) }
     }
 
-    /// 重连终端标签页;SFTP 标签页为 no-op。
+    /// 页签操作的唯一重连入口；由各标签自己的会话状态机建立新连接代次。
+    func reconnectSession(tabID: UUID) {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
+        switch tab.kind {
+        case .terminal:
+            reconnectHandler(tabID)
+        case .sftp:
+            sftpSessions[tabID]?.value?.requestReconnect()
+        }
+    }
+
+    /// 保留旧调用点的终端专用入口；新 UI 应使用 `reconnectSession(tabID:)`。
     func reconnectTerminal(tabID: UUID) {
-        guard let tab = tabs.first(where: { $0.id == tabID }), tab.kind == .terminal else { return }
-        reconnectHandler(tabID)
+        guard tabs.first(where: { $0.id == tabID })?.kind == .terminal else { return }
+        reconnectSession(tabID: tabID)
     }
 
     /// 请求「关闭其他标签页」:若范围内存在已连接终端标签 → 设置 pendingBatchClose

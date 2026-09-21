@@ -1,0 +1,2 @@
+/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Products/Debug/PandaSSH-macOS.app
+/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Products/Debug/PandaSSH-macOS.app

@@ -1,0 +1,44 @@
+{
+  "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH/SidebarTree.swift" : {
+    "const-values" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarTree.swiftconstvalues",
+    "dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarTree.d",
+    "diagnostics" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarTree.dia",
+    "object" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarTree.o",
+    "swift-dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarTree.swiftdeps"
+  },
+  "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH/SidebarView.swift" : {
+    "const-values" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarView.swiftconstvalues",
+    "dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarView.d",
+    "diagnostics" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarView.dia",
+    "object" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarView.o",
+    "swift-dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SidebarView.swiftdeps"
+  },
+  "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH/SnippetsView.swift" : {
+    "const-values" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SnippetsView.swiftconstvalues",
+    "dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SnippetsView.d",
+    "diagnostics" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SnippetsView.dia",
+    "object" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SnippetsView.o",
+    "swift-dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/SnippetsView.swiftdeps"
+  },
+  "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH/Workspace/ShellConnection.swift" : {
+    "const-values" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/ShellConnection.swiftconstvalues",
+    "dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/ShellConnection.d",
+    "diagnostics" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/ShellConnection.dia",
+    "object" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/ShellConnection.o",
+    "swift-dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/ShellConnection.swiftdeps"
+  },
+  "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH/Workspace/TabContextMenuBuilder.swift" : {
+    "const-values" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabContextMenuBuilder.swiftconstvalues",
+    "dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabContextMenuBuilder.d",
+    "diagnostics" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabContextMenuBuilder.dia",
+    "object" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabContextMenuBuilder.o",
+    "swift-dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabContextMenuBuilder.swiftdeps"
+  },
+  "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH/Workspace/TabGroup.swift" : {
+    "const-values" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabGroup.swiftconstvalues",
+    "dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabGroup.d",
+    "diagnostics" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabGroup.dia",
+    "object" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabGroup.o",
+    "swift-dependencies" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PandaSSH.build/Debug/PandaSSH-macOS.build/Objects-normal/arm64/TabGroup.swiftdeps"
+  }
+}

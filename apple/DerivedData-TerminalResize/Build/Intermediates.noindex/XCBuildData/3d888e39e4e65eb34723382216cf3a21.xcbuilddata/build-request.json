@@ -1,0 +1,67 @@
+{
+  "buildCommand" : {
+    "command" : "build",
+    "skipDependencies" : false,
+    "style" : "buildAndRun"
+  },
+  "configuredTargets" : [
+    {
+      "guid" : "afce71fa401f1903f95a7daadac7df2250ea000f148ac86776967bcf9f6fa589"
+    },
+    {
+      "guid" : "afce71fa401f1903f95a7daadac7df229ac1dedca4f8bea5b8001ca757023b43"
+    }
+  ],
+  "containerPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/PandaSSH.xcodeproj",
+  "continueBuildingAfterErrors" : false,
+  "dependencyScope" : "workspace",
+  "enableIndexBuildArena" : false,
+  "hideShellScriptEnvironment" : false,
+  "parameters" : {
+    "action" : "build",
+    "activeArchitecture" : "arm64",
+    "activeRunDestination" : {
+      "disableOnlyActiveArch" : false,
+      "hostTargetedPlatform" : null,
+      "platform" : "macosx",
+      "sdk" : "macosx27.0",
+      "sdkVariant" : "macos",
+      "supportedArchitectures" : [
+        "arm64e",
+        "arm64",
+        "x86_64"
+      ],
+      "targetArchitecture" : "arm64"
+    },
+    "arenaInfo" : {
+      "buildIntermediatesPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex",
+      "buildProductsPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Products",
+      "derivedDataPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize",
+      "indexDataStoreFolderPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Index.noindex/DataStore",
+      "indexEnableDataStore" : true,
+      "indexPCHPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Index.noindex/PrecompiledHeaders",
+      "pchPath" : "/Users/luowenqiang/files/my-codes/panda-ssh/apple/DerivedData-TerminalResize/Build/Intermediates.noindex/PrecompiledHeaders"
+    },
+    "configurationName" : "Debug",
+    "overrides" : {
+      "commandLine" : {
+        "table" : {
+
+        }
+      },
+      "synthesized" : {
+        "table" : {
+          "ENABLE_PREVIEWS" : "NO",
+          "ENABLE_XOJIT_PREVIEWS" : "YES",
+          "TOOLCHAINS" : "com.apple.dt.toolchain.Metal.32023.921.5 $(inherited)"
+        }
+      }
+    }
+  },
+  "schemeCommand" : "test",
+  "showNonLoggedProgress" : true,
+  "useDryRun" : false,
+  "useImplicitDependencies" : true,
+  "useLegacyBuildLocations" : false,
+  "useParallelTargets" : true
+}

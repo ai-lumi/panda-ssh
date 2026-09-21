@@ -78,17 +78,21 @@ final class WorkspaceStoreReconnectTests: XCTestCase {
         XCTAssertEqual(session.attempt, 0, "不存在的 tabID 不应触发任何 session 的 retry")
     }
 
-    /// §6.1 意外操作：对 SFTP 标签调 reconnectTerminal → no-op（不调用已注册 session）。
-    func testReconnectTerminal_sftpTab_isNoOp() {
+    /// SFTP 标签也从页签操作请求重连，而不是由内容区重复提供入口。
+    func testReconnectSession_sftpTab_callsRegisteredSessionRequest() {
         let store = makeStore()
         store.openSFTP(hostID: "h1")
         let tabID = store.tabs[0].id
-        let session = makeSession()
-        store.registerTerminal(session, for: tabID)
+        let session = SftpSessionStore(host: HostEntry(
+            id: "h1", name: "web", address: "example.com", port: 22, username: "root"
+        ), transfers: TransferStore())
+        var requests = 0
+        session.onReconnectRequested = { requests += 1 }
+        store.registerSftp(session, for: tabID)
 
-        store.reconnectTerminal(tabID: tabID)
+        store.reconnectSession(tabID: tabID)
 
-        XCTAssertEqual(session.attempt, 0, "SFTP 标签不应触发重连")
+        XCTAssertEqual(requests, 1)
     }
 
     // MARK: - 边界条件

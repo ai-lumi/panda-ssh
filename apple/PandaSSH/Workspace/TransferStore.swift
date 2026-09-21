@@ -960,13 +960,16 @@ final class TransferStore: ObservableObject {
         let hasQueued = tasks.contains { $0.status == .queued }
         let hasPaused = tasks.contains { $0.status == .paused }
         if hasRunning || hasQueued || hasPaused {
-            return 0.2  // 5Hz：活跃传输时足够流畅
+            // 5Hz：活跃传输时足够流畅
+            return 0.2
         }
         let hasTerminal = tasks.contains { [.done, .failed, .cancelled].contains($0.status) }
         if hasTerminal {
-            return 1.0  // 1Hz：终态任务仅需偶尔刷新
+            // 1Hz：终态任务仅需偶尔刷新
+            return 1.0
         }
-        return nil  // 无任务时停止
+        // 无任务时停止
+        return nil
     }
 
     /// 启动或调整轮询频率；已有 Timer 且频率正确时不重建。

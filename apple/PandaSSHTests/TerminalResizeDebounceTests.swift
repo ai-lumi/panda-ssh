@@ -33,6 +33,22 @@ final class TerminalResizeDebounceTests: XCTestCase {
         XCTAssertEqual(spy.resizeCalls.first?.rows, 35)
     }
 
+    /// 初次布局可能早于异步 SSH 建连完成；连接随后挂载时必须补发已知真实尺寸，
+    /// 不能等待用户手动缩放窗口再次触发尺寸回调。
+    func testConnectionArrivalReportsSizeObservedBeforeConnection() {
+        let coordinator = TerminalCoordinator(onReadError: {})
+        let view = PandaTerminalView(frame: .zero, font: nil)
+        let spy = SpyShellConnection()
+        defer { coordinator.detach() }
+
+        coordinator.sizeChanged(source: view, newCols: 112, newRows: 38)
+        coordinator.update(connection: spy)
+
+        XCTAssertEqual(spy.resizeCalls.count, 1)
+        XCTAssertEqual(spy.resizeCalls.first?.cols, 112)
+        XCTAssertEqual(spy.resizeCalls.first?.rows, 38)
+    }
+
     /// 连续变化（模拟侧栏动画逐帧回调）去抖合并：稳定后仅追加一次最终值上报。
     func testContinuousChangesAreDebouncedToFinalValue() async throws {
         let (coordinator, spy, view) = makeCoordinator()
@@ -68,6 +84,24 @@ final class TerminalResizeDebounceTests: XCTestCase {
         XCTAssertEqual(spy.resizeCalls.count, 1, "detach 后去抖任务应被取消，不再上报")
     }
 
+    /// 连接前形成的去抖任务不属于新连接；连接同步当前尺寸后不得再重复发送。
+    func testConnectionArrivalCancelsPendingPreconnectionDebounce() async throws {
+        let coordinator = TerminalCoordinator(onReadError: {})
+        let view = PandaTerminalView(frame: .zero, font: nil)
+        let spy = SpyShellConnection()
+        defer { coordinator.detach() }
+
+        coordinator.sizeChanged(source: view, newCols: 96, newRows: 35)
+        coordinator.sizeChanged(source: view, newCols: 80, newRows: 30)
+        coordinator.update(connection: spy)
+
+        XCTAssertEqual(spy.resizeCalls.count, 1)
+        XCTAssertEqual(spy.resizeCalls.first?.cols, 80)
+        XCTAssertEqual(spy.resizeCalls.first?.rows, 30)
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertEqual(spy.resizeCalls.count, 1)
+    }
+
     // MARK: - 边界条件
 
     /// 去抖窗口结束后的新一轮变化视为新的序列：再次立即性不适用，仍走去抖。
@@ -85,6 +119,17 @@ final class TerminalResizeDebounceTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(350))
         XCTAssertEqual(spy.resizeCalls.map(\.cols), [96, 90, 110])
         XCTAssertEqual(spy.resizeCalls.map(\.rows), [35, 35, 44])
+    }
+
+    /// 尚未完成有效布局时不可向服务端发送默认或零尺寸。
+    func testConnectionArrivalWithoutObservedSizeDoesNotReportResize() {
+        let coordinator = TerminalCoordinator(onReadError: {})
+        let spy = SpyShellConnection()
+        defer { coordinator.detach() }
+
+        coordinator.update(connection: spy)
+
+        XCTAssertTrue(spy.resizeCalls.isEmpty)
     }
 }
 #endif

@@ -3,7 +3,7 @@ import AppKit
 
 /// 系统终止请求与应用停机流程之间的唯一入口。
 ///
-/// CMD+Q、菜单“退出”与 Dock 退出都会经 AppKit 的 applicationShouldTerminate
+/// CMD+Q、菜单"退出"与 Dock 退出都会经 AppKit 的 applicationShouldTerminate
 /// 进入此处；不能依赖 SwiftUI 的按键事件捕获。
 @MainActor
 final class ApplicationQuitCoordinator {

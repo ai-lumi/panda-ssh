@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>error.auth_failed</key>
+	<string>认证失败</string>
+	<key>error.host_key_mismatch</key>
+	<string>「%1$@」的主机密钥已变更：已记录 %3$@，当前出示 %2$@。</string>
+</dict>
+</plist>

@@ -102,10 +102,14 @@ enum SidebarPage: Equatable {
 
 /// 连接前检查的结果(阶段二在打开终端/SFTP 前据此弹对话框)。
 enum PreconnectAction: Equatable {
-    case proceed       // 直接连接
-    case confirmTofu   // 未知主机 → TOFU 指纹确认
-    case keyMismatch   // 主机密钥变更 → 红色告警并阻断
-    case askPassword   // 未存密码 → 手动输入(仅本次标签页会话)
+    // 直接连接
+    case proceed
+    // 未知主机 → TOFU 指纹确认
+    case confirmTofu
+    // 主机密钥变更 → 红色告警并阻断
+    case keyMismatch
+    // 未存密码 → 手动输入(仅本次标签页会话)
+    case askPassword
 }
 
 @MainActor

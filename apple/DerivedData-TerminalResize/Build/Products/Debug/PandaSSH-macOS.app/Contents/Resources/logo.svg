@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Panda SSH Logo">
+  <defs>
+    <!-- 深色科技背景，从中央微微发亮到边缘 -->
+    <radialGradient id="bg" cx="50%" cy="45%" r="75%">
+      <stop offset="0%" stop-color="#1a2f24"/>
+      <stop offset="60%" stop-color="#0f1a16"/>
+      <stop offset="100%" stop-color="#0a100e"/>
+    </radialGradient>
+
+    <!-- 熊猫脸部轻微立体感 -->
+    <linearGradient id="face" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e8f0ec"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角图标底板 -->
+  <rect x="10" y="10" width="492" height="492" rx="110" fill="url(#bg)"/>
+
+  <!-- 熊猫耳朵 -->
+  <circle cx="170" cy="190" r="44" fill="#0d1412"/>
+  <circle cx="342" cy="190" r="44" fill="#0d1412"/>
+
+  <!-- 熊猫头主体 -->
+  <ellipse cx="256" cy="268" rx="132" ry="114" fill="url(#face)"/>
+
+  <!-- 左眼斑（黑色） -->
+  <ellipse cx="204" cy="261" rx="38" ry="42" fill="#0d1412"/>
+  
+  <!-- 左眼：终端光标（绿色竖线） -->
+  <rect x="198" y="242" width="12" height="38" rx="3" fill="#2dd56f"/>
+
+  <!-- 右眼斑（黑色） -->
+  <ellipse cx="308" cy="261" rx="38" ry="42" fill="#0d1412"/>
+  
+  <!-- 右眼：绿色圆点 -->
+  <circle cx="300" cy="261" r="13" fill="#2dd56f"/>
+
+  <!-- 鼻子 -->
+  <ellipse cx="256" cy="302" rx="14" ry="10" fill="#0d1412"/>
+
+  <!-- 微笑 -->
+  <path d="M232 318 Q256 338 280 318" fill="none" stroke="#0d1412" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- 终端提示符 >_ -->
+  <g font-family="SF Mono, Menlo, monospace" font-size="44" font-weight="600" fill="#2dd56f" text-anchor="middle">
+    <text x="256" y="418">&gt;_</text>
+  </g>
+</svg>
