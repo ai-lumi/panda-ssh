@@ -119,11 +119,6 @@ final class WorkspaceStore: ObservableObject {
         sftpSessions[tabID] = WeakSftpSession(value: session)
     }
 
-    /// 注销终端会话。仅在标签实际关闭时调用(非视图切换)。
-    func unregisterTerminal(for tabID: UUID) {
-        terminalSessions.removeValue(forKey: tabID)
-    }
-
     // MARK: - 连接状态
 
     /// 标记终端标签已连接(phase→.shell)。同时通知 Rust 侧工作区管理器,

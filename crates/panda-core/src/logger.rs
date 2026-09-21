@@ -112,11 +112,6 @@ impl Logger {
         }
     }
 
-    /// 快捷方法。
-    pub fn debug(&self, module: &str, message: &str) {
-        self.log(LogLevel::Debug, module, message);
-    }
-
     pub fn info(&self, module: &str, message: &str) {
         self.log(LogLevel::Info, module, message);
     }

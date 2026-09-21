@@ -254,30 +254,6 @@ struct TerminalTabView: View {
         .allowsHitTesting(false)
     }
 
-    /// 终端画布容器：黑色背景 + 居中 overlay 面板
-    private func terminalCanvas<Overlay: View>(presentation: TerminalContentPresentation, @ViewBuilder overlay: () -> Overlay) -> some View {
-        ZStack {
-            // 底层：纯黑色背景
-            Color.black
-            // 上层：ScrollView 包裹 overlay 内容
-            ScrollView {
-                overlay()
-                    // .frame(width:) 限制面板宽度
-                    .frame(width: presentation.panelWidth)
-                    // .padding(.vertical, 16) 面板上下留 16pt 边距
-                    .padding(.vertical, 16)
-                    // .frame(maxWidth: .infinity) 水平撑满
-                    .frame(maxWidth: .infinity)
-                    // .frame(minHeight:) 最小高度等于画布高度
-                    .frame(minHeight: presentation.canvasHeight)
-            }
-        }
-        // .frame(maxWidth: .infinity, maxHeight: .infinity) 撑满整个可用区域
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // .environment(\.colorScheme, .dark) 强制深色模式（终端始终是深色背景）
-        .environment(\.colorScheme, .dark)
-    }
-
     /// 连接阶段 body 的居中 overlay 内容（进度指示器 + 连接地址文字）
     private var connectingBody: some View {
         VStack(spacing: 12) {

@@ -1476,21 +1476,9 @@ final class SftpSessionStore: ObservableObject {
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
 
-    private func parentPath(of path: String) -> String {
-        (path as NSString).deletingLastPathComponent
-    }
-
     /// 安全拼接文件路径，避免双斜杠（如根目录 `/` 拼接后变成 `//name`）。
     private func joinPath(_ dir: String, _ name: String) -> String {
         sftpChildPath(directory: dir, name: name)
-    }
-
-    /// 删除本地文件或目录;删除成功后刷新本地面板。
-    /// 返回 `nil` 表示成功，否则返回错误描述。
-    func deleteLocal(name: String) async -> String? {
-        let error = deleteLocalCore(name: name)
-        if error == nil { _ = await localPane.reload() }
-        return error
     }
 
     /// 删除远程文件或目录;删除成功后刷新远程面板。

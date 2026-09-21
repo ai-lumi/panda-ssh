@@ -83,7 +83,6 @@ final class PandaCoreBridge {
     func updateCredentialProtectionKey(currentKey: String?, newKey: String?) throws {
         try setCredentialProtectionKey(currentKey: currentKey, newKey: newKey)
     }
-    func isCredentialProtectionEnabled() throws -> Bool { try credentialProtectionEnabled() }
 
     func allGroups() throws -> [GroupRecord] {
         try listGroups()
@@ -97,10 +96,6 @@ final class PandaCoreBridge {
     /// (方法名与生成的全局函数错开,避免成员/全局查找歧义)
     func removeGroup(id: String) throws {
         try deleteGroup(id: id)
-    }
-
-    func relocateGroup(id: String, toParent parentID: String?) throws {
-        try moveGroup(id: id, newParentId: parentID)
     }
 
     /// `password` / `passphrase` are fetched from the local credential store by the caller;
@@ -119,11 +114,6 @@ final class PandaCoreBridge {
     /// 用户确认信任后,把探测呈现的密钥写入 known_hosts。
     func acceptPresentedHostKey(host: String, port: UInt16, key: String) throws {
         try acceptUnknownHostKey(host: host, port: port, key: key)
-    }
-
-    /// 解析远端 SFTP 会话初始工作目录（通常为 home 目录）。
-    func resolveSftpHomeDir(of hostID: String, password: String? = nil, passphrase: String? = nil, trustOnFirstUse: Bool = false) throws -> String {
-        try sftpHomeDir(hostId: hostID, password: password, passphrase: passphrase, trustOnFirstUse: trustOnFirstUse)
     }
 
     /// 为一个 SFTP 标签建立独立长连接；后续文件操作必须使用返回的句柄。
@@ -275,15 +265,6 @@ final class PandaCoreBridge {
         try deleteSnippet(name: name)
     }
 
-    // MARK: - 连接监控
-
-    func connectionTelemetry() -> [ConnectionTelemetryRecord] {
-        connectionTelemetryList()
-    }
-
-    func checkConnectionHealth(id: UInt64) throws -> HealthStateEnum {
-        try connectionHealthCheck(connectionId: id)
-    }
 }
 
 /// 阻塞型 FFI 调用的后台调度设施。

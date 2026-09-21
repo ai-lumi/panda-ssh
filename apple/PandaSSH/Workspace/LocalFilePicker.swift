@@ -92,16 +92,3 @@ private extension UIApplication {
     }
 }
 #endif
-
-/// 内存 fake:返回固定路径,用于测试。
-final class FakeLocalFilePicker: LocalFilePicker {
-    var picked: PickedLocalFiles?
-
-    init(picked: PickedLocalFiles? = nil) {
-        self.picked = picked
-    }
-
-    func pickFiles() async -> PickedLocalFiles? {
-        picked
-    }
-}
