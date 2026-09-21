@@ -90,7 +90,7 @@ final class KeyboardShortcutCloseTabTests: XCTestCase {
         let store = WorkspaceStore(hostNameProvider: { _ in "host-e" })
         let tabID = store.openTerminal(hostID: "host-e")
         store.select(tabID: tabID)
-        store.markTerminalConnected(tabID: tabID)
+        store.reportConnectionStatus(.connected, forTabID: tabID)
 
         if let activeID = store.activeTabID {
             store.requestClose(tabID: activeID)
@@ -105,7 +105,7 @@ final class KeyboardShortcutCloseTabTests: XCTestCase {
         let store = WorkspaceStore(hostNameProvider: { _ in "host-f" })
         let tabID = store.openTerminal(hostID: "host-f")
         store.select(tabID: tabID)
-        store.markTerminalConnected(tabID: tabID)
+        store.reportConnectionStatus(.connected, forTabID: tabID)
 
         store.requestClose(tabID: tabID)
         XCTAssertEqual(store.pendingCloseTabID, tabID)
@@ -121,7 +121,7 @@ final class KeyboardShortcutCloseTabTests: XCTestCase {
         let store = WorkspaceStore(hostNameProvider: { _ in "host-g" })
         let tabID = store.openTerminal(hostID: "host-g")
         store.select(tabID: tabID)
-        store.markTerminalConnected(tabID: tabID)
+        store.reportConnectionStatus(.connected, forTabID: tabID)
 
         store.requestClose(tabID: tabID)
         store.cancelClose()

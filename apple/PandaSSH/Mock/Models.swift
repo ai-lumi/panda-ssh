@@ -104,13 +104,6 @@ struct Snippet: Identifiable, Equatable {
 /// 分组树纯函数工具:View 与后端共用。
 enum GroupTree {
     /// 根级分组:parentID 为 nil,或 parent 已不存在(悬空 parent 降级为根级)。
-    static func roots(of groups: [HostGroup]) -> [HostGroup] {
-        groups.filter { group in
-            guard let parent = group.parentID else { return true }
-            return !groups.contains { $0.id == parent }
-        }
-    }
-
     static func children(of parentID: String, in groups: [HostGroup]) -> [HostGroup] {
         groups.filter { $0.parentID == parentID }
     }

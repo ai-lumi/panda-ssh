@@ -157,17 +157,6 @@ final class MockBackendTests: XCTestCase {
 
     // MARK: - 分组树工具(悬空 parent 降级 / 路径 / 级联 id)
 
-    func testGroupWithDanglingParentDegradesToRoot() {
-        let groups = [
-            HostGroup(id: "g1", name: "正常", parentID: nil),
-            HostGroup(id: "g2", name: "孤儿", parentID: "ghost"),
-        ]
-
-        let roots = GroupTree.roots(of: groups)
-
-        XCTAssertEqual(Set(roots.map(\.id)), ["g1", "g2"])
-    }
-
     func testGroupPathRendersNestedNames() {
         let backend = makeBackend()
 

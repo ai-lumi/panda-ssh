@@ -1481,14 +1481,6 @@ final class SftpSessionStore: ObservableObject {
         sftpChildPath(directory: dir, name: name)
     }
 
-    /// 删除远程文件或目录;删除成功后刷新远程面板。
-    /// 返回 `nil` 表示成功，否则返回错误描述。
-    func deleteRemote(name: String) async -> String? {
-        let error = await deleteRemoteCore(name: name)
-        if error == nil { _ = await remotePane.reload() }
-        return error
-    }
-
     /// 本地删除核心逻辑(不刷新面板);批量删除时逐个调用、最后统一刷新一次。
     private func deleteLocalCore(name: String) -> String? {
         let path = joinPath(localPane.path, name)
@@ -1559,22 +1551,6 @@ final class SftpSessionStore: ObservableObject {
         }
         _ = await remotePane.reload()
         return (deleted, failed)
-    }
-
-    /// 右键菜单「删除」action:若条目已在选中集合 → 删除整个集合;
-    /// 否则先置为唯一选中再删除(item 5 修复:多选删除未处理)。
-    @discardableResult
-    func contextDelete(entry: FileEntry, local: Bool) async -> (deleted: Int, failed: [(name: String, error: String)]) {
-        let selectedSet = local ? selectedLocalSet : selectedRemoteSet
-        let isMulti = local ? isLocalMultiSelect : isRemoteMultiSelect
-        if isMulti && selectedSet.contains(entry.name) && selectedSet.count > 1 {
-            let names = Array(selectedSet)
-            return local ? await deleteLocalBatch(names: names) : await deleteRemoteBatch(names: names)
-        }
-        if !selectedSet.contains(entry.name) {
-            if local { selectLocal(entry.name, append: false) } else { selectRemote(entry.name, append: false) }
-        }
-        return local ? await deleteLocalBatch(names: [entry.name]) : await deleteRemoteBatch(names: [entry.name])
     }
 
     private func checkUploadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {

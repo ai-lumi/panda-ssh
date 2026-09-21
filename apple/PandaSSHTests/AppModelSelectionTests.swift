@@ -88,7 +88,7 @@ final class AppModelSelectionTests: XCTestCase {
 
     func testPresentTab切回主机页并记录互斥呈现选择() {
         let tabID = UUID()
-        model.showSnippets()
+        model.sidebarPage = .snippets
 
         model.presentTab(tabID)
         drainMainQueue()

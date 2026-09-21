@@ -208,7 +208,6 @@ final class AppModel: ObservableObject {
         #endif
     }
 
-    func showSnippets() { sidebarPage = .snippets }
     func showConnectionMonitor() {
         #if os(iOS)
         sidebarPage = .connectionMonitor

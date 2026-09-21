@@ -121,17 +121,6 @@ final class WorkspaceStore: ObservableObject {
 
     // MARK: - 连接状态
 
-    /// 标记终端标签已连接(phase→.shell)。同时通知 Rust 侧工作区管理器,
-    /// 用于关闭确认判断。
-    func markTerminalConnected(tabID: UUID) {
-        reportConnectionStatus(.connected, forTabID: tabID)
-    }
-
-    /// 标记终端标签已断开(phase→.failed 或连接丢失)。
-    func markTerminalDisconnected(tabID: UUID) {
-        reportConnectionStatus(.failed, forTabID: tabID)
-    }
-
     /// 由终端/SFTP 页签在连接状态变化时调用。已被关闭的页签不得重新写入状态，
     /// 以避免 SwiftUI 的延迟 onDisappear 产生"幽灵连接"。
     /// 同时转发到 Rust 侧工作区管理器,维护关闭确认所需的连接状态。
@@ -284,12 +273,6 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    /// 保留旧调用点的终端专用入口；新 UI 应使用 `reconnectSession(tabID:)`。
-    func reconnectTerminal(tabID: UUID) {
-        guard tabs.first(where: { $0.id == tabID })?.kind == .terminal else { return }
-        reconnectSession(tabID: tabID)
-    }
-
     /// 请求「关闭其他标签页」:若范围内存在已连接终端标签 → 设置 pendingBatchClose
     /// 等待聚合确认;否则直接执行 closeOthers。
     func requestCloseOthers(keeping tabID: UUID) {
@@ -440,21 +423,6 @@ final class WorkspaceStore: ObservableObject {
         for i in groups.indices {
             groups[i].tabIDs.removeAll(where: { $0 == tabID })
         }
-    }
-
-    /// 在显示顺序中移动页签到指定索引位置。
-    /// 用于拖拽排序，同时更新 ungroupedTabIDs 的顺序。
-    func moveTabInDisplayOrder(_ tabID: UUID, toIndex targetIndex: Int) {
-        guard let currentIndex = displayOrder.firstIndex(of: tabID) else { return }
-        guard targetIndex >= 0 && targetIndex < displayOrder.count else { return }
-        guard currentIndex != targetIndex else { return }
-
-        displayOrder.remove(at: currentIndex)
-        displayOrder.insert(tabID, at: targetIndex)
-
-        // 同步更新 ungroupedTabIDs 的顺序
-        let groupedTabIDs = Set(groups.flatMap(\.tabIDs))
-        ungroupedTabIDs = displayOrder.filter { !groupedTabIDs.contains($0) }
     }
 
     // MARK: - 拖放事务

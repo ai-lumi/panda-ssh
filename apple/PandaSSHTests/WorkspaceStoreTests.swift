@@ -37,8 +37,8 @@ final class WorkspaceStoreTests: XCTestCase {
         b.finishConnecting()
         store.registerTerminal(a, for: first)
         store.registerTerminal(b, for: second)
-        store.markTerminalConnected(tabID: first)
-        store.markTerminalConnected(tabID: second)
+        store.reportConnectionStatus(.connected, forTabID: first)
+        store.reportConnectionStatus(.connected, forTabID: second)
 
         store.requestClose(tabID: first)
 
@@ -79,7 +79,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let store = WorkspaceStore(hostNameProvider: { _ in "web" },
                                    closeSessionHandler: { released.append($0.id) })
         let id = store.openTerminal(hostID: "h1")
-        store.markTerminalDisconnected(tabID: id)
+        store.reportConnectionStatus(.failed, forTabID: id)
 
         // 与失败页「关闭标签」按钮相同的执行入口。
         store.close(tabID: id)
@@ -402,8 +402,8 @@ final class WorkspaceStoreTests: XCTestCase {
         let terminalID = store.tabs[0].id
         let sftpID = store.tabs[1].id
 
-        store.reconnectTerminal(tabID: terminalID)
-        store.reconnectTerminal(tabID: sftpID)
+        store.reconnectSession(tabID: terminalID)
+        store.reconnectSession(tabID: sftpID)
 
         XCTAssertEqual(reconnected.value, [terminalID])
     }
@@ -586,7 +586,7 @@ final class WorkspaceStoreTests: XCTestCase {
         store.openTerminal(hostID: "h2")
         store.openSFTP(hostID: "h1")
         let keep = store.tabs[1].id
-        store.markTerminalConnected(tabID: store.tabs[0].id) // 第一个终端已连接,会被关闭
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[0].id) // 第一个终端已连接,会被关闭
 
         store.requestCloseOthers(keeping: keep)
 
@@ -612,8 +612,8 @@ final class WorkspaceStoreTests: XCTestCase {
         let (store, _, _) = makeLifecycleStore()
         store.openTerminal(hostID: "h1")
         store.openTerminal(hostID: "h2")
-        store.markTerminalConnected(tabID: store.tabs[0].id)
-        store.markTerminalConnected(tabID: store.tabs[1].id)
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[0].id)
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[1].id)
 
         store.requestCloseAll()
 
@@ -639,7 +639,7 @@ final class WorkspaceStoreTests: XCTestCase {
         store.openTerminal(hostID: "h2")
         store.openSFTP(hostID: "h1")
         let keep = store.tabs[1].id
-        store.markTerminalConnected(tabID: store.tabs[0].id)
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[0].id)
         store.requestCloseOthers(keeping: keep)
         XCTAssertNotNil(store.pendingBatchClose)
 
@@ -656,8 +656,8 @@ final class WorkspaceStoreTests: XCTestCase {
         let (store, disconnected, _) = makeLifecycleStore()
         store.openTerminal(hostID: "h1")
         store.openTerminal(hostID: "h2")
-        store.markTerminalConnected(tabID: store.tabs[0].id)
-        store.markTerminalConnected(tabID: store.tabs[1].id)
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[0].id)
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[1].id)
         store.requestCloseAll()
         XCTAssertNotNil(store.pendingBatchClose)
 
@@ -672,7 +672,7 @@ final class WorkspaceStoreTests: XCTestCase {
     func testCancelBatchCloseKeepsTabs() {
         let (store, _, _) = makeLifecycleStore()
         store.openTerminal(hostID: "h1")
-        store.markTerminalConnected(tabID: store.tabs[0].id)
+        store.reportConnectionStatus(.connected, forTabID: store.tabs[0].id)
         store.requestCloseAll()
         XCTAssertNotNil(store.pendingBatchClose)
 
@@ -699,7 +699,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let sftpID = store.tabs[1].id
 
         // 终端已连接(视图可能已因切到 SFTP 而销毁,但 store 仍记录连接态)
-        store.markTerminalConnected(tabID: terminalID)
+        store.reportConnectionStatus(.connected, forTabID: terminalID)
 
         store.requestCloseOthers(keeping: sftpID)
 
@@ -708,7 +708,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.tabs.count, 2, "确认前不实际关闭")
     }
 
-    /// markTerminalDisconnected 后不再视为已连接 → 关闭其他不弹确认。
+    /// reportConnectionStatus(.failed) 后不再视为已连接 → 关闭其他不弹确认。
     func testMarkTerminalDisconnectedClearsConfirmation() {
         let store = WorkspaceStore(
             hostNameProvider: { _ in "web" },
@@ -719,8 +719,8 @@ final class WorkspaceStoreTests: XCTestCase {
         let terminalID = store.tabs[0].id
         let sftpID = store.tabs[1].id
 
-        store.markTerminalConnected(tabID: terminalID)
-        store.markTerminalDisconnected(tabID: terminalID)
+        store.reportConnectionStatus(.connected, forTabID: terminalID)
+        store.reportConnectionStatus(.failed, forTabID: terminalID)
 
         store.requestCloseOthers(keeping: sftpID)
 
@@ -736,7 +736,7 @@ final class WorkspaceStoreTests: XCTestCase {
         )
         store.openTerminal(hostID: "h1")
         let terminalID = store.tabs[0].id
-        store.markTerminalConnected(tabID: terminalID)
+        store.reportConnectionStatus(.connected, forTabID: terminalID)
 
         store.close(tabID: terminalID)
 
@@ -762,7 +762,7 @@ final class WorkspaceStoreTests: XCTestCase {
         // 重新打开并标记连接
         store.openTerminal(hostID: "h1")
         let newID = store.tabs[0].id
-        store.markTerminalConnected(tabID: newID)
+        store.reportConnectionStatus(.connected, forTabID: newID)
 
         store.requestClose(tabID: newID)
         XCTAssertEqual(store.pendingCloseTabID, newID, "已连接终端需确认")
@@ -910,7 +910,7 @@ final class WorkspaceConnectionStatusObservationTests: XCTestCase {
         let subscription = store.objectWillChange.sink { notifications += 1 }
         defer { subscription.cancel() }
 
-        store.markTerminalDisconnected(tabID: id)
+        store.reportConnectionStatus(.failed, forTabID: id)
 
         XCTAssertEqual(notifications, 1)
         XCTAssertEqual(store.connectionStatus(forTabID: id), .failed)
@@ -921,8 +921,8 @@ final class WorkspaceConnectionStatusObservationTests: XCTestCase {
         let store = WorkspaceStore(hostNameProvider: { _ in "web" })
         let ended = store.openTerminal(hostID: "h1")
         let active = store.openTerminal(hostID: "h1")
-        store.markTerminalConnected(tabID: ended)
-        store.markTerminalConnected(tabID: active)
+        store.reportConnectionStatus(.connected, forTabID: ended)
+        store.reportConnectionStatus(.connected, forTabID: active)
         var notifications = 0
         let subscription = store.objectWillChange.sink { notifications += 1 }
         defer { subscription.cancel() }

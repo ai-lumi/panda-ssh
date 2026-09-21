@@ -620,22 +620,6 @@ final class FilePaneNavigatorTests: XCTestCase {
         XCTAssertEqual(scanThreadIsMain, false, "远程扫描应在非主线程执行")
     }
 
-    /// 远程删除在后台线程执行。
-    func testDeleteRemoteRunsOffMainThread() async {
-        let (session, _) = makeSession()
-        _ = await session.remotePane.reload()
-        var deleteThreadIsMain: Bool?
-        session.deleteRemoteHandler = { _, _ in
-            deleteThreadIsMain = Thread.isMainThread
-            return nil
-        }
-
-        let result = await session.deleteRemote(name: ".bashrc")
-
-        XCTAssertNil(result)
-        XCTAssertEqual(deleteThreadIsMain, false, "远程删除应在非主线程执行")
-    }
-
     func testDirectoryTransferCreatesTaskGroup() async {
         let (session, transfers) = makeSession()
         session.scanLocalHandler = { paths, destDir in
@@ -1066,67 +1050,6 @@ final class FilePaneNavigatorTests: XCTestCase {
         XCTAssertEqual(session.selectedRemoteSet, [names[1]])
         XCTAssertEqual(transfers.tasks.count - beforeCount, 1)
         XCTAssertEqual(transfers.tasks.last?.direction, .download)
-    }
-
-    // MARK: - 右键删除:多选集合操作 / 未选中置为唯一选中(修复:多选删除未处理)
-
-    func testContextDeleteOnSelectedEntryDeletesWholeSet() async {
-        let (session, _) = makeSession()
-        _ = await session.remotePane.reload()
-        var deletedNames: [String] = []
-        session.deleteRemoteHandler = { name, _ in
-            deletedNames.append(name)
-            return nil
-        }
-        let names = session.remotePane.entries.filter { !$0.isDirectory }.prefix(2).map(\.name)
-        guard names.count >= 2 else { return XCTFail("演示数据需至少 2 个远程文件") }
-        session.isRemoteMultiSelect = true
-        session.selectedRemoteSet = Set(names)
-        let entry = session.remotePane.entries.first { $0.name == names.first! }!
-
-        let result = await session.contextDelete(entry: entry, local: false)
-
-        XCTAssertEqual(deletedNames.count, 2, "多选右键删除应作用于整个选中集合")
-        XCTAssertEqual(result.deleted, 2)
-        XCTAssertTrue(session.selectedRemoteSet == Set(names), "选中集合不变")
-    }
-
-    func testContextDeleteOnUnselectedEntrySelectsOnlyIt() async {
-        let (session, _) = makeSession()
-        _ = await session.remotePane.reload()
-        var deletedNames: [String] = []
-        session.deleteRemoteHandler = { name, _ in
-            deletedNames.append(name)
-            return nil
-        }
-        let names = session.remotePane.entries.filter { !$0.isDirectory }.prefix(2).map(\.name)
-        guard names.count >= 2 else { return XCTFail("演示数据需至少 2 个远程文件") }
-        session.isRemoteMultiSelect = true
-        session.selectedRemoteSet = [names[0]]
-        let unselectedEntry = session.remotePane.entries.first { $0.name == names[1] }!
-
-        let result = await session.contextDelete(entry: unselectedEntry, local: false)
-
-        XCTAssertEqual(session.selectedRemoteSet, [names[1]], "右键未选中条目 → 先置为唯一选中")
-        XCTAssertEqual(deletedNames.count, 1, "仅删除右键的条目")
-        XCTAssertEqual(result.deleted, 1)
-    }
-
-    func testContextDeleteSingleSelectDeletesOnlyIt() async {
-        let (session, _) = makeSession()
-        _ = await session.remotePane.reload()
-        var deletedNames: [String] = []
-        session.deleteRemoteHandler = { name, _ in
-            deletedNames.append(name)
-            return nil
-        }
-        let entry = session.remotePane.entries.first { !$0.isDirectory }!
-        session.selectRemote(entry.name)
-
-        let result = await session.contextDelete(entry: entry, local: false)
-
-        XCTAssertEqual(deletedNames, [entry.name])
-        XCTAssertEqual(result.deleted, 1)
     }
 
     // MARK: - Shift 范围选择

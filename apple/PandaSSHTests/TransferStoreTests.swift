@@ -491,19 +491,6 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertEqual(task?.batchDestDir, "/remote/dir")
     }
 
-    func testAddBatchDownloadRecordsSourcesAndDestDir() {
-        let spy = BatchTransferSourceSpy()
-        let store = TransferStore(source: spy, batchSource: spy)
-
-        let id = store.addBatchDownload(sources: ["/remote/a.log", "/remote/b.log"], destDir: "/local/dir", hostID: "h2")
-
-        XCTAssertEqual(spy.downloads.last?.sources, ["/remote/a.log", "/remote/b.log"])
-        XCTAssertEqual(spy.downloads.last?.destDir, "/local/dir")
-        let task = store.tasks.first { $0.id == id }
-        XCTAssertEqual(task?.direction, .download)
-        XCTAssertTrue(task?.isBatch ?? false)
-    }
-
     func testBatchTaskNameShowsCount() {
         let spy = BatchTransferSourceSpy()
         let store = TransferStore(source: spy, batchSource: spy)

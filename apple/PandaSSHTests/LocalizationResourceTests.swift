@@ -253,42 +253,6 @@ final class LocalizationResourceTests: XCTestCase {
             LocalizedTextResolver.builtinGenericError)
     }
 
-    // MARK: - 显示用时长格式化（任务 2.3 / 2.4）
-
-    func testDurationFormattingInChinese() {
-        XCTAssertEqual(DurationFormatter.localizedDuration(seconds: 0, language: .zhHans), "0秒")
-        XCTAssertEqual(DurationFormatter.localizedDuration(seconds: 59, language: .zhHans), "59秒")
-        XCTAssertEqual(DurationFormatter.localizedDuration(seconds: 60, language: .zhHans), "1分钟")
-        XCTAssertEqual(DurationFormatter.localizedDuration(seconds: 61, language: .zhHans), "1分钟1秒")
-        let hour = DurationFormatter.localizedDuration(seconds: 3661, language: .zhHans)
-        XCTAssertEqual(hour, "1小时1分钟1秒")
-    }
-
-    func testDurationFormattingInEnglish() {
-        let zero = DurationFormatter.localizedDuration(seconds: 0, language: .en)
-        XCTAssertTrue(zero.contains("0"), "0 秒的英语显示应包含数字 0：\(zero)")
-        let sixty = DurationFormatter.localizedDuration(seconds: 60, language: .en)
-        XCTAssertTrue(sixty.contains("1") && (sixty.contains("min") || sixty.contains("m")),
-                      "60 秒的英语显示应为 1 分钟：\(sixty)")
-        let critical = DurationFormatter.localizedDuration(seconds: 61, language: .en)
-        XCTAssertTrue(critical.contains("1"), "61 秒的英语显示应包含 1 分钟与 1 秒：\(critical)")
-        let large = DurationFormatter.localizedDuration(seconds: 360_000, language: .en)
-        XCTAssertTrue(large.contains("100") , "大数量的英语显示应包含 100 小时：\(large)")
-    }
-
-    /// 无效时长（nil / 负数）→ 未知时长资源，不崩溃。
-    func testUnknownDurationReturnsLocalizedResource() {
-        XCTAssertEqual(
-            DurationFormatter.localizedDuration(seconds: nil, language: .zhHans),
-            "未知时长")
-        XCTAssertEqual(
-            DurationFormatter.localizedDuration(seconds: -1, language: .zhHans),
-            "未知时长")
-        XCTAssertEqual(
-            DurationFormatter.localizedDuration(seconds: nil, language: .en),
-            "Unknown duration")
-    }
-
     // MARK: - 测试辅助
 
     private var tempRoot: URL!

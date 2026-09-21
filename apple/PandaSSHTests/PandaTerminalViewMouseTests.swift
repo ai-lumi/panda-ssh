@@ -1,6 +1,7 @@
 import XCTest
 
 #if os(macOS)
+import AppKit
 @testable import PandaSSH_macOS
 import SwiftTerm
 
@@ -60,7 +61,7 @@ final class PandaTerminalViewMouseTests: XCTestCase {
         let spy = SpyPandaDelegate()
         view.pandaDelegate = spy
 
-        view.simulateMouseUp()
+        view.mouseUp(with: mouseEvent(.leftMouseUp))
 
         XCTAssertEqual(spy.updatePrimarySelectionCount, 1, "mouseUp 应触发 updatePrimarySelection")
         XCTAssertTrue(view.testDidCallSuperMouseUp, "mouseUp 应调 super 保留既有选择行为")
@@ -104,13 +105,17 @@ final class PandaTerminalViewMouseTests: XCTestCase {
     func testRightMouseDown_doesNotCallSuper() {
         let view = makeView()
 
-        view.simulateRightMouseDown()
+        view.rightMouseDown(with: mouseEvent(.rightMouseDown))
 
         XCTAssertFalse(view.testDidCallSuperRightMouseDown, "rightMouseDown 不应调 super（为 NSMenu 让路）")
         // 测试不崩溃即通过
     }
 
     // MARK: - 辅助
+
+    private func mouseEvent(_ type: NSEvent.EventType) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: NSPoint(x: 10, y: 10), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1.0)!
+    }
 
     /// 构造 in-process `PandaTerminalView`，frame 320×240 保证可见区域。
     private func makeView() -> PandaTerminalView {

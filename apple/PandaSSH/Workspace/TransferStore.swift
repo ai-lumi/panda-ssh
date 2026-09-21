@@ -738,33 +738,6 @@ final class TransferStore: ObservableObject {
         return UUID(uuidString: id) ?? UUID()
     }
 
-    /// 新增批量下载任务。
-    @discardableResult
-    func addBatchDownload(
-        sources: [String],
-        destDir: String,
-        groupID: UUID? = nil,
-        groupName: String? = nil,
-        hostID: String = "",
-        password: String? = nil,
-        passphrase: String? = nil
-    ) -> UUID {
-        guard isAcceptingNewTasks else { return UUID() }
-        guard let batchSource = batchSource else { return UUID() }
-        let id = batchSource.enqueueBatchDownload(
-            hostID: hostID,
-            sources: sources,
-            destDir: destDir,
-            groupID: groupID?.uuidString,
-            groupName: groupName,
-            password: password,
-            passphrase: passphrase
-        )
-        refresh()
-        startPollingIfNeeded()
-        return UUID(uuidString: id) ?? UUID()
-    }
-
     /// 进度步进:真实源检查变更计数器,仅在变化时刷新;模拟源推进状态机并刷新。
     /// 每步都重新构造任务视图并与当前 tasks 比较,仅在真正变化时写入,
     /// 既保证模拟源进度被刷新,也避免 FFI 侧无变化时重复触发 UI。

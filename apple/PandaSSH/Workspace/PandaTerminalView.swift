@@ -394,46 +394,6 @@ class PandaTerminalView: TerminalView {
         // 将构造的事件转发到内部处理方法
     }
 
-    /// 测试钩子：模拟左键 mouseUp 事件，触发 `mouseUp` 逻辑。
-    /// 构造一个左键松开事件并调用 mouseUp 方法。
-    internal func simulateMouseUp() {
-        let event = NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            // 事件类型：左键松开
-            location: NSPoint(x: 10, y: 10),
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 1.0
-        )!
-        // 强制解包：leftMouseUp 类型一定可以构造成功
-        mouseUp(with: event)
-        // 调用重写后的 mouseUp 方法
-    }
-
-    /// 测试钩子：模拟右键按下事件，触发 `rightMouseDown` 逻辑（固定位置 10,10）。
-    /// 保留给 §3 既有测试使用；§4 菜单测试用 `simulateRightClick(at:)` 注入精确位置。
-    internal func simulateRightMouseDown() {
-        let event = NSEvent.mouseEvent(
-            with: .rightMouseDown,
-            // 事件类型：右键按下
-            location: NSPoint(x: 10, y: 10),
-            // 固定在 (10, 10) 位置
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 1.0
-        )!
-        rightMouseDown(with: event)
-        // 调用重写后的 rightMouseDown 方法
-    }
-
     /// 测试钩子：模拟右键点击指定位置，触发 `triggerContextMenu` 完整路径
     /// （边界检查 → 构建上下文 → 构建 NSMenu → 跳过 popUp）。
     /// 生产代码不调用；真实右键事件由 `rightMouseDown(with:)` 驱动。

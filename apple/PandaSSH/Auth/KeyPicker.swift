@@ -122,16 +122,3 @@ extension UIApplication {
     }
 }
 #endif
-
-/// 内存 fake：返回固定路径，用于测试。
-final class FakeKeyPicker: KeyPicker {
-    var picked: PickedKey?
-
-    init(picked: PickedKey? = nil) {
-        self.picked = picked
-    }
-
-    func pickPrivateKey() async -> PickedKey? {
-        picked
-    }
-}
