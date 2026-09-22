@@ -576,3 +576,7 @@ pub fn shell_resize(handle: u64, cols: u64, rows: u64) -> Result<(), PandaError>
         .resize(cols as u32, rows as u32);
     Ok(result?)
 }
+
+#[cfg(test)]
+#[path = "tests/ffi_sessions_tests.rs"]
+mod tests;

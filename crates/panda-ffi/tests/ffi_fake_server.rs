@@ -2912,6 +2912,106 @@ fn ffi_sftp_home_dir_returns_path() {
 }
 
 #[test]
+fn ffi_stateless_sftp_exports_cover_success_conflict_and_deleted_target() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_store_and_clear_hosts();
+    let host = save_test_host(start_server(), "stateless-sftp-boundaries");
+    let local = tempfile::tempdir().unwrap();
+    let source = local.path().join("source.txt");
+    let download = local.path().join("download.txt");
+    std::fs::write(&source, b"observable content").unwrap();
+
+    let credentials = Some(PASSWORD.into());
+    sftp_create_dir(
+        host.id.clone(),
+        "/observable".into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(sftp_list(
+        host.id.clone(),
+        "/".into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap()
+    .iter()
+    .any(|entry| entry.name == "observable" && entry.is_dir));
+
+    sftp_upload(
+        host.id.clone(),
+        source.to_string_lossy().into(),
+        "/observable/source.txt".into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(sftp_check_upload_conflict(
+        host.id.clone(),
+        source.to_string_lossy().into(),
+        "/observable/source.txt".into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap()
+    .is_some());
+    assert!(sftp_check_download_conflict(
+        host.id.clone(),
+        "/observable/source.txt".into(),
+        download.to_string_lossy().into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap()
+    .is_none());
+    sftp_download(
+        host.id.clone(),
+        "/observable/source.txt".into(),
+        download.to_string_lossy().into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&download).unwrap(), b"observable content");
+    assert!(sftp_check_download_conflict(
+        host.id.clone(),
+        "/observable/source.txt".into(),
+        download.to_string_lossy().into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap()
+    .is_some());
+
+    sftp_remove_file(
+        host.id.clone(),
+        "/observable/source.txt".into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(sftp_remove_file(
+        host.id.clone(),
+        "/observable/source.txt".into(),
+        credentials.clone(),
+        None,
+        true,
+    )
+    .is_err());
+    sftp_remove_dir(host.id, "/observable".into(), credentials, None, true).unwrap();
+    cleanup_store();
+}
+
+#[test]
 fn ffi_scan_remote_batch_missing_password_fails() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();

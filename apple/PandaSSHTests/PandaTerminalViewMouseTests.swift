@@ -36,7 +36,7 @@ final class PandaTerminalViewMouseTests: XCTestCase {
         let spy = SpyPandaDelegate()
         view.pandaDelegate = spy
 
-        view.simulateOtherMouseDown(buttonNumber: 2)
+        view.otherMouseDown(with: otherMouseEvent(button: .center))
 
         XCTAssertEqual(spy.pastePrimarySelectionCount, 1, "中键应触发 pastePrimarySelection")
         XCTAssertFalse(view.testDidCallSuperOtherMouseDown, "中键不应调 super")
@@ -48,7 +48,7 @@ final class PandaTerminalViewMouseTests: XCTestCase {
         let spy = SpyPandaDelegate()
         view.pandaDelegate = spy
 
-        view.simulateOtherMouseDown(buttonNumber: 1)
+        view.otherMouseDown(with: otherMouseEvent(button: .right))
 
         XCTAssertEqual(spy.pastePrimarySelectionCount, 0, "非中键不应触发 paste")
         XCTAssertTrue(view.testDidCallSuperOtherMouseDown, "非中键应调 super")
@@ -80,7 +80,7 @@ final class PandaTerminalViewMouseTests: XCTestCase {
         coordinator.currentPhase = .failed
         view.pandaDelegate = coordinator
 
-        view.simulateOtherMouseDown(buttonNumber: 2)
+        view.otherMouseDown(with: otherMouseEvent(button: .center))
 
         XCTAssertNil(spyConn.lastWrite, ".failed 阶段中键不应写入 shell 通道")
     }
@@ -94,7 +94,7 @@ final class PandaTerminalViewMouseTests: XCTestCase {
         coordinator.currentPhase = .connecting
         view.pandaDelegate = coordinator
 
-        view.simulateOtherMouseDown(buttonNumber: 2)
+        view.otherMouseDown(with: otherMouseEvent(button: .center))
 
         XCTAssertNil(spyConn.lastWrite, ".connecting 阶段中键不应写入")
     }
@@ -115,6 +115,17 @@ final class PandaTerminalViewMouseTests: XCTestCase {
 
     private func mouseEvent(_ type: NSEvent.EventType) -> NSEvent {
         NSEvent.mouseEvent(with: type, location: NSPoint(x: 10, y: 10), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1.0)!
+    }
+
+    /// 以 Core Graphics 构造带精确 `buttonNumber` 的真实 AppKit 事件。
+    private func otherMouseEvent(button: CGMouseButton) -> NSEvent {
+        let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .otherMouseDown,
+            mouseCursorPosition: .init(x: 10, y: 10),
+            mouseButton: button
+        )!
+        return NSEvent(cgEvent: event)!
     }
 
     /// 构造 in-process `PandaTerminalView`，frame 320×240 保证可见区域。

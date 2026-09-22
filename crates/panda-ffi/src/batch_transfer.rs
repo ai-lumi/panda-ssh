@@ -568,3 +568,7 @@ pub fn batch_transfer_resolve_conflict(task_id: String, overwrite: bool) -> Resu
         .map_err(|_| PandaError::Core("conflict decision channel closed".to_string()))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/batch_transfer_tests.rs"]
+mod tests;

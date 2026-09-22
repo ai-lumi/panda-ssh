@@ -43,7 +43,6 @@ protocol PandaTerminalViewDelegate: AnyObject {
 /// - `rightMouseDown` → 不调 super（避免系统默认菜单），调 `triggerContextMenu(at:)`
 ///   构建 `NSMenu` 并在视图内弹出。菜单条目由 `TerminalContextMenuBuilder` 生成，
 ///   点击通过 `@objc handleMenuItem(_:)` 转发到 `menuActionPerformer.perform(_:hitLink:)`。
-/// - 测试钩子（`simulate*`）只复用既有事件处理路径，生产代码不调用。
 class PandaTerminalView: TerminalView {
     // 继承自 SwiftTerm 的 TerminalView，获得完整的终端渲染和输入处理能力
 
@@ -115,15 +114,12 @@ class PandaTerminalView: TerminalView {
         // 转发到内部处理方法，传入按键编号和事件对象
     }
 
-    /// 中键 / 其它按键分发逻辑（生产由 `otherMouseDown(with:)` 转调，测试由 `simulateOtherMouseDown` 转调）。
+    /// 中键 / 其它按键分发逻辑，由 `otherMouseDown(with:)` 转调。
     /// - 中键（buttonNumber==2）：触发 PRIMARY 粘贴，不调 super。
     ///   SwiftTerm macOS 默认不重写 otherMouseDown（super 是 NSView 默认 no-op）；
     ///   鼠标模式转发不在本提案范围（SwiftTerm 默认也不处理）。
-    /// - 其它按键：调 super（保留 SwiftTerm/NSView 默认行为）；event 为 nil 时仅记录标志
-    ///   （测试钩子无法用公开 API 构造带指定 buttonNumber 的 NSEvent ——
-    ///   `NSEvent` 无 `otherMouseEvent` 工厂，`mouseEvent` 不接受 buttonNumber，
-    ///   故测试传入的 buttonNumber 与构造事件的 buttonNumber 解耦，分发以传入值为准）。
-    internal func handleOtherMouseDown(buttonNumber: Int, event: NSEvent?) {
+    /// - 其它按键：调 super（保留 SwiftTerm/NSView 默认行为）。
+    private func handleOtherMouseDown(buttonNumber: Int, event: NSEvent) {
         if buttonNumber == 2 {
             // buttonNumber == 2 表示鼠标中键（滚轮按键）
             pandaDelegate?.pastePrimarySelection()
@@ -132,8 +128,8 @@ class PandaTerminalView: TerminalView {
             // 记录：没有调用 super（因为中键粘贴是我们自定义的行为）
         } else {
             // 非中键的其他按键
-            if let event { super.otherMouseDown(with: event) }
-            // 如果有事件对象，调用 super 让 SwiftTerm/NSView 处理默认行为
+            super.otherMouseDown(with: event)
+            // 调用 super 让 SwiftTerm/NSView 处理默认行为
             testDidCallSuperOtherMouseDown = true
             // 记录：调用了 super
         }
@@ -358,40 +354,6 @@ class PandaTerminalView: TerminalView {
     private func isPointInBounds(_ point: NSPoint) -> Bool {
         point.x >= 0 && point.y >= 0 && point.x <= bounds.width && point.y <= bounds.height
         // 检查 x 和 y 是否都在 [0, 宽度] 和 [0, 高度] 范围内
-    }
-
-    // MARK: - 测试钩子（生产代码不调用）
-
-    /// 测试钩子：模拟中键 / 其它按键按下事件，触发 `otherMouseDown` 逻辑。
-    /// - Parameter buttonNumber: 鼠标按键编号（2=中键，0=左键，1=右键等）。
-    internal func simulateOtherMouseDown(buttonNumber: Int) {
-        // 用 `mouseEvent` 构造一个 .otherMouseDown 事件（供 else 分支 super 转发）；
-        // 其 buttonNumber 与测试传入的解耦：分发以 `handleOtherMouseDown(buttonNumber:)` 传入值为准。
-        // 若该类型在当前 SDK 下 mouseEvent 返回 nil，else 分支会跳过 super（无事件可转发），
-        // 但仍置 `testDidCallSuperOtherMouseDown`，测试断言不受影响。
-        let event = NSEvent.mouseEvent(
-            // 使用 NSEvent 的工厂方法构造一个鼠标事件
-            with: .otherMouseDown,
-            // 事件类型：其他鼠标按键按下
-            location: NSPoint(x: 10, y: 10),
-            // 鼠标位置固定在 (10, 10)
-            modifierFlags: [],
-            // 无修饰键（没有按 Cmd/Ctrl/Shift/Option）
-            timestamp: 0,
-            // 时间戳为 0（测试用，不影响逻辑）
-            windowNumber: 0,
-            // 窗口编号为 0
-            context: nil,
-            // 无图形上下文
-            eventNumber: 0,
-            // 事件编号为 0
-            clickCount: 1,
-            // 点击次数为 1（单击）
-            pressure: 1.0
-            // 压力为 1.0（标准按压力度）
-        )
-        handleOtherMouseDown(buttonNumber: buttonNumber, event: event)
-        // 将构造的事件转发到内部处理方法
     }
 
     /// 测试钩子：模拟右键点击指定位置，触发 `triggerContextMenu` 完整路径
