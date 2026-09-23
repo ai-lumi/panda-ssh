@@ -117,8 +117,8 @@ enum TabContextMenuBuilder {
             // 终端标签：可以重连、关闭当前、关闭其他、关闭全部
             return [.reconnect, .closeTab, .closeOthers, .closeAll]
         case .sftp:
-            // SFTP 标签：与终端标签相同的菜单条目
-            return [.reconnect, .closeTab, .closeOthers, .closeAll]
+            // SFTP 标签：仅关闭操作（无重连）
+            return [.closeTab, .closeOthers, .closeAll]
         }
     }
 
@@ -138,8 +138,8 @@ enum TabContextMenuBuilder {
             // 两组之间会显示一条分隔线
             return [[.reconnect], [.closeTab, .closeOthers, .closeAll]]
         case .sftp:
-            // SFTP 标签也分两组，结构与终端相同
-            return [[.reconnect], [.closeTab, .closeOthers, .closeAll]]
+            // SFTP 标签：仅关闭操作，不分组（无重连）
+            return [[.closeTab, .closeOthers, .closeAll]]
         }
     }
 }

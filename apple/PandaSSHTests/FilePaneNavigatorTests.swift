@@ -121,7 +121,8 @@ final class FilePaneNavigatorTests: XCTestCase {
     }
 
     func testPathRegressionUploadKeepsDestinationDuringAsyncScan() async {
-        let (session, _) = makeSession()
+        let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         let started = expectation(description: "上传扫描已开始")
         let release = DispatchSemaphore(value: 0)
         var firstScan = true
@@ -457,6 +458,70 @@ final class FilePaneNavigatorTests: XCTestCase {
         return (session, transfers)
     }
 
+    /// 通用编排 handler:模拟核心 `orchestrate_sftp_transfers` 的聚合+入队行为。
+    /// - 上传时:目录 → 批量传输;独立文件 → 单文件传输
+    /// - 下载时:目录内文件 → 共享 groupID 的独立传输;独立文件 → 单文件传输
+    private func injectOrchestrationHandler(session: SftpSessionStore, transfers: TransferStore) {
+        session.orchestrationHandler = { selectedPaths, items, direction, hostID, destDir, password, passphrase in
+            var transferIds: [String] = []
+            var batchIds: [String] = []
+
+            let dirItems = items.filter { $0.isDir }
+            let fileItems = items.filter { !$0.isDir }
+            let dirSources = Set(dirItems.map(\.source))
+            let filesUnderDir = Set(fileItems.filter { file in
+                dirSources.contains(where: { file.source.hasPrefix($0 + "/") })
+            }.map(\.source))
+            let standaloneFiles = fileItems.filter { !filesUnderDir.contains($0.source) }
+
+            if direction == .upload {
+                for dirItem in dirItems {
+                    let batchId = transfers.addBatchUpload(
+                        sources: [dirItem.source],
+                        destDir: destDir,
+                        hostID: hostID,
+                        password: password,
+                        passphrase: passphrase
+                    )
+                    batchIds.append(batchId.uuidString)
+                }
+                for file in standaloneFiles {
+                    let id = transfers.add(
+                        direction: .upload, name: file.name, size: file.size,
+                        source: file.source, destination: file.destination,
+                        hostID: hostID, password: password, passphrase: passphrase
+                    )
+                    transferIds.append(id.uuidString)
+                }
+            } else {
+                for dirItem in dirItems {
+                    let children = fileItems.filter { $0.source.hasPrefix(dirItem.source + "/") }
+                    let groupID = UUID()
+                    let groupName = dirItem.name
+                    for child in children {
+                        let id = transfers.add(
+                            direction: .download, name: child.name, size: child.size,
+                            source: child.source, destination: child.destination,
+                            hostID: hostID, groupID: groupID, groupName: groupName,
+                            password: password, passphrase: passphrase
+                        )
+                        transferIds.append(id.uuidString)
+                    }
+                }
+                for file in standaloneFiles {
+                    let id = transfers.add(
+                        direction: .download, name: file.name, size: file.size,
+                        source: file.source, destination: file.destination,
+                        hostID: hostID, password: password, passphrase: passphrase
+                    )
+                    transferIds.append(id.uuidString)
+                }
+            }
+
+            return OrchestrationResultRecord(transferIds: transferIds, batchIds: batchIds)
+        }
+    }
+
     func testUploadSelectedLocalFileAddsTransfer() async {
         let (session, transfers) = makeSession()
         _ = await session.localPane.reload()
@@ -502,7 +567,7 @@ final class FilePaneNavigatorTests: XCTestCase {
         let started = expectation(description: "SFTP 握手开始")
         let closed = expectation(description: "过期 SFTP 句柄释放")
         let gate = DispatchSemaphore(value: 0)
-        session.sessionOpener = { _, _, _ in
+        session.sessionOpener = { _, _, _, _, _ in
             started.fulfill()
             _ = gate.wait(timeout: .now() + 2)
             return SftpSessionRecord(handle: 9, connectionId: 19, homeDir: "/late")
@@ -525,7 +590,7 @@ final class FilePaneNavigatorTests: XCTestCase {
         let (session, _) = makeSession()
         let opened = LockedCounter()
         let closed = expectation(description: "SFTP 只关闭一次")
-        session.sessionOpener = { _, _, _ in
+        session.sessionOpener = { _, _, _, _, _ in
             opened.increment()
             Thread.sleep(forTimeInterval: 0.1)
             return SftpSessionRecord(handle: 9, connectionId: 19, homeDir: "/owned")
@@ -588,7 +653,8 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     /// 本地目录扫描（scanLocalBatch）在后台线程执行。
     func testScanLocalItemsRunsOffMainThread() async {
-        let (session, _) = makeSession()
+        let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         _ = await session.localPane.reload()
         var scanThreadIsMain: Bool?
         session.scanLocalHandler = { _, _ in
@@ -605,7 +671,8 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     /// 远程目录扫描（scanRemoteBatch）在后台线程执行。
     func testScanRemoteItemsRunsOffMainThread() async {
-        let (session, _) = makeSession()
+        let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         _ = await session.remotePane.reload()
         var scanThreadIsMain: Bool?
         session.scanRemoteHandler = { _, _ in
@@ -622,6 +689,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testDirectoryTransferCreatesTaskGroup() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         session.scanLocalHandler = { paths, destDir in
             paths.flatMap { path in
                 [
@@ -661,6 +729,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testDirectoryUploadAppendsChineseTopLevelNameOnce() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         let localDirectory = "/tmp/报销-20260706"
         let fileName = "上海到广州机票-20260706-发票-保险.pdf"
         let remoteDirectory = "/share/CACHEDEV1_DATA/homes/lwq"
@@ -694,6 +763,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testDirectoryUploadWithEmptyScanDoesNotCreateTransferTasks() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         session.scanLocalHandler = { _, _ in [] }
 
         let tasks = await session.upload(localPaths: ["/nonexistent/empty-directory"])
@@ -705,6 +775,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testDirectoryUploadToRootUsesOneTopLevelDirectoryAndSingleSeparator() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         let localDirectory = "/tmp/project"
         let fileName = "README.md"
         _ = await session.navigateRemote(to: "/")
@@ -771,6 +842,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testLocalMultiSelectFilesAndDirectoryCreatesGroupAndIndependentTasks() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         session.scanLocalHandler = { paths, destDir in
             paths.flatMap { path in
                 if (path as NSString).lastPathComponent == "Documents" {
@@ -794,12 +866,14 @@ final class FilePaneNavigatorTests: XCTestCase {
         XCTAssertEqual(batchRecords.count, 1, "目录应产生一个批量传输任务")
         XCTAssertTrue(batchRecords.first?.sources.contains(where: { $0.contains("Documents") }) ?? false)
         // 文件仍走独立任务。
-        XCTAssertEqual(transfers.tasks.filter { $0.groupID == nil }.count, 1)
-        XCTAssertEqual(transfers.tasks.filter { $0.groupID == nil }.first?.name, "deploy.tar.gz")
+        let independentTasks = transfers.tasks.filter { !$0.isBatch && $0.groupID == nil }
+        XCTAssertEqual(independentTasks.count, 1)
+        XCTAssertEqual(independentTasks.first?.name, "deploy.tar.gz")
     }
 
     func testRemoteMultiSelectPureFilesNoGroup() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         session.scanRemoteHandler = { paths, destDir in
             paths.map { BatchItemRecord(source: $0, destination: destDir + "/" + ($0 as NSString).lastPathComponent, size: 100, isDir: false) }
         }
@@ -979,6 +1053,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testContextUploadOnSelectedEntryUploadsWholeSet() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         _ = await session.localPane.reload()
         session.scanLocalHandler = { paths, destDir in
             paths.map { BatchItemRecord(source: $0, destination: destDir + "/" + ($0 as NSString).lastPathComponent, size: 100, isDir: false) }
@@ -1018,6 +1093,7 @@ final class FilePaneNavigatorTests: XCTestCase {
 
     func testContextDownloadOnSelectedEntryDownloadsWholeSet() async {
         let (session, transfers) = makeSession()
+        injectOrchestrationHandler(session: session, transfers: transfers)
         _ = await session.remotePane.reload()
         session.scanRemoteHandler = { paths, destDir in
             paths.map { BatchItemRecord(source: $0, destination: destDir + "/" + ($0 as NSString).lastPathComponent, size: 100, isDir: false) }

@@ -75,7 +75,9 @@ pub fn validate_terminal_buffer_lines(raw: &str) -> std::result::Result<u32, Ter
     if trimmed.is_empty() {
         return Ok(DEFAULT_TERMINAL_BUFFER_LINES);
     }
-    let value: u32 = trimmed.parse().map_err(|_| TerminalBufferError::NotANumber)?;
+    let value: u32 = trimmed
+        .parse()
+        .map_err(|_| TerminalBufferError::NotANumber)?;
     if value < MIN_TERMINAL_BUFFER_LINES || value > MAX_TERMINAL_BUFFER_LINES {
         return Err(TerminalBufferError::OutOfRange);
     }

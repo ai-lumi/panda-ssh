@@ -1066,11 +1066,9 @@ struct SftpTabView: View {
             phase = .failed
             return
         }
-        // 检查是否需要请求凭据输入
+        // 核心决定凭据是否就绪或需要关联输入请求。
         if gate.requestCredentialsIfNeeded(for: host) { return }
-        // 解析连接凭据
-        let secrets = CredentialResolver()
-            .connectionSecrets(for: host, manualSecret: gate.manualSecret)
+        let secrets = gate.resolvedSecrets
         guard let secrets else {
             _ = gate.requestCredentialsIfNeeded(for: host)
             return
@@ -1085,7 +1083,7 @@ struct SftpTabView: View {
             let classified = ConnectionFailure(error: error)
             if classified == .missingCredential {
                 // 缺少凭据：要求用户输入
-                gate.requireCredentialInput()
+                gate.requireCredentialInput(for: host)
             } else if let key = classified.presentedHostKey,
                       gate.requireTofuConfirmation(key) {
                 // 首次连接未知主机：缓存密钥，重新连接
@@ -1112,7 +1110,7 @@ struct SftpTabView: View {
             // 加载失败：显示错误
             failure = session.remotePane.lastError.map(ConnectionFailure.init(error:)) ?? .other("无法读取远程目录。")
             if failure == .missingCredential {
-                gate.requireCredentialInput()
+                gate.requireCredentialInput(for: host)
             } else {
                 phase = .failed
             }

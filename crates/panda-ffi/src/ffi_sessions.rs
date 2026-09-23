@@ -1,108 +1,28 @@
 //! SSH 会话、SFTP 会话句柄与交互式 Shell 的 FFI 导出。
 //!
-//! 本模块拥有 Shell/SFTP 会话注册表与连接辅助逻辑：句柄分配、精确关闭与
-//! 幂等语义都在这里维护；主机配置与凭据直接从 store 模块访问。
+//! 本模块是纯适配层：会话注册、句柄分配与连接编排全部委托给 `PandaCore`，
+//! FFI 只负责跨语言类型转换与同步/异步桥接。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 
-use panda_core::{
-    HostConfig, KnownHosts, SftpClient, ShellSession, SshSession, UnknownHostKeyPolicy,
-};
-use tokio::sync::Mutex as AsyncMutex;
+use panda_core::{AuthMethod, HostConfig};
 
 use crate::ffi_runtime::runtime;
-use crate::ffi_store::{credentials_for, load_host, stores};
+use crate::ffi_store::{load_host, stores};
 use crate::{PandaError, RemoteFileConflictRecord, RemoteFileRecord, SftpSessionRecord};
 
-// ---------------------------------------------------------------------------
-// Session registries
-// ---------------------------------------------------------------------------
+type CoreResult<T> = Result<T, panda_core::Error>;
 
-static SHELL_SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<ShellSession>>>>> = OnceLock::new();
-static NEXT_SHELL_ID: AtomicU64 = AtomicU64::new(1);
-
-struct OwnedSftpSession {
-    session: Arc<SshSession>,
-    client: Option<SftpClient>,
+fn manual_secret_for<'a>(
+    cfg: &'a HostConfig,
+    password: &'a Option<String>,
+    passphrase: &'a Option<String>,
+) -> Option<&'a str> {
+    match cfg.auth {
+        AuthMethod::Password { .. } => password.as_deref(),
+        AuthMethod::PublicKey { .. } => passphrase.as_deref(),
+    }
 }
-
-static SFTP_SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<AsyncMutex<OwnedSftpSession>>>>> =
-    OnceLock::new();
-static NEXT_SFTP_ID: AtomicU64 = AtomicU64::new(1);
-
-fn shell_sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<ShellSession>>>> {
-    SHELL_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn next_shell_id() -> u64 {
-    NEXT_SHELL_ID.fetch_add(1, Ordering::SeqCst)
-}
-
-fn sftp_sessions() -> &'static Mutex<HashMap<u64, Arc<AsyncMutex<OwnedSftpSession>>>> {
-    SFTP_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn next_sftp_id() -> u64 {
-    NEXT_SFTP_ID.fetch_add(1, Ordering::SeqCst)
-}
-
-fn sftp_session(handle: u64) -> Result<Arc<AsyncMutex<OwnedSftpSession>>, PandaError> {
-    sftp_sessions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&handle)
-        .cloned()
-        .ok_or(PandaError::UnknownSftpHandle(handle))
-}
-
-// ---------------------------------------------------------------------------
-// Connection helpers
-// ---------------------------------------------------------------------------
-
-/// 建立一条由当前调用方显式拥有的独立 SSH Transport。
-/// Unknown host keys follow `trust_on_first_use`.
-async fn connect_session(
-    cfg: &HostConfig,
-    password: Option<String>,
-    passphrase: Option<String>,
-    trust_on_first_use: bool,
-) -> Result<Arc<SshSession>, PandaError> {
-    let creds = credentials_for(cfg, password.clone(), passphrase.clone())?;
-    let mut known_hosts = KnownHosts::new(stores()?.known_hosts.path().to_path_buf());
-    let policy = if trust_on_first_use {
-        UnknownHostKeyPolicy::AcceptAndStore
-    } else {
-        UnknownHostKeyPolicy::Reject
-    };
-    let session = SshSession::connect_shared(cfg, creds, &mut known_hosts, policy).await?;
-    Ok(session)
-}
-
-/// 为独立操作建立专属连接，调用方必须持有返回的 Transport 直到操作结束。
-async fn open_sftp_session(
-    cfg: &HostConfig,
-    password: Option<String>,
-    passphrase: Option<String>,
-    trust_on_first_use: bool,
-) -> Result<(Arc<SshSession>, SftpClient), PandaError> {
-    let session = connect_session(cfg, password, passphrase, trust_on_first_use).await?;
-    session.set_owner("SFTP 操作", cfg.id.clone());
-    let sftp = SftpClient::new(&session).await?;
-    Ok((session, sftp))
-}
-
-/// 关闭 SFTP Channel；Transport 在调用方的独立操作作用域结束时释放。
-async fn close_sftp(sftp: SftpClient) -> Result<(), PandaError> {
-    sftp.close().await?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// SSH / SFTP API
-// ---------------------------------------------------------------------------
 
 fn remote_file_records(files: Vec<panda_core::RemoteFile>) -> Vec<RemoteFileRecord> {
     files
@@ -120,6 +40,17 @@ fn remote_file_records(files: Vec<panda_core::RemoteFile>) -> Vec<RemoteFileReco
         .collect()
 }
 
+/// 在共享 runtime 上执行核心异步操作，将 `panda_core::Error` 转换为 `PandaError`。
+fn block_core<T>(
+    future: impl std::future::Future<Output = CoreResult<T>>,
+) -> Result<T, PandaError> {
+    runtime().block_on(future).map_err(Into::into)
+}
+
+// ---------------------------------------------------------------------------
+// SFTP session API（持久标签会话）
+// ---------------------------------------------------------------------------
+
 /// 为一个 SFTP 标签建立独立 Transport，并返回后续操作使用的稳定句柄。
 #[uniffi::export]
 pub fn sftp_session_open(
@@ -129,23 +60,14 @@ pub fn sftp_session_open(
     trust_on_first_use: bool,
 ) -> Result<SftpSessionRecord, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let handle = next_sftp_id();
-        let session = connect_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        session.set_owner("SFTP 标签", handle.to_string());
-        let connection_id = session.telemetry_id();
-        let client = SftpClient::new(&session).await?;
-        let home_dir = client.home_dir().await?;
-        sftp_sessions()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                handle,
-                Arc::new(AsyncMutex::new(OwnedSftpSession {
-                    session,
-                    client: Some(client),
-                })),
-            );
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
+            .await?;
+        let connection_id = core.sftp_session_connection_id(handle).await?;
+        let home_dir = core.sftp_session_home_dir(handle).await?;
         Ok(SftpSessionRecord {
             handle,
             connection_id,
@@ -156,14 +78,10 @@ pub fn sftp_session_open(
 
 #[uniffi::export]
 pub fn sftp_session_list(handle: u64, path: String) -> Result<Vec<RemoteFileRecord>, PandaError> {
-    let owned = sftp_session(handle)?;
-    runtime().block_on(async {
-        let guard = owned.lock().await;
-        let client = guard
-            .client
-            .as_ref()
-            .ok_or(PandaError::UnknownSftpHandle(handle))?;
-        Ok(remote_file_records(client.list_dir(&path).await?))
+    let core = &stores()?.core;
+    block_core(async {
+        let files = core.sftp_session_list(handle, &path).await?;
+        Ok(remote_file_records(files))
     })
 }
 
@@ -173,15 +91,10 @@ pub fn sftp_session_check_upload_conflict(
     local_path: String,
     remote_path: String,
 ) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
-    let owned = sftp_session(handle)?;
-    runtime().block_on(async {
-        let guard = owned.lock().await;
-        let client = guard
-            .client
-            .as_ref()
-            .ok_or(PandaError::UnknownSftpHandle(handle))?;
-        Ok(client
-            .check_upload_conflict(PathBuf::from(local_path).as_path(), &remote_path)
+    let core = &stores()?.core;
+    block_core(async {
+        Ok(core
+            .sftp_session_check_upload_conflict(handle, PathBuf::from(&local_path).as_path(), &remote_path)
             .await?
             .map(RemoteFileConflictRecord::from))
     })
@@ -193,15 +106,10 @@ pub fn sftp_session_check_download_conflict(
     remote_path: String,
     local_path: String,
 ) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
-    let owned = sftp_session(handle)?;
-    runtime().block_on(async {
-        let guard = owned.lock().await;
-        let client = guard
-            .client
-            .as_ref()
-            .ok_or(PandaError::UnknownSftpHandle(handle))?;
-        Ok(client
-            .check_download_conflict(&remote_path, PathBuf::from(local_path).as_path())
+    let core = &stores()?.core;
+    block_core(async {
+        Ok(core
+            .sftp_session_check_download_conflict(handle, &remote_path, PathBuf::from(&local_path).as_path())
             .await?
             .map(RemoteFileConflictRecord::from))
     })
@@ -209,72 +117,79 @@ pub fn sftp_session_check_download_conflict(
 
 #[uniffi::export]
 pub fn sftp_session_remove_file(handle: u64, remote_path: String) -> Result<(), PandaError> {
-    let owned = sftp_session(handle)?;
-    runtime().block_on(async {
-        let guard = owned.lock().await;
-        guard
-            .client
-            .as_ref()
-            .ok_or(PandaError::UnknownSftpHandle(handle))?
-            .remove_file(&remote_path)
-            .await?;
+    let core = &stores()?.core;
+    block_core(async {
+        core.sftp_session_remove_file(handle, &remote_path).await?;
         Ok(())
     })
 }
 
 #[uniffi::export]
 pub fn sftp_session_remove_dir(handle: u64, remote_path: String) -> Result<(), PandaError> {
-    let owned = sftp_session(handle)?;
-    runtime().block_on(async {
-        let guard = owned.lock().await;
-        guard
-            .client
-            .as_ref()
-            .ok_or(PandaError::UnknownSftpHandle(handle))?
-            .remove_all(&remote_path)
-            .await?;
+    let core = &stores()?.core;
+    block_core(async {
+        core.sftp_session_remove_dir(handle, &remote_path).await?;
         Ok(())
     })
 }
 
 #[uniffi::export]
 pub fn sftp_session_create_dir(handle: u64, remote_path: String) -> Result<(), PandaError> {
-    let owned = sftp_session(handle)?;
-    runtime().block_on(async {
-        let guard = owned.lock().await;
-        guard
-            .client
-            .as_ref()
-            .ok_or(PandaError::UnknownSftpHandle(handle))?
-            .create_dir(&remote_path)
-            .await?;
+    let core = &stores()?.core;
+    block_core(async {
+        core.sftp_session_create_dir(handle, &remote_path).await?;
         Ok(())
+    })
+}
+
+/// 带代次跟踪的 SFTP 会话打开：核心负责代次校验与句柄注册。
+#[uniffi::export]
+pub fn sftp_session_open_tracked(
+    host_id: String,
+    password: Option<String>,
+    passphrase: Option<String>,
+    trust_on_first_use: bool,
+    session_id: String,
+    generation: u32,
+) -> Result<SftpSessionRecord, PandaError> {
+    let cfg = load_host(&host_id)?;
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(
+                &host_id,
+                secret,
+                trust_on_first_use,
+                Some(&session_id),
+                Some(generation),
+            )
+            .await?;
+        let connection_id = core.sftp_session_connection_id(handle).await?;
+        let home_dir = core.sftp_session_home_dir(handle).await?;
+        Ok(SftpSessionRecord {
+            handle,
+            connection_id,
+            home_dir,
+        })
     })
 }
 
 /// 精确关闭一个 SFTP 标签句柄。重复关闭为幂等 no-op。
 #[uniffi::export]
 pub fn sftp_session_close(handle: u64) -> Result<(), PandaError> {
-    let owned = sftp_sessions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&handle);
-    let Some(owned) = owned else { return Ok(()) };
-    runtime().block_on(async {
-        let mut guard = owned.lock().await;
-        if let Some(client) = guard.client.take() {
-            client.close().await?;
-        }
-        guard.session.disconnect().await?;
+    let core = &stores()?.core;
+    block_core(async {
+        core.close_sftp_session(handle).await?;
         Ok(())
     })
 }
 
+// ---------------------------------------------------------------------------
+// 一次性 SFTP 操作（每次建立独立连接，完成后释放）
+// ---------------------------------------------------------------------------
+
 /// Connect and run `true` to verify auth; returns a human-readable summary.
-///
-/// `trust_on_first_use`: `false` rejects unknown host keys with
-/// `UnknownHostKey` (carrying the presented key and fingerprint) without
-/// writing known_hosts; `true` accepts and stores them (TOFU).
 #[uniffi::export]
 pub fn test_connection(
     host_id: String,
@@ -283,16 +198,9 @@ pub fn test_connection(
     trust_on_first_use: bool,
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let session = connect_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        session.set_owner("连接探测", host_id.clone());
-        let output = session.exec("true").await?;
-        session.disconnect().await?;
-        Ok(format!(
-            "connected to {}@{}:{} (exit status: {:?})",
-            cfg.username, cfg.host, cfg.port, output.exit_status
-        ))
-    })
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(core.test_connection(&host_id, secret, trust_on_first_use))
 }
 
 #[uniffi::export]
@@ -304,12 +212,19 @@ pub fn sftp_list(
     trust_on_first_use: bool,
 ) -> Result<Vec<RemoteFileRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        let files = sftp.list_dir(&path).await?;
-        close_sftp(sftp).await?;
-        Ok(remote_file_records(files))
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
+            .await?;
+        let result = async {
+            let files = core.sftp_session_list(handle, &path).await?;
+            Ok(remote_file_records(files))
+        }
+        .await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
@@ -323,13 +238,16 @@ pub fn sftp_upload(
     trust_on_first_use: bool,
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        sftp.upload(PathBuf::from(&local_path).as_path(), &remote_path, None)
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let local = PathBuf::from(local_path);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
             .await?;
-        close_sftp(sftp).await?;
-        Ok(())
+        let result = core.sftp_session_upload(handle, &local, &remote_path).await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
@@ -343,18 +261,19 @@ pub fn sftp_download(
     trust_on_first_use: bool,
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        sftp.download(&remote_path, PathBuf::from(&local_path).as_path())
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let local = PathBuf::from(local_path);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
             .await?;
-        close_sftp(sftp).await?;
-        Ok(())
+        let result = core.sftp_session_download(handle, &remote_path, &local).await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
-/// 上传前预检查：若远端目标已存在，返回源文件与目标文件的大小及修改时间。
-/// 返回 `None` 表示目标不存在，可以直接上传。
 #[uniffi::export]
 pub fn sftp_check_upload_conflict(
     host_id: String,
@@ -365,19 +284,25 @@ pub fn sftp_check_upload_conflict(
     trust_on_first_use: bool,
 ) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        let conflict = sftp
-            .check_upload_conflict(PathBuf::from(&local_path).as_path(), &remote_path)
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
             .await?;
-        close_sftp(sftp).await?;
-        Ok(conflict.map(RemoteFileConflictRecord::from))
+        let result = core
+            .sftp_session_check_upload_conflict(
+                handle,
+                PathBuf::from(&local_path).as_path(),
+                &remote_path,
+            )
+            .await?
+            .map(RemoteFileConflictRecord::from);
+        core.close_sftp_session(handle).await?;
+        Ok(result)
     })
 }
 
-/// 下载前预检查：若本地目标已存在，返回源文件与目标文件的大小及修改时间。
-/// 返回 `None` 表示目标不存在，可以直接下载。
 #[uniffi::export]
 pub fn sftp_check_download_conflict(
     host_id: String,
@@ -388,14 +313,22 @@ pub fn sftp_check_download_conflict(
     trust_on_first_use: bool,
 ) -> Result<Option<RemoteFileConflictRecord>, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        let conflict = sftp
-            .check_download_conflict(&remote_path, PathBuf::from(&local_path).as_path())
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
             .await?;
-        close_sftp(sftp).await?;
-        Ok(conflict.map(RemoteFileConflictRecord::from))
+        let result = core
+            .sftp_session_check_download_conflict(
+                handle,
+                &remote_path,
+                PathBuf::from(&local_path).as_path(),
+            )
+            .await?
+            .map(RemoteFileConflictRecord::from);
+        core.close_sftp_session(handle).await?;
+        Ok(result)
     })
 }
 
@@ -408,12 +341,15 @@ pub fn sftp_remove_file(
     trust_on_first_use: bool,
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        sftp.remove_file(&remote_path).await?;
-        close_sftp(sftp).await?;
-        Ok(())
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
+            .await?;
+        let result = core.sftp_session_remove_file(handle, &remote_path).await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
@@ -426,12 +362,15 @@ pub fn sftp_remove_dir(
     trust_on_first_use: bool,
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        sftp.remove_all(&remote_path).await?;
-        close_sftp(sftp).await?;
-        Ok(())
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
+            .await?;
+        let result = core.sftp_session_remove_dir(handle, &remote_path).await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
@@ -444,18 +383,18 @@ pub fn sftp_create_dir(
     trust_on_first_use: bool,
 ) -> Result<(), PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        sftp.create_dir(&remote_path).await?;
-        close_sftp(sftp).await?;
-        Ok(())
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
+            .await?;
+        let result = core.sftp_session_create_dir(handle, &remote_path).await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
-/// Resolve the user's SFTP home directory.
-/// SFTP sessions start in the user's home; `canonicalize(".")` returns its
-/// absolute path, which the UI uses as the initial remote pane root.
 #[uniffi::export]
 pub fn sftp_home_dir(
     host_id: String,
@@ -464,12 +403,15 @@ pub fn sftp_home_dir(
     trust_on_first_use: bool,
 ) -> Result<String, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let (_session, sftp) =
-            open_sftp_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        let home = sftp.home_dir().await?;
-        close_sftp(sftp).await?;
-        Ok(home)
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(async {
+        let handle = core
+            .open_sftp_session(&host_id, secret, trust_on_first_use, None, None)
+            .await?;
+        let result = core.sftp_session_home_dir(handle).await;
+        core.close_sftp_session(handle).await?;
+        result
     })
 }
 
@@ -477,11 +419,6 @@ pub fn sftp_home_dir(
 // Interactive shell API
 // ---------------------------------------------------------------------------
 
-/// Open an interactive shell session for `host_id`.
-///
-/// Returns a session handle that can be passed to `shell_write`, `shell_read`
-/// and `shell_close`. The SSH connection and shell channel are kept alive
-/// until `shell_close` is called.
 #[uniffi::export]
 pub fn shell_open(
     host_id: String,
@@ -490,91 +427,81 @@ pub fn shell_open(
     trust_on_first_use: bool,
 ) -> Result<u64, PandaError> {
     let cfg = load_host(&host_id)?;
-    runtime().block_on(async {
-        let session = connect_session(&cfg, password, passphrase, trust_on_first_use).await?;
-        let shell = ShellSession::open(Arc::clone(&session)).await?;
-        // 只为成功打开的句柄分配连续编号，并与发布处于同一临界区。
-        // 因此已发行但不在表内的编号一定已被关闭，无需永久保存关闭集合。
-        let mut sessions = shell_sessions()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let id = next_shell_id();
-        session.set_owner("终端标签", id.to_string());
-        sessions.insert(id, Arc::new(Mutex::new(shell)));
-        Ok(id)
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(core.open_shell_session(&host_id, secret, trust_on_first_use, None, None))
+}
+
+/// 带代次跟踪的 Shell 会话打开：核心负责代次校验与句柄注册。
+#[uniffi::export]
+pub fn shell_open_tracked(
+    host_id: String,
+    password: Option<String>,
+    passphrase: Option<String>,
+    trust_on_first_use: bool,
+    session_id: String,
+    generation: u32,
+) -> Result<u64, PandaError> {
+    let cfg = load_host(&host_id)?;
+    let secret = manual_secret_for(&cfg, &password, &passphrase);
+    let core = &stores()?.core;
+    block_core(core.open_shell_session(
+        &host_id,
+        secret,
+        trust_on_first_use,
+        Some(&session_id),
+        Some(generation),
+    ))
+}
+
+/// 取消会话：递增代次并使该会话的全部句柄失效。
+#[uniffi::export]
+pub fn session_cancel(session_id: String) {
+    if let Ok(stores) = stores() {
+        stores.core.cancel_session(&session_id);
+    }
+}
+
+/// 检查指定代次是否已过期。
+#[uniffi::export]
+pub fn session_is_stale(session_id: String, generation: u32) -> bool {
+    match stores() {
+        Ok(stores) => stores.core.is_session_stale(&session_id, generation),
+        Err(_) => true,
+    }
+}
+
+/// 查询指定代次的会话是否仍有活跃句柄。
+#[uniffi::export]
+pub fn session_has_active(session_id: String, generation: u32) -> bool {
+    match stores() {
+        Ok(stores) => stores.core.has_active_session(&session_id, generation),
+        Err(_) => false,
+    }
+}
+
+#[uniffi::export]
+pub fn shell_write(handle: u64, data: Vec<u8>) -> Result<(), PandaError> {
+    Ok(stores()?.core.shell_write(handle, &data)?)
+}
+
+#[uniffi::export]
+pub fn shell_read(handle: u64, max: u64) -> Result<Vec<u8>, PandaError> {
+    Ok(stores()?.core.shell_read(handle, max as usize)?)
+}
+
+#[uniffi::export]
+pub fn shell_close(handle: u64) -> Result<(), PandaError> {
+    let core = &stores()?.core;
+    block_core(async {
+        core.close_shell_session(handle).await?;
+        Ok(())
     })
 }
 
-/// Write input bytes to the shell session.
-#[uniffi::export]
-pub fn shell_write(handle: u64, data: Vec<u8>) -> Result<(), PandaError> {
-    let session = shell_sessions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&handle)
-        .cloned()
-        .ok_or(PandaError::UnknownShellHandle(handle))?;
-    let result = session
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .write(&data);
-    Ok(result?)
-}
-
-/// Read up to `max` bytes produced by the remote shell. Returns an empty
-/// vector when no output is currently buffered.
-#[uniffi::export]
-pub fn shell_read(handle: u64, max: u64) -> Result<Vec<u8>, PandaError> {
-    let session = shell_sessions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&handle)
-        .cloned()
-        .ok_or(PandaError::UnknownShellHandle(handle))?;
-    let result = session
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .read(max as usize);
-    Ok(result?)
-}
-
-/// Close the shell session and disconnect the underlying SSH connection.
-#[uniffi::export]
-pub fn shell_close(handle: u64) -> Result<(), PandaError> {
-    let removed = shell_sessions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&handle);
-    let Some(session) = removed else {
-        return if handle > 0 && handle < NEXT_SHELL_ID.load(Ordering::SeqCst) {
-            Ok(())
-        } else {
-            Err(PandaError::UnknownShellHandle(handle))
-        };
-    };
-    runtime().block_on(
-        session
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .close(),
-    )?;
-    Ok(())
-}
-
-/// Notify the remote PTY that the terminal window has been resized.
 #[uniffi::export]
 pub fn shell_resize(handle: u64, cols: u64, rows: u64) -> Result<(), PandaError> {
-    let session = shell_sessions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&handle)
-        .cloned()
-        .ok_or(PandaError::UnknownShellHandle(handle))?;
-    let result = session
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .resize(cols as u32, rows as u32);
-    Ok(result?)
+    Ok(stores()?.core.shell_resize(handle, cols as u32, rows as u32)?)
 }
 
 #[cfg(test)]

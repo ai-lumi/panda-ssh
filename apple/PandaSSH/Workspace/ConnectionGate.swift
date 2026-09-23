@@ -21,14 +21,19 @@ final class PreconnectGate: ObservableObject {
     @Published var sheet: Sheet?
     /// 真实模式下探测到的呈现密钥,用于 TOFU 对话框展示指纹。
     private(set) var presentedKey: PresentedHostKey?
+    /// 核心 TOFU 协调器分配的请求 ID，用于 confirm/reject。
+    private(set) var tofuRequestId: String?
     /// 手动输入的密码或私钥口令，仅本标签会话持有。
     private(set) var manualSecret: String?
+    /// 核心生成的待输入请求；UI 必须原样回传其 id。
+    private var pendingCredentialRequest: ConnectionCredentialRequestRecord?
+    /// 核心已确认可用于当前会话的凭据；不写入配置，也不与其他标签共享。
+    private(set) var resolvedSecrets: (password: String?, passphrase: String?)?
+    /// 一个 Gate 对应一个标签会话，重试或关闭会使它的旧请求失效。
+    private let connectionSessionID = UUID().uuidString
 
     /// 是否已经评估过(onAppear 可能多次触发,评估只进行一次)。
     private var evaluated = false
-
-    /// 凭据解析器；生产环境读取本地凭据文件，测试可注入内存 fake。
-    var credentialResolver = CredentialResolver()
 
     /// 打开标签时评估一次;重复调用为 no-op。返回决策结果(便于测试与日志)。
     /// 供 Mock 模式使用;真实模式调用 `evaluateAsync`。
@@ -56,35 +61,26 @@ final class PreconnectGate: ObservableObject {
 
     /// 主机密钥已知时，检查凭据是否已保存；未保存则弹出密码/口令输入框。
     /// 密钥认证但本机未选择私钥时，引导选择私钥。
-    private func checkCredentials(host: HostEntry) {
+    func checkCredentials(host: HostEntry) {
         if host.auth == .publicKey && host.keyPath.isEmpty {
             Logger.shared.warning("私钥未选择 host=\(host.address):\(host.port)", module: LogModule.hostKey)
             sheet = .keyPicker
             return
         }
-        let secrets = credentialResolver.connectionSecrets(for: host)
-        if secrets == nil {
-            Logger.shared.warning("凭据缺失 host=\(host.address):\(host.port)", module: LogModule.hostKey)
-            sheet = .password
-        } else {
-            unlocked = true
-        }
+        _ = prepareCredentials(host: host, manualSecret: nil)
     }
 
     /// 发起连接前再次确认凭据可用，避免竞态将空密码送入 FFI。
     func requestCredentialsIfNeeded(for host: HostEntry) -> Bool {
-        guard credentialResolver.connectionSecrets(for: host, manualSecret: manualSecret) == nil else {
-            return false
-        }
-        unlocked = false
-        sheet = .password
-        return true
+        guard resolvedSecrets == nil else { return false }
+        return !prepareCredentials(host: host, manualSecret: manualSecret)
     }
 
     /// FFI 在连接时仍报告缺凭据时强制回到输入框，避免落入通用失败页。
-    func requireCredentialInput() {
-        unlocked = false
-        sheet = .password
+    func requireCredentialInput(for host: HostEntry) {
+        resolvedSecrets = nil
+        manualSecret = nil
+        _ = prepareCredentials(host: host, manualSecret: nil)
     }
 
     /// 会话建立阶段仍收到未知主机密钥时的安全回退。
@@ -108,16 +104,29 @@ final class PreconnectGate: ObservableObject {
         do {
             if let key = try await model.backend.probePresentedKey(for: host.id) {
                 presentedKey = key
-                if let alreadyTrusted = await model.awaitTofuConfirmation(for: host.id) {
-                    if alreadyTrusted {
+                guard let record = model.configRecord(for: host.id) else {
+                    unlocked = true
+                    return
+                }
+                let result = try tofuRegister(
+                    host: record.host, port: record.port,
+                    key: key.key, fingerprint: key.fingerprint
+                )
+                tofuRequestId = result.token
+                if result.isPresenter {
+                    Logger.shared.warning("TOFU 待确认 host=\(host.address):\(host.port)", module: LogModule.hostKey)
+                    sheet = .tofu
+                } else {
+                    let token = result.token
+                    let outcome = await Task.detached {
+                        tofuAwaitOutcome(token: token)
+                    }.value
+                    if outcome == .trusted {
                         Logger.shared.info("已信任主机密钥 host=\(host.address):\(host.port)", module: LogModule.hostKey)
                         unlocked = true
                     } else {
                         onClose()
                     }
-                } else {
-                    Logger.shared.warning("TOFU 待确认 host=\(host.address):\(host.port)", module: LogModule.hostKey)
-                    sheet = .tofu
                 }
             } else {
                 checkCredentials(host: host)
@@ -148,19 +157,77 @@ final class PreconnectGate: ObservableObject {
 
     /// 对话框确认通过:TOFU 信任 / 密码输入完成后进入连接流程。
     func unlock(secret: String? = nil) {
-        self.manualSecret = secret
-        unlocked = true
-        sheet = nil
+        guard let request = pendingCredentialRequest else {
+            self.manualSecret = secret
+            unlocked = true
+            sheet = nil
+            return
+        }
+        guard let secret, !secret.isEmpty else {
+            unlocked = false
+            sheet = .password
+            return
+        }
+        do {
+            let preparation = try connectionCredentialRespond(requestId: request.id, secret: secret)
+            guard applyCredentialPreparation(preparation) else {
+                Logger.shared.warning("核心未接受凭据响应 request=\(request.id)", module: LogModule.hostKey)
+                return
+            }
+            self.manualSecret = secret
+        } catch {
+            unlocked = false
+            sheet = .password
+            Logger.shared.warning("凭据响应失败 request=\(request.id); 原因=\(error.localizedDescription)", module: LogModule.hostKey)
+        }
     }
 
     /// TOFU 信任后继续：若凭据未保存，先弹出密码输入框；否则直接放行。
     func continueAfterTrust(host: HostEntry) {
-        let secrets = credentialResolver.connectionSecrets(for: host)
-        if secrets == nil {
+        checkCredentials(host: host)
+    }
+
+    /// 将核心结果映射为 UI 状态；此处不推导凭据优先级或重试策略。
+    @discardableResult
+    private func prepareCredentials(host: HostEntry, manualSecret: String?) -> Bool {
+        do {
+            let preparation = try connectionCredentialPrepare(
+                sessionId: connectionSessionID,
+                hostId: host.id,
+                manualSecret: manualSecret
+            )
+            return applyCredentialPreparation(preparation)
+        } catch {
+            unlocked = false
             sheet = .password
-        } else {
-            unlocked = true
+            Logger.shared.warning("核心凭据检查失败 host=\(host.address):\(host.port); 原因=\(error.localizedDescription)", module: LogModule.hostKey)
+            return false
         }
+    }
+
+    @discardableResult
+    private func applyCredentialPreparation(_ preparation: ConnectionCredentialPreparationEnum) -> Bool {
+        switch preparation {
+        case .ready(let password, let passphrase):
+            pendingCredentialRequest = nil
+            resolvedSecrets = (password, passphrase)
+            unlocked = true
+            sheet = nil
+            return true
+        case .needsInput(let request):
+            pendingCredentialRequest = request
+            resolvedSecrets = nil
+            unlocked = false
+            sheet = .password
+            return false
+        }
+    }
+
+    /// 标签关闭或重试前废弃核心待输入请求，防止迟到响应恢复旧会话。
+    func cancelPendingCredentialRequest() {
+        try? connectionCredentialCancel(sessionId: connectionSessionID)
+        pendingCredentialRequest = nil
+        resolvedSecrets = nil
     }
 }
 
@@ -289,7 +356,10 @@ private struct PreconnectSheets: ViewModifier {
     func body(content: Content) -> some View {
         content.sheet(item: $gate.sheet, onDismiss: {
             if !gate.unlocked {
-                model.resolveTofuConfirmation(for: host.id, trusted: false)
+                gate.cancelPendingCredentialRequest()
+                if let requestId = gate.tofuRequestId {
+                    tofuReject(requestId: requestId)
+                }
                 workspace.close(tabID: tabID)
             }
         }) { sheet in
@@ -299,9 +369,15 @@ private struct PreconnectSheets: ViewModifier {
                     host: host,
                     fingerprint: gate.presentedKey?.fingerprint ?? "SHA256:—",
                     onTrust: {
-                        model.resolveTofuConfirmation(for: host.id, trusted: true)
-                        toast.show("已记录主机密钥指纹")
-                        gate.continueAfterTrust(host: host)
+                        if let requestId = gate.tofuRequestId {
+                            do {
+                                try tofuConfirm(requestId: requestId)
+                                toast.show("已记录主机密钥指纹")
+                                gate.continueAfterTrust(host: host)
+                            } catch {
+                                Logger.shared.error("TOFU 确认失败: \(error.localizedDescription)", module: LogModule.hostKey)
+                            }
+                        }
                     }
                 )
             case .mismatch:
@@ -321,7 +397,9 @@ private struct PreconnectSheets: ViewModifier {
                     _ = model.saveHost(updated, password: nil, passphrase: nil)
                     gate.unlock()
                 }, onCancel: {
-                    model.resolveTofuConfirmation(for: host.id, trusted: false)
+                    if let requestId = gate.tofuRequestId {
+                        tofuReject(requestId: requestId)
+                    }
                     workspace.close(tabID: tabID)
                 })
             }

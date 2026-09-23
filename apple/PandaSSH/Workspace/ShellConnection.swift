@@ -42,6 +42,25 @@ final class PandaShellConnection: ShellConnection {
         )
     }
 
+    /// 带核心代次校验的 shell 连接；核心拒绝过期代次以避免浪费 SSH 握手。
+    static func trackedOpen(
+        hostID: String,
+        password: String?,
+        passphrase: String?,
+        trustOnFirstUse: Bool = false,
+        sessionID: String,
+        generation: UInt32
+    ) throws -> UInt64 {
+        try PandaCoreBridge.shared.trackedShellOpen(
+            hostID: hostID,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse,
+            sessionID: sessionID,
+            generation: generation
+        )
+    }
+
     deinit {
         try? shellClose(handle: handle)
     }

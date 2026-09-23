@@ -19,17 +19,18 @@ pub use ffi_adapter::{sftp_child_path, sftp_directory_path};
 
 mod ffi_workspace;
 pub use ffi_workspace::{
-    preconnect_tofu_register_waiter, preconnect_tofu_reset, preconnect_tofu_resolve,
     terminal_session_close, terminal_session_get, terminal_session_is_stale,
     terminal_session_phase, terminal_session_register, terminal_session_retry,
-    terminal_session_transition_to_failed, terminal_session_transition_to_shell,
+    terminal_session_transition_to_failed, terminal_session_transition_to_shell, tofu_await_outcome,
+    tofu_cancel, tofu_confirm, tofu_reject, tofu_register, tofu_reset,
     workspace_active_tab_id, workspace_cancel_close, workspace_close_all_tabs,
     workspace_close_other_tabs, workspace_close_tab, workspace_confirm_close,
     workspace_host_connection_status, workspace_open_tab, workspace_pending_close,
     workspace_report_connection_status, workspace_reset, workspace_select_tab,
     workspace_set_host_names, workspace_tab_list, CloseConfirmationRecord, ConnectionStatusEnum,
-    HostNameMapping, TabKindEnum, TerminalFailureCategoryEnum, TerminalPhaseEnum,
-    TerminalSessionRecord, WorkspaceTabRecord,
+    HostNameMapping, PresentedKeyRecord, TabKindEnum, TerminalFailureCategoryEnum,
+    TerminalPhaseEnum, TerminalSessionRecord, TofuOutcomeEnum, TofuRegisterResult,
+    WorkspaceTabRecord,
 };
 
 mod ffi_telemetry;
@@ -55,13 +56,16 @@ pub use ffi_transfers::{
 
 mod ffi_store;
 pub use ffi_store::{
-    accept_unknown_host_key, config_export, config_import, credential_protection_enabled,
-    credential_protection_status, credential_resolve, credential_unlock_only,
-    default_terminal_buffer_lines, delete_credential, delete_group, delete_host, delete_snippet,
-    group_path, host_key_status, init_snippets, init_store, list_groups, list_hosts, list_snippets,
-    move_group, preconnect_evaluate, read_credential, save_credential, save_group, save_host,
-    save_snippet, search_hosts, set_credential_protection_key, sidebar_tree,
-    validate_credential_protection_input, validate_terminal_buffer_lines, ExportManifestRecord,
+    accept_unknown_host_key, config_export, config_import, connection_credential_cancel,
+    connection_credential_prepare, connection_credential_respond, connection_credentials,
+    credential_protection_enabled, credential_protection_status, credential_resolve,
+    credential_unlock_only, default_terminal_buffer_lines, delete_credential, delete_group,
+    delete_host, delete_snippet, group_path, host_key_status, init_store,
+    list_groups, list_hosts, list_snippets, move_group, preconnect_evaluate, read_credential,
+    save_credential, save_group, save_host, save_host_with_credentials, save_snippet, search_hosts,
+    set_credential_protection_key, sidebar_tree, validate_credential_protection_input,
+    validate_terminal_buffer_lines, ConnectionCredentialKindEnum,
+    ConnectionCredentialPreparationEnum, ConnectionCredentialRequestRecord, ExportManifestRecord,
     ImportResultRecord, PreconnectActionEnum, ProtectionActionEnum, ProtectionInputErrorEnum,
     ProtectionStatusEnum, ResolvedCredentialEnum, SidebarNodeFFIRecord, SnippetRecord,
     TerminalBufferErrorEnum,
@@ -72,9 +76,17 @@ pub use ffi_sessions::{
     sftp_check_download_conflict, sftp_check_upload_conflict, sftp_create_dir, sftp_download,
     sftp_home_dir, sftp_list, sftp_remove_dir, sftp_remove_file,
     sftp_session_check_download_conflict, sftp_session_check_upload_conflict, sftp_session_close,
-    sftp_session_create_dir, sftp_session_list, sftp_session_open, sftp_session_remove_dir,
-    sftp_session_remove_file, sftp_upload, shell_close, shell_open, shell_read, shell_resize,
-    shell_write, test_connection,
+    sftp_session_create_dir, sftp_session_list, sftp_session_open, sftp_session_open_tracked,
+    sftp_session_remove_dir, sftp_session_remove_file, sftp_upload, session_cancel,
+    session_has_active, session_is_stale, shell_close, shell_open, shell_open_tracked, shell_read,
+    shell_resize, shell_write, test_connection,
+};
+
+mod ffi_delete;
+pub use ffi_delete::{
+    delete_change_counter, delete_task_cancel, delete_task_list, delete_task_status,
+    start_local_delete, start_remote_delete, DeleteFailureRecord, DeleteKindEnum,
+    DeleteStatusEnum, DeleteTaskSnapshotRecord,
 };
 
 // ---------------------------------------------------------------------------
@@ -162,7 +174,10 @@ impl From<panda_core::Error> for PandaError {
                 fingerprint,
             },
             panda_core::Error::Cancelled => PandaError::Cancelled,
+            panda_core::Error::MissingPassword(host) => PandaError::MissingPassword(host),
             panda_core::Error::ShellSessionClosed => PandaError::ShellSessionClosed,
+            panda_core::Error::UnknownShellHandle(handle) => PandaError::UnknownShellHandle(handle),
+            panda_core::Error::UnknownSftpHandle(handle) => PandaError::UnknownSftpHandle(handle),
             panda_core::Error::ShellInputBackpressure => PandaError::ShellInputBackpressure,
             panda_core::Error::ShellExitStatus(status) => PandaError::ShellExitStatus(status),
             panda_core::Error::CredentialProtectionKeyRequired => {
@@ -196,6 +211,16 @@ pub enum AuthMethodEnum {
         key_path: String,
         passphrase_ref: Option<String>,
     },
+}
+
+/// 主机表单对单个凭据槽位的编辑意图。
+///
+/// 秘密仅作为本次调用参数进入核心，不会出现在主机配置记录或错误中。
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum CredentialIntentEnum {
+    Preserve,
+    Set { secret: String },
+    Remove,
 }
 
 /// Mirror of `panda_core::HostConfig`.
@@ -293,6 +318,16 @@ impl From<AuthMethodEnum> for AuthMethod {
     }
 }
 
+impl From<CredentialIntentEnum> for panda_core::CredentialIntent {
+    fn from(intent: CredentialIntentEnum) -> Self {
+        match intent {
+            CredentialIntentEnum::Preserve => Self::Preserve,
+            CredentialIntentEnum::Set { secret } => Self::Set(secret),
+            CredentialIntentEnum::Remove => Self::Remove,
+        }
+    }
+}
+
 impl From<AuthMethod> for AuthMethodEnum {
     fn from(a: AuthMethod) -> Self {
         match a {
@@ -338,7 +373,6 @@ impl From<HostConfig> for HostConfigRecord {
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]
 mod tests;

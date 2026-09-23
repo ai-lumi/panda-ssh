@@ -36,10 +36,10 @@ final class TabContextMenuBuilderTests: XCTestCase {
         XCTAssertEqual(items, [.reconnect, .closeTab, .closeOthers, .closeAll])
     }
 
-    /// SFTP 标签与终端标签都从页签菜单提供唯一的重连入口。
-    func testItems_sftp_returnsReconnectAndCloseItems() {
+    /// SFTP 标签仅提供关闭操作，不含重连。
+    func testItems_sftp_returnsCloseItemsOnly() {
         let items = TabContextMenuBuilder.items(for: .sftp)
-        XCTAssertEqual(items, [.reconnect, .closeTab, .closeOthers, .closeAll])
+        XCTAssertEqual(items, [.closeTab, .closeOthers, .closeAll])
     }
 
     /// 终端标签 `groups(for:)` 返回两组：会话操作 + 关闭操作。
@@ -50,12 +50,11 @@ final class TabContextMenuBuilderTests: XCTestCase {
         XCTAssertEqual(groups[1], [.closeTab, .closeOthers, .closeAll])
     }
 
-    /// SFTP 标签与终端一样将重连与关闭操作分组。
-    func testGroups_sftp_returnsReconnectAndCloseGroups() {
+    /// SFTP 标签仅一组关闭操作，不分组。
+    func testGroups_sftp_returnsCloseGroupOnly() {
         let groups = TabContextMenuBuilder.groups(for: .sftp)
-        XCTAssertEqual(groups.count, 2)
-        XCTAssertEqual(groups[0], [.reconnect])
-        XCTAssertEqual(groups[1], [.closeTab, .closeOthers, .closeAll])
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0], [.closeTab, .closeOthers, .closeAll])
     }
 
     // MARK: - 条目属性
@@ -188,7 +187,7 @@ extension TabContextMenuBuilderTests {
 
         let payload = menu.items[7].representedObject as? TabMenuPayload
         XCTAssertEqual(payload?.item, .moveToGroup(groupID: store.groups[0].id, groupName: "开发"))
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     /// 每个非分隔线项的 `representedObject` 为 `TabMenuPayload`，携带正确 tabID。

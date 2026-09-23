@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use panda_core::{
-    ConfigStore, CredentialStore, Credentials, Group, GroupStore, HostConfig, KnownHosts,
-    TomlConfigStore, TomlGroupStore,
+    ConfigStore, Credentials, Group, GroupStore, HostConfig, HostSaveRequest, PandaCore,
+    StorageLocation,
 };
 use uuid::Uuid;
 
-use crate::{GroupRecord, HostConfigRecord, KnownHostStatusEnum, PandaError};
+use crate::{CredentialIntentEnum, GroupRecord, HostConfigRecord, KnownHostStatusEnum, PandaError};
 
 impl From<GroupRecord> for Group {
     fn from(r: GroupRecord) -> Self {
@@ -37,10 +37,7 @@ impl From<Group> for GroupRecord {
 
 /// Stores rooted at the app-provided config directory.
 pub(crate) struct Stores {
-    pub config: TomlConfigStore,
-    pub groups: TomlGroupStore,
-    pub known_hosts: KnownHosts,
-    pub credentials: CredentialStore,
+    pub core: PandaCore,
 }
 
 static STORES: Mutex<Option<Arc<Stores>>> = Mutex::new(None);
@@ -56,7 +53,8 @@ pub(crate) fn stores() -> Result<Arc<Stores>, PandaError> {
 /// 根据主机 id 读取主机配置；未知主机返回 UnknownHost 错误。
 pub(crate) fn load_host(host_id: &str) -> Result<HostConfig, PandaError> {
     stores()?
-        .config
+        .core
+        .config_store()
         .get(host_id)?
         .ok_or_else(|| PandaError::UnknownHost(host_id.to_string()))
 }
@@ -68,15 +66,13 @@ pub(crate) fn credentials_for(
     password: Option<String>,
     passphrase: Option<String>,
 ) -> Result<Credentials, PandaError> {
-    match &cfg.auth {
-        panda_core::AuthMethod::Password { .. } => password
-            .map(Credentials::Password)
-            .ok_or_else(|| PandaError::MissingPassword(cfg.name.clone())),
-        panda_core::AuthMethod::PublicKey { key_path, .. } => Ok(Credentials::KeyFile {
-            path: key_path.clone(),
-            passphrase: passphrase.filter(|value| !value.is_empty()),
-        }),
-    }
+    let manual_secret = match cfg.auth {
+        panda_core::AuthMethod::Password { .. } => password,
+        panda_core::AuthMethod::PublicKey { .. } => passphrase,
+    };
+    Ok(stores()?
+        .core
+        .ssh_credentials_for_connection(&cfg.id, manual_secret.as_deref())?)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,65 +85,27 @@ pub(crate) fn credentials_for(
 #[uniffi::export]
 pub fn init_store(config_dir: String) -> Result<(), PandaError> {
     let dir = PathBuf::from(config_dir);
-    std::fs::create_dir_all(&dir)?;
-    fix_permissions(&dir)?;
+    let core = PandaCore::new_with_storage_location(&dir, ffi_storage_location())?;
     *STORES
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Stores {
-        config: TomlConfigStore::new(dir.join("hosts.toml")),
-        groups: TomlGroupStore::new(dir.join("groups.toml")),
-        known_hosts: KnownHosts::new(dir.join("known_hosts")),
-        credentials: CredentialStore::new(dir.join("credentials.toml")),
-    }));
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Stores { core }));
     panda_core::logger::configure_global_file_path(dir.join("logs").join("panda-ssh.log"))?;
     Ok(())
 }
 
-/// Unix 平台：将 Panda SSH 专属配置目录收紧为 `0700`，
-/// 并将已存在的 `credentials.toml` 收紧为 `0600`。
-#[cfg(unix)]
-fn fix_permissions(dir: &std::path::Path) -> Result<(), PandaError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if should_restrict_config_directory_permissions() {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let cred_path = dir.join("credentials.toml");
-    match std::fs::symlink_metadata(&cred_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            std::fs::set_permissions(&cred_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(_) => {
-            return Err(PandaError::Core("credentials.toml 必须是常规文件".into()));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-
-    // 旧版本使用固定临时文件名；仅对常规遗留文件收紧权限，绝不跟随链接。
-    let legacy_tmp = dir.join("credentials.tmp");
-    match std::fs::symlink_metadata(&legacy_tmp) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            std::fs::set_permissions(&legacy_tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(_) | Err(_) => {}
-    }
-    Ok(())
+#[cfg(target_os = "ios")]
+fn ffi_storage_location() -> StorageLocation {
+    StorageLocation::PlatformContainer
 }
 
-#[cfg(unix)]
-fn should_restrict_config_directory_permissions() -> bool {
-    !cfg!(target_os = "ios")
-}
-
-#[cfg(not(unix))]
-fn fix_permissions(_dir: &std::path::Path) -> Result<(), PandaError> {
-    Ok(())
+#[cfg(not(target_os = "ios"))]
+fn ffi_storage_location() -> StorageLocation {
+    StorageLocation::PrivateConfig
 }
 
 #[uniffi::export]
 pub fn list_hosts() -> Result<Vec<HostConfigRecord>, PandaError> {
-    let hosts = stores()?.config.list()?;
+    let hosts = stores()?.core.list_hosts()?;
     Ok(hosts.into_iter().map(HostConfigRecord::from).collect())
 }
 
@@ -155,8 +113,8 @@ pub fn list_hosts() -> Result<Vec<HostConfigRecord>, PandaError> {
 #[uniffi::export]
 pub fn search_hosts(query: String) -> Result<Vec<HostConfigRecord>, PandaError> {
     let s = stores()?;
-    let hosts = s.config.list()?;
-    let groups = s.groups.list()?;
+    let hosts = s.core.list_hosts()?;
+    let groups = s.core.group_store().list()?;
     Ok(panda_core::search_hosts(&hosts, &groups, &query)
         .into_iter()
         .map(HostConfigRecord::from)
@@ -170,40 +128,29 @@ pub fn save_host(host: HostConfigRecord) -> Result<(), PandaError> {
     if config.id.is_empty() {
         config.id = Uuid::new_v4().to_string();
     }
-    Ok(stores()?.config.upsert(config)?)
+    Ok(stores()?.core.save_host(config)?)
+}
+
+/// 保存主机与凭据的完整用例。桥只转换值类型；写入顺序、引用与补偿由核心决定。
+#[uniffi::export]
+pub fn save_host_with_credentials(
+    host: HostConfigRecord,
+    password: CredentialIntentEnum,
+    passphrase: CredentialIntentEnum,
+) -> Result<HostConfigRecord, PandaError> {
+    let config: HostConfig = host.into();
+    let result = stores()?.core.save_host_with_credentials(HostSaveRequest {
+        host: config,
+        password: password.into(),
+        passphrase: passphrase.into(),
+    })?;
+    Ok(result.host.into())
 }
 
 #[uniffi::export]
 pub fn delete_host(id: String) -> Result<(), PandaError> {
-    let stores = stores()?;
-    let password_ref = format!("host.{id}.password");
-    let passphrase_ref = format!("host.{id}.passphrase");
-    let previous_password = stores.credentials.get(&password_ref)?;
-    let previous_passphrase = stores.credentials.get(&passphrase_ref)?;
-
-    // 先验证并删除凭据；若任一步失败，恢复已经删除的条目且不修改 hosts.toml。
-    stores.credentials.delete(&password_ref)?;
-    if let Err(error) = stores.credentials.delete(&passphrase_ref) {
-        restore_credential(&stores.credentials, &password_ref, previous_password)?;
-        return Err(error.into());
-    }
-    if let Err(error) = stores.config.delete(&id) {
-        restore_credential(&stores.credentials, &password_ref, previous_password)?;
-        restore_credential(&stores.credentials, &passphrase_ref, previous_passphrase)?;
-        return Err(error.into());
-    }
+    stores()?.core.delete_host_with_credentials(&id)?;
     Ok(())
-}
-
-fn restore_credential(
-    store: &CredentialStore,
-    reference: &str,
-    secret: Option<String>,
-) -> Result<(), panda_core::Error> {
-    match secret {
-        Some(secret) => store.save(reference.to_owned(), secret),
-        None => store.delete(reference),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,17 +160,17 @@ fn restore_credential(
 /// 保存本地凭据；秘密仅写入配置目录的 credentials.toml。
 #[uniffi::export]
 pub fn save_credential(reference: String, secret: String) -> Result<(), PandaError> {
-    Ok(stores()?.credentials.save(reference, secret)?)
+    Ok(stores()?.core.credential_store().save(reference, secret)?)
 }
 
 #[uniffi::export]
 pub fn read_credential(reference: String) -> Result<Option<String>, PandaError> {
-    Ok(stores()?.credentials.get(&reference)?)
+    Ok(stores()?.core.credential_store().get(&reference)?)
 }
 
 #[uniffi::export]
 pub fn delete_credential(reference: String) -> Result<(), PandaError> {
-    Ok(stores()?.credentials.delete(&reference)?)
+    Ok(stores()?.core.credential_store().delete(&reference)?)
 }
 
 /// 用当前保护密钥解锁凭据文件，并用新密钥重写；新密钥为空时迁回明文格式。
@@ -233,13 +180,14 @@ pub fn set_credential_protection_key(
     new_key: Option<String>,
 ) -> Result<(), PandaError> {
     Ok(stores()?
-        .credentials
+        .core
+        .credential_store()
         .set_protection_key(current_key, new_key)?)
 }
 
 #[uniffi::export]
 pub fn credential_protection_enabled() -> Result<bool, PandaError> {
-    Ok(stores()?.credentials.is_protected()?)
+    Ok(stores()?.core.credential_store().is_protected()?)
 }
 
 /// 凭据保护的可信状态（FFI 友好枚举）。
@@ -256,21 +204,33 @@ pub enum ProtectionStatusEnum {
 /// 查询凭据保护的可信状态。
 #[uniffi::export]
 pub fn credential_protection_status() -> Result<ProtectionStatusEnum, PandaError> {
-    Ok(match stores()?.credentials.protection_status()? {
-        panda_core::ProtectionStatus::Unprotected => ProtectionStatusEnum::Unprotected,
-        panda_core::ProtectionStatus::ProtectedLocked => ProtectionStatusEnum::ProtectedLocked,
-        panda_core::ProtectionStatus::ProtectedUnlocked => ProtectionStatusEnum::ProtectedUnlocked,
-    })
+    Ok(
+        match stores()?.core.credential_store().protection_status()? {
+            panda_core::ProtectionStatus::Unprotected => ProtectionStatusEnum::Unprotected,
+            panda_core::ProtectionStatus::ProtectedLocked => ProtectionStatusEnum::ProtectedLocked,
+            panda_core::ProtectionStatus::ProtectedUnlocked => {
+                ProtectionStatusEnum::ProtectedUnlocked
+            }
+        },
+    )
 }
 
 /// 只解锁：验证候选密钥但不改写凭据文件。
 #[uniffi::export]
 pub fn credential_unlock_only(candidate_key: String) -> Result<ProtectionStatusEnum, PandaError> {
-    Ok(match stores()?.credentials.unlock_only(&candidate_key)? {
-        panda_core::ProtectionStatus::Unprotected => ProtectionStatusEnum::Unprotected,
-        panda_core::ProtectionStatus::ProtectedLocked => ProtectionStatusEnum::ProtectedLocked,
-        panda_core::ProtectionStatus::ProtectedUnlocked => ProtectionStatusEnum::ProtectedUnlocked,
-    })
+    Ok(
+        match stores()?
+            .core
+            .credential_store()
+            .unlock_only(&candidate_key)?
+        {
+            panda_core::ProtectionStatus::Unprotected => ProtectionStatusEnum::Unprotected,
+            panda_core::ProtectionStatus::ProtectedLocked => ProtectionStatusEnum::ProtectedLocked,
+            panda_core::ProtectionStatus::ProtectedUnlocked => {
+                ProtectionStatusEnum::ProtectedUnlocked
+            }
+        },
+    )
 }
 
 /// 保护动作输入验证结果（FFI 友好枚举）。
@@ -363,9 +323,7 @@ impl std::fmt::Display for TerminalBufferErrorEnum {
 
 /// 校验并规范化终端缓冲区行数的原始文本输入。
 #[uniffi::export]
-pub fn validate_terminal_buffer_lines(
-    raw: String,
-) -> Result<u32, TerminalBufferErrorEnum> {
+pub fn validate_terminal_buffer_lines(raw: String) -> Result<u32, TerminalBufferErrorEnum> {
     panda_core::validate_terminal_buffer_lines(&raw).map_err(|error| match error {
         panda_core::TerminalBufferError::NotANumber => TerminalBufferErrorEnum::NotANumber,
         panda_core::TerminalBufferError::OutOfRange => TerminalBufferErrorEnum::OutOfRange,
@@ -386,15 +344,44 @@ pub enum ResolvedCredentialEnum {
     NeedsPassphrase,
 }
 
+/// 连接凭据输入种类；仅用于原生界面选择文案，秘密不会进入该值。
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum ConnectionCredentialKindEnum {
+    Password,
+    Passphrase,
+}
+
+/// 核心创建的待输入请求。响应必须携带 `id`，不能由界面猜测会话状态。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ConnectionCredentialRequestRecord {
+    pub id: String,
+    pub session_id: String,
+    pub host_id: String,
+    pub kind: ConnectionCredentialKindEnum,
+}
+
+/// 连接前凭据检查的简单值结果。
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ConnectionCredentialPreparationEnum {
+    Ready {
+        password: Option<String>,
+        passphrase: Option<String>,
+    },
+    NeedsInput {
+        request: ConnectionCredentialRequestRecord,
+    },
+}
+
 /// 解析主机凭据状态：已保存 → Available；未保存 → NeedsPassword/NeedsPassphrase。
 #[uniffi::export]
 pub fn credential_resolve(host_id: String) -> Result<ResolvedCredentialEnum, PandaError> {
     let s = stores()?;
     let host = s
-        .config
+        .core
+        .config_store()
         .get(&host_id)?
         .ok_or_else(|| PandaError::Core(format!("host not found: {host_id}")))?;
-    match panda_core::credential_resolve(&s.credentials, &host)? {
+    match panda_core::credential_resolve(s.core.credential_store(), &host)? {
         panda_core::ResolvedCredential::Available {
             password,
             passphrase,
@@ -409,6 +396,104 @@ pub fn credential_resolve(host_id: String) -> Result<ResolvedCredentialEnum, Pan
     }
 }
 
+/// 解析一个连接用例的瞬态凭据；手动输入优先级由核心统一决定。
+#[uniffi::export]
+pub fn connection_credentials(
+    host_id: String,
+    manual_secret: Option<String>,
+) -> Result<ResolvedCredentialEnum, PandaError> {
+    match stores()?
+        .core
+        .resolve_connection_credentials(&host_id, manual_secret.as_deref())?
+    {
+        panda_core::ConnectionCredentials::Available {
+            password,
+            passphrase,
+        } => Ok(ResolvedCredentialEnum::Available {
+            password,
+            passphrase,
+        }),
+        panda_core::ConnectionCredentials::NeedsPassword => {
+            Ok(ResolvedCredentialEnum::NeedsPassword)
+        }
+        panda_core::ConnectionCredentials::NeedsPassphrase => {
+            Ok(ResolvedCredentialEnum::NeedsPassphrase)
+        }
+    }
+}
+
+/// 开始一个连接前凭据检查；缺失凭据由核心生成关联输入请求。
+#[uniffi::export]
+pub fn connection_credential_prepare(
+    session_id: String,
+    host_id: String,
+    manual_secret: Option<String>,
+) -> Result<ConnectionCredentialPreparationEnum, PandaError> {
+    connection_credential_preparation_from_core(stores()?.core.prepare_connection_credentials(
+        &session_id,
+        &host_id,
+        manual_secret.as_deref(),
+    )?)
+}
+
+/// 提交仍有效输入请求的秘密；核心验证请求 id 后才产生可用凭据结果。
+#[uniffi::export]
+pub fn connection_credential_respond(
+    request_id: String,
+    secret: String,
+) -> Result<ConnectionCredentialPreparationEnum, PandaError> {
+    connection_credential_preparation_from_core(
+        stores()?
+            .core
+            .respond_connection_credential(&request_id, &secret)?,
+    )
+}
+
+/// 关闭或重试会话时废弃该会话的待输入请求，迟到响应将被核心拒绝。
+#[uniffi::export]
+pub fn connection_credential_cancel(session_id: String) -> Result<(), PandaError> {
+    stores()?.core.cancel_connection_interactions(&session_id);
+    Ok(())
+}
+
+fn connection_credential_preparation_from_core(
+    preparation: panda_core::ConnectionCredentialPreparation,
+) -> Result<ConnectionCredentialPreparationEnum, PandaError> {
+    Ok(match preparation {
+        panda_core::ConnectionCredentialPreparation::Ready(
+            panda_core::ConnectionCredentials::Available {
+                password,
+                passphrase,
+            },
+        ) => ConnectionCredentialPreparationEnum::Ready {
+            password,
+            passphrase,
+        },
+        panda_core::ConnectionCredentialPreparation::Ready(other) => {
+            return Err(PandaError::Core(format!(
+                "核心返回了未就绪的凭据: {other:?}"
+            )));
+        }
+        panda_core::ConnectionCredentialPreparation::NeedsInput(request) => {
+            ConnectionCredentialPreparationEnum::NeedsInput {
+                request: ConnectionCredentialRequestRecord {
+                    id: request.id,
+                    session_id: request.session_id,
+                    host_id: request.host_id,
+                    kind: match request.kind {
+                        panda_core::ConnectionCredentialKind::Password => {
+                            ConnectionCredentialKindEnum::Password
+                        }
+                        panda_core::ConnectionCredentialKind::Passphrase => {
+                            ConnectionCredentialKindEnum::Passphrase
+                        }
+                    },
+                },
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Host key API
 // ---------------------------------------------------------------------------
@@ -419,7 +504,7 @@ pub fn credential_resolve(host_id: String) -> Result<ResolvedCredentialEnum, Pan
 /// decide between connecting directly and prompting for TOFU confirmation.
 #[uniffi::export]
 pub fn host_key_status(host: String, port: u16) -> Result<KnownHostStatusEnum, PandaError> {
-    match stores()?.known_hosts.status(&host, port)? {
+    match stores()?.core.known_hosts_store().status(&host, port)? {
         panda_core::KnownHostStatus::Unknown => Ok(KnownHostStatusEnum::Unknown),
         panda_core::KnownHostStatus::Known {
             fingerprint,
@@ -437,7 +522,10 @@ pub fn host_key_status(host: String, port: u16) -> Result<KnownHostStatusEnum, P
 /// probed key closes the TOCTOU window between probe and reconnect.
 #[uniffi::export]
 pub fn accept_unknown_host_key(host: String, port: u16, key: String) -> Result<(), PandaError> {
-    Ok(stores()?.known_hosts.accept(&host, port, &key)?)
+    Ok(stores()?
+        .core
+        .known_hosts_store()
+        .accept(&host, port, &key)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -487,15 +575,16 @@ fn map_preconnect_action(action: panda_core::PreconnectAction) -> PreconnectActi
 pub fn preconnect_evaluate(host_id: String) -> Result<PreconnectActionEnum, PandaError> {
     let s = stores()?;
     let host = s
-        .config
+        .core
+        .config_store()
         .get(&host_id)?
         .ok_or_else(|| PandaError::Core(format!("host not found: {host_id}")))?;
 
     // 检查主机密钥状态
-    let key_status = s.known_hosts.status(&host.host, host.port)?;
+    let key_status = s.core.known_hosts_store().status(&host.host, host.port)?;
 
     // 检查凭据状态
-    let cred_status = panda_core::credential_resolve(&s.credentials, &host)?;
+    let cred_status = panda_core::credential_resolve(s.core.credential_store(), &host)?;
 
     // 综合评估
     let action = panda_core::preconnect_evaluate(&host, &key_status, &cred_status);
@@ -508,7 +597,7 @@ pub fn preconnect_evaluate(host_id: String) -> Result<PreconnectActionEnum, Pand
 
 #[uniffi::export]
 pub fn list_groups() -> Result<Vec<GroupRecord>, PandaError> {
-    let groups = stores()?.groups.list()?;
+    let groups = stores()?.core.group_store().list()?;
     Ok(groups.into_iter().map(GroupRecord::from).collect())
 }
 
@@ -519,7 +608,7 @@ pub fn save_group(group: GroupRecord) -> Result<(), PandaError> {
     if g.id.is_empty() {
         g.id = Uuid::new_v4().to_string();
     }
-    Ok(stores()?.groups.upsert(g)?)
+    Ok(stores()?.core.group_store().upsert(g)?)
 }
 
 /// Delete a group: hosts under it (including hosts of subgroups) move back
@@ -528,8 +617,8 @@ pub fn save_group(group: GroupRecord) -> Result<(), PandaError> {
 pub fn delete_group(id: String) -> Result<(), PandaError> {
     let stores = stores()?;
     Ok(panda_core::delete_group_cascade(
-        &stores.groups,
-        &stores.config,
+        stores.core.group_store(),
+        stores.core.config_store(),
         &id,
     )?)
 }
@@ -539,7 +628,7 @@ pub fn delete_group(id: String) -> Result<(), PandaError> {
 #[uniffi::export]
 pub fn move_group(id: String, new_parent_id: Option<String>) -> Result<(), PandaError> {
     Ok(panda_core::move_group(
-        &stores()?.groups,
+        stores()?.core.group_store(),
         &id,
         new_parent_id.as_deref(),
     )?)
@@ -548,7 +637,7 @@ pub fn move_group(id: String, new_parent_id: Option<String>) -> Result<(), Panda
 /// 返回分组的完整层级路径，如 "生产 / 华东 / 上海"。未知或空 id 返回 "根级"。
 #[uniffi::export]
 pub fn group_path(group_id: String) -> Result<String, PandaError> {
-    let groups = stores()?.groups.list()?;
+    let groups = stores()?.core.group_store().list()?;
     Ok(panda_core::group_path(&groups, &group_id))
 }
 
@@ -580,8 +669,8 @@ fn convert_sidebar_node(node: panda_core::SidebarNodeRecord) -> SidebarNodeFFIRe
 #[uniffi::export]
 pub fn sidebar_tree() -> Result<Vec<SidebarNodeFFIRecord>, PandaError> {
     let s = stores()?;
-    let hosts = s.config.list()?;
-    let groups = s.groups.list()?;
+    let hosts = s.core.list_hosts()?;
+    let groups = s.core.group_store().list()?;
     Ok(panda_core::sidebar_tree(&hosts, &groups)
         .into_iter()
         .map(convert_sidebar_node)
@@ -646,12 +735,7 @@ pub fn config_import(archive_path: String) -> Result<ImportResultRecord, PandaEr
 
 fn config_dir() -> Result<PathBuf, PandaError> {
     let s = stores()?;
-    // stores 的 config 路径在 config_dir/hosts.toml，取父目录即为 config_dir
-    Ok(s.config
-        .path()
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf())
+    Ok(s.core.config_root().to_path_buf())
 }
 
 // ---------------------------------------------------------------------------
@@ -689,31 +773,11 @@ impl From<SnippetRecord> for panda_core::Snippet {
     }
 }
 
-static SNIPPET_STORE: Mutex<Option<panda_core::SnippetStore>> = Mutex::new(None);
-
-fn snippet_store() -> Result<panda_core::SnippetStore, PandaError> {
-    SNIPPET_STORE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .ok_or(PandaError::NotInitialized)
-}
-
-/// Initialize the snippet store at `dir`. Subsequent calls switch to the new
-/// directory (old references become invalid, as designed).
-#[uniffi::export]
-pub fn init_snippets(dir: String) -> Result<(), PandaError> {
-    let path = PathBuf::from(dir);
-    std::fs::create_dir_all(&path)?;
-    *SNIPPET_STORE.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(panda_core::SnippetStore::new(path));
-    Ok(())
-}
-
 #[uniffi::export]
 pub fn list_snippets() -> Result<Vec<SnippetRecord>, PandaError> {
-    Ok(snippet_store()?
-        .list()?
+    Ok(stores()?
+        .core
+        .snippet_list()?
         .into_iter()
         .map(SnippetRecord::from)
         .collect())
@@ -721,12 +785,12 @@ pub fn list_snippets() -> Result<Vec<SnippetRecord>, PandaError> {
 
 #[uniffi::export]
 pub fn save_snippet(snippet: SnippetRecord) -> Result<(), PandaError> {
-    Ok(snippet_store()?.save(&snippet.into())?)
+    Ok(stores()?.core.snippet_save(&snippet.into())?)
 }
 
 #[uniffi::export]
 pub fn delete_snippet(name: String) -> Result<(), PandaError> {
-    Ok(snippet_store()?.delete(&name)?)
+    Ok(stores()?.core.snippet_delete(&name)?)
 }
 
 // ---------------------------------------------------------------------------

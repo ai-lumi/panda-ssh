@@ -2,6 +2,14 @@
 //!
 //! 该注册表只保存弱引用，供按运行时连接标识执行健康检查；它不按主机或凭据
 //! 查找连接，也不参与业务复用，因此不会形成连接池。
+//!
+//! ## 作用域
+//!
+//! [`ActiveConnectionRegistry`] 与 [`global_registry`] 是**进程级**单例，独立
+//! 于 `PandaCore` 的上下文（存储/工作区）作用域。注册表只持有 `Weak<SshSession>`
+//! 引用，读取操作（[`prune`](ActiveConnectionRegistry::prune)、
+//! [`check_health`](ActiveConnectionRegistry::check_health)）不会新建连接；
+//! `prune` 只清除已释放的弱引用，`check_health` 只对已登记连接做 SSH 探测。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};

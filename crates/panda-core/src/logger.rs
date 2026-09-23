@@ -1,4 +1,9 @@
 //! 日志系统：环形缓冲 + 文件轮转。
+//!
+//! ## 作用域
+//!
+//! [`Logger`] 与 [`global_logger`] 是**进程级**单例：所有 `PandaCore` 实例共享
+//! 同一日志缓冲。写入与读取均不触发网络 I/O 或新建连接。
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -505,5 +510,23 @@ mod tests {
         assert_eq!(LogLevel::Info.as_str(), "INFO");
         assert_eq!(LogLevel::Warning.as_str(), "WARNING");
         assert_eq!(LogLevel::Error.as_str(), "ERROR");
+    }
+
+    // --- 13.3 三类测试：日志 ---
+
+    /// 边界：limit=0 返回空且不崩溃。
+    #[test]
+    fn entries_with_zero_limit_returns_empty() {
+        let logger = Logger::new(None);
+        logger.info("test", "hello");
+        assert!(logger.entries(0).is_empty());
+    }
+
+    /// 边界：空 logger 查询返回空。
+    #[test]
+    fn entries_on_empty_logger_returns_empty() {
+        let logger = Logger::new(None);
+        assert!(logger.entries(100).is_empty());
+        assert!(logger.entries(0).is_empty());
     }
 }

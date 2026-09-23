@@ -35,10 +35,6 @@ enum AppPaths {
         configDirectory.appendingPathComponent("known_hosts")
     }
 
-    static var snippetsDirectoryURL: URL {
-        configDirectory.appendingPathComponent("snippets")
-    }
-
     /// 日志文件目录(macOS: ~/.panda-ssh/logs/, iPadOS: App Group 容器/logs/)。
     static var logsDirectoryURL: URL {
         configDirectory.appendingPathComponent("logs")
@@ -71,6 +67,16 @@ final class PandaCoreBridge {
 
     func save(host: HostConfigRecord) throws {
         try saveHost(host: host)
+    }
+
+    /// 主机与凭据联合保存：Swift 只表达保留/设置/移除意图，引用、写入顺序与
+    /// 失败补偿均由核心决定。
+    func saveHostComplete(
+        host: HostConfigRecord,
+        password: CredentialIntentEnum,
+        passphrase: CredentialIntentEnum
+    ) throws -> HostConfigRecord {
+        try saveHostWithCredentials(host: host, password: password, passphrase: passphrase)
     }
 
     func delete(id: String) throws {
@@ -114,6 +120,61 @@ final class PandaCoreBridge {
     /// 用户确认信任后,把探测呈现的密钥写入 known_hosts。
     func acceptPresentedHostKey(host: String, port: UInt16, key: String) throws {
         try acceptUnknownHostKey(host: host, port: port, key: key)
+    }
+
+    // MARK: - 核心会话跟踪
+
+    /// 带代次校验的 Shell 会话建立；核心拒绝过期代次以避免浪费 SSH 握手。
+    func trackedShellOpen(
+        hostID: String,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false,
+        sessionID: String,
+        generation: UInt32
+    ) throws -> UInt64 {
+        try shellOpenTracked(
+            hostId: hostID,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse,
+            sessionId: sessionID,
+            generation: generation
+        )
+    }
+
+    /// 带代次校验的 SFTP 会话建立。
+    func trackedSftpSessionOpen(
+        hostID: String,
+        password: String? = nil,
+        passphrase: String? = nil,
+        trustOnFirstUse: Bool = false,
+        sessionID: String,
+        generation: UInt32
+    ) throws -> SftpSessionRecord {
+        try sftpSessionOpenTracked(
+            hostId: hostID,
+            password: password,
+            passphrase: passphrase,
+            trustOnFirstUse: trustOnFirstUse,
+            sessionId: sessionID,
+            generation: generation
+        )
+    }
+
+    /// 废弃指定会话的当前代次，使该会话的所有已注册句柄失效。
+    func cancelSession(sessionID: String) {
+        sessionCancel(sessionId: sessionID)
+    }
+
+    /// 查询指定代次是否已过期（被 cancel 或更新）。
+    func isSessionStale(sessionID: String, generation: UInt32) -> Bool {
+        sessionIsStale(sessionId: sessionID, generation: generation)
+    }
+
+    /// 查询指定代次的会话是否仍有活跃句柄。
+    func hasActiveSession(sessionID: String, generation: UInt32) -> Bool {
+        sessionHasActive(sessionId: sessionID, generation: generation)
     }
 
     /// 为一个 SFTP 标签建立独立长连接；后续文件操作必须使用返回的句柄。
@@ -248,10 +309,6 @@ final class PandaCoreBridge {
     }
 
     // MARK: - 代码片段
-
-    func initializeSnippets(at url: URL) throws {
-        try initSnippets(dir: url.path)
-    }
 
     func allSnippets() throws -> [SnippetRecord] {
         try listSnippets()

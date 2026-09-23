@@ -15,6 +15,8 @@ final class TerminalSessionStore: ObservableObject {
     }
 
     let host: HostEntry
+    /// 核心会话标识：用于代次跟踪与资源释放。
+    let sessionID: String
 
     @Published private(set) var phase: Phase = .connecting
     /// 最近一次连接失败的结构化类别；仅在 `phase == .failed` 时有意义。
@@ -29,18 +31,19 @@ final class TerminalSessionStore: ObservableObject {
     private var connectingAttempt: Int?
     var staleConnectionCloser: @Sendable (UInt64) throws -> Void = { try shellClose(handle: $0) }
 
-    /// 连接打开器注入点：返回 FFI shell handle。默认真实实现 `PandaShellConnection.open`；
+    /// 连接打开器注入点：返回 FFI shell handle。默认真实实现 `PandaShellConnection.trackedOpen`；
     /// 测试注入慢速/失败 fake 以验证后台调度。必须可 Sendable 跨线程传递。
-    var connectionOpener: @Sendable (String, String?, String?, Bool) throws -> UInt64 = {
-        hostID, password, passphrase, trustOnFirstUse in
-        try PandaShellConnection.open(
+    var connectionOpener: @Sendable (String, String?, String?, Bool, String, UInt32) throws -> UInt64 = {
+        hostID, password, passphrase, trustOnFirstUse, sessionID, generation in
+        try PandaShellConnection.trackedOpen(
             hostID: hostID, password: password, passphrase: passphrase,
-            trustOnFirstUse: trustOnFirstUse
+            trustOnFirstUse: trustOnFirstUse, sessionID: sessionID, generation: generation
         )
     }
 
     init(host: HostEntry) {
         self.host = host
+        self.sessionID = "shell-\(host.id)-\(UUID().uuidString)"
     }
 
     // MARK: - 连接阶段
@@ -66,7 +69,7 @@ final class TerminalSessionStore: ObservableObject {
 
     /// 使用真实 SSH 连接建立 shell 会话。
     /// `password`/`passphrase` 由调用方（本地凭据文件或手动输入）提供。
-    /// 完整握手（`shellOpen`）在后台线程执行，不阻塞主线程；
+    /// 完整握手（`trackedShellOpen`）在后台线程执行，不阻塞主线程；
     /// 多个标签的连接可并行握手（tokio 多线程 runtime 并发 block_on）。
     func connect(record: HostConfigRecord, password: String?, passphrase: String?) {
         guard phase == .connecting, connectingAttempt != attempt else { return }
@@ -74,12 +77,14 @@ final class TerminalSessionStore: ObservableObject {
         connectingAttempt = generation
         let opener = connectionOpener
         let closer = staleConnectionCloser
+        let sid = sessionID
         Task { @MainActor in
             do {
                 let handle = try await FFIBackground.run {
-                    try opener(record.id, password, passphrase, false)
+                    try opener(record.id, password, passphrase, false, sid, UInt32(generation))
                 }
-                guard self.attempt == generation, self.phase == .connecting else {
+                let stale = PandaCoreBridge.shared.isSessionStale(sessionID: sid, generation: UInt32(generation))
+                if stale {
                     do {
                         try await FFIBackground.run { try closer(handle) }
                     } catch {
@@ -92,7 +97,8 @@ final class TerminalSessionStore: ObservableObject {
                 self.phase = .shell
                 Logger.shared.info("已连接 host=\(record.host):\(record.port); owner=终端标签#\(handle); attempt=\(generation)", module: LogModule.ssh)
             } catch {
-                guard self.attempt == generation, self.phase == .connecting else { return }
+                let stale = PandaCoreBridge.shared.isSessionStale(sessionID: sid, generation: UInt32(generation))
+                guard !stale else { return }
                 self.connectingAttempt = nil
                 self.failure = ConnectionFailure(error: error)
                 self.phase = .failed
@@ -103,6 +109,7 @@ final class TerminalSessionStore: ObservableObject {
 
     /// 失败态重试：只推进连接代次；视图的 `.task(id:)` 是唯一建连执行器。
     func retry() {
+        PandaCoreBridge.shared.cancelSession(sessionID: sessionID)
         Logger.shared.info("SSH 重试 host=\(host.address):\(host.port); attempt=\(attempt + 1)", module: LogModule.ssh)
         attempt += 1
         releaseConnection()
@@ -111,6 +118,7 @@ final class TerminalSessionStore: ObservableObject {
 
     /// 缺凭据时停止复用旧参数，等待门控取得本标签的新瞬态输入后再连接。
     func waitForCredentialInput() {
+        PandaCoreBridge.shared.cancelSession(sessionID: sessionID)
         attempt += 1
         releaseConnection()
         phase = .connecting
@@ -118,6 +126,7 @@ final class TerminalSessionStore: ObservableObject {
 
     /// 主机密钥确认前停止当前尝试。确认后由视图层以新尝试重新建立连接。
     func waitForHostKeyConfirmation() {
+        PandaCoreBridge.shared.cancelSession(sessionID: sessionID)
         attempt += 1
         releaseConnection()
         phase = .connecting
@@ -133,7 +142,8 @@ final class TerminalSessionStore: ObservableObject {
     /// 远端 shell 正常结束只释放该标签自己的 FFI 句柄与 Socket。
     @discardableResult
     func handleSessionEnd(_ error: Error, attempt generation: Int) -> Bool {
-        guard generation == attempt, phase == .shell else { return false }
+        let stale = PandaCoreBridge.shared.isSessionStale(sessionID: sessionID, generation: UInt32(generation))
+        guard !stale, phase == .shell else { return false }
         if let core = error as? PandaError, core == .ShellSessionClosed {
             handleRemoteShellExit()
         } else {
@@ -154,6 +164,7 @@ final class TerminalSessionStore: ObservableObject {
 
     /// 关闭会话，释放真实连接。
     func close() {
+        PandaCoreBridge.shared.cancelSession(sessionID: sessionID)
         attempt += 1
         Logger.shared.info("SSH 显式关闭 host=\(host.address):\(host.port)", module: LogModule.ssh)
         phase = .failed

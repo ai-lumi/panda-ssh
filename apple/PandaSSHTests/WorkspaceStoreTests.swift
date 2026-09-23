@@ -71,7 +71,7 @@ final class WorkspaceStoreTests: XCTestCase {
         store.confirmClose()
         store.requestClose(tabID: first)
         XCTAssertEqual(released, [first], "重复确认或关闭不得重复释放")
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testFailurePageCloseRemovesLastTabAndIgnoresLateStatus() {
@@ -126,7 +126,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertNil(a.connection)
         XCTAssertEqual(b.phase, .shell)
         XCTAssertNotNil(b.connection)
-        store.closeAll()
+        store.requestCloseAll()
         XCTAssertEqual(b.phase, .failed)
     }
 
@@ -256,7 +256,7 @@ final class WorkspaceStoreTests: XCTestCase {
 
         store.close(tabID: store.tabs[1].id)
 
-        XCTAssertEqual(store.tabs.map(\.title), ["web-prod", "web-prod (2)"])
+        XCTAssertEqual(store.tabs.map(\.title), ["web-prod", "web-prod (3)"])
     }
 
     func testTitlesOfOtherHostsUnaffectedBySequence() {
@@ -374,7 +374,7 @@ final class WorkspaceStoreTests: XCTestCase {
         store.openTerminal(hostID: "h1")
         let keep = store.tabs[1].id
 
-        store.closeOthers(keeping: keep)
+        store.requestCloseOthers(keeping: keep)
 
         XCTAssertEqual(store.tabs.count, 1)
         XCTAssertEqual(store.tabs.first?.id, keep)
@@ -388,7 +388,7 @@ final class WorkspaceStoreTests: XCTestCase {
         store.openTerminal(hostID: "h1")
         store.openSFTP(hostID: "h2")
 
-        store.closeAll()
+        store.requestCloseAll()
 
         XCTAssertTrue(store.tabs.isEmpty)
         XCTAssertNil(store.activeTabID)
@@ -672,7 +672,8 @@ final class WorkspaceStoreTests: XCTestCase {
     func testCancelBatchCloseKeepsTabs() {
         let (store, _, _) = makeLifecycleStore()
         store.openTerminal(hostID: "h1")
-        store.reportConnectionStatus(.connected, forTabID: store.tabs[0].id)
+        let tabID = store.tabs[0].id
+        store.reportConnectionStatus(.connected, forTabID: tabID)
         store.requestCloseAll()
         XCTAssertNotNil(store.pendingBatchClose)
 

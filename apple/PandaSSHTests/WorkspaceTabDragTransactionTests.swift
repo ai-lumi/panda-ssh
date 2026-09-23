@@ -35,7 +35,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab3, tab1, tab2])
         XCTAssertEqual(store.displayedTabs.map(\.id), [tab3, tab1, tab2])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testGroupedReorderCommittedOnDrop() {
@@ -48,7 +48,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         let group = store.groups.first(where: { $0.id == groupID })!
         XCTAssertEqual(group.tabIDs, [tab3, tab1, tab2])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testGroupedReorderUpdatesDisplayedOrder() {
@@ -61,7 +61,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         XCTAssertEqual(store.displayedTabs.map(\.id), [tab3, tab1, tab2])
         _ = groupID
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     // MARK: - 意外操作
@@ -77,7 +77,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.rollbackTabReorder(snapshot)
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab1, tab2, tab3])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testCancelRestoresGroupedOrder() {
@@ -90,7 +90,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         let group = store.groups.first(where: { $0.id == groupID })!
         XCTAssertEqual(group.tabIDs, [tab1, tab2, tab3])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testSourceClosedDuringDragDoesNotDuplicateOrLose() {
@@ -107,7 +107,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         let displayedIDs = store.displayedTabs.map(\.id)
         XCTAssertEqual(displayedIDs, [tab1, tab2])
         XCTAssertEqual(Set(displayedIDs), Set([tab1, tab2]))
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testTargetClosedDuringDragRestoresSafely() {
@@ -123,7 +123,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         let displayedIDs = store.displayedTabs.map(\.id)
         XCTAssertEqual(displayedIDs, [tab2, tab3])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     // MARK: - 边界条件
@@ -136,7 +136,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.commitTabReorder(snapshot)
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab1])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testInvalidTabIDBeginIsNoOp() {
@@ -148,7 +148,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.commitTabReorder(snapshot)
 
         XCTAssertEqual(store.displayedTabs.count, 1)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testMoveToFirstPosition() {
@@ -162,7 +162,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.commitTabReorder(snapshot)
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab3, tab1, tab2])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testMoveToLastPosition() {
@@ -176,7 +176,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.commitTabReorder(snapshot)
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab2, tab1, tab3])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testRepeatedEnterSameTargetIsIdempotent() {
@@ -192,7 +192,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.commitTabReorder(snapshot)
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab3, tab1, tab2])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testPreviewThenRollbackLeavesNoTrace() {
@@ -208,7 +208,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         XCTAssertEqual(store.ungroupedTabIDs, original)
         XCTAssertFalse(store.hasPendingTabReorder)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testCancelPendingReorderRestoresOrderWithoutCallerSnapshot() {
@@ -223,7 +223,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         XCTAssertEqual(store.ungroupedTabIDs, [tab1, tab2, tab3])
         XCTAssertFalse(store.hasPendingTabReorder)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testCommitClearsPendingState() {
@@ -238,7 +238,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
         store.commitTabReorder(snapshot)
 
         XCTAssertFalse(store.hasPendingTabReorder)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testCrossGroupPreviewDoesNotCommit() {
@@ -256,7 +256,7 @@ final class WorkspaceTabDragTransactionTests: XCTestCase {
 
         let groupAAfter = store.groups.first(where: { $0.id == groupA })!
         XCTAssertEqual(groupAAfter.tabIDs, originalGroupA, "跨组预览不应修改源分组")
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     // MARK: - Helpers

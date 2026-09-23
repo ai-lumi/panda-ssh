@@ -1,7 +1,7 @@
-//! 工作区标签页数据类型与纯算法。
+//! 工作区标签页数据类型、纯算法与状态管理器。
 //!
-//! 本模块只包含与平台无关的数据结构和标题消歧算法；
-//! 全局状态管理（标签页列表、活动标签、关闭确认）由 panda-ffi 层持有。
+//! 本模块包含与平台无关的数据结构、标题消歧算法，以及工作区状态管理器
+//! `WorkspaceService`（标签页列表、活动标签、关闭确认、终端会话）。
 
 /// 标签页类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,22 +48,8 @@ pub struct CloseConfirmation {
     pub tab_ids: Vec<String>,
     /// 其中已连接终端标签页的数量。
     pub connected_terminal_count: u32,
-}
-
-/// 批量关闭范围。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BatchCloseScope {
-    /// 关闭除 keeping 外的所有标签页。
-    Others { keeping: String },
-    /// 关闭全部标签页。
-    All,
-}
-
-/// 待处理的批量关闭请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingBatchClose {
-    pub scope: BatchCloseScope,
-    pub connected_terminal_count: u32,
+    /// 是否为批量关闭（来自 request_close_all / request_close_others）。
+    pub is_batch: bool,
 }
 
 /// 为页签保留既有标题，并为尚未命名的页签分配同主机消歧标题。
@@ -301,6 +287,563 @@ pub fn classify_shell_exit(error_message: Option<&str>) -> ShellExitClassificati
                 is_normal_exit: false,
                 failure_category: category,
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 页签分组
+// ---------------------------------------------------------------------------
+
+/// 页签分组。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabGroup {
+    pub id: String,
+    pub name: String,
+    pub tab_ids: Vec<String>,
+}
+
+impl TabGroup {
+    pub fn is_empty(&self) -> bool {
+        self.tab_ids.is_empty()
+    }
+}
+
+/// 分组快照：有序分组列表 + 未分组标签页 id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSnapshot {
+    pub groups: Vec<TabGroup>,
+    pub ungrouped_tab_ids: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// 工作区状态管理器
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+
+/// 关闭请求结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseResult {
+    /// 标签页已直接关闭。
+    Closed,
+    /// 需要用户确认关闭。
+    PendingConfirmation,
+}
+
+/// 内部标签页状态。
+#[derive(Debug, Clone)]
+struct InternalTab {
+    id: String,
+    host_id: String,
+    kind: TabKind,
+    title: String,
+    connection_status: ConnectionStatus,
+    terminal_connected: bool,
+}
+
+impl InternalTab {
+    fn to_workspace_tab(&self) -> WorkspaceTab {
+        WorkspaceTab {
+            id: self.id.clone(),
+            host_id: self.host_id.clone(),
+            kind: self.kind,
+            title: self.title.clone(),
+            connection_status: self.connection_status,
+        }
+    }
+}
+
+/// 待关闭请求。
+#[derive(Debug, Clone)]
+enum PendingClose {
+    Single(String),
+    Batch {
+        /// 请求时确定的目标标签页 id 集合，确认时只关闭这些。
+        target_ids: Vec<String>,
+        connected_terminal_count: u32,
+    },
+}
+
+/// 工作区状态管理器。
+///
+/// 停机摘要：记录停机时关闭的标签页数量。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownSummary {
+    pub closed_tab_count: usize,
+}
+
+/// 管理标签页列表、活动标签、关闭确认、主机名映射和终端会话。
+/// 从 FFI 层迁入，使业务逻辑可在核心层测试。
+#[derive(Debug)]
+pub struct WorkspaceService {
+    tabs: Vec<InternalTab>,
+    active_tab_id: Option<String>,
+    pending_close: Option<PendingClose>,
+    host_names: HashMap<String, String>,
+    terminal_sessions: HashMap<String, TerminalSessionState>,
+    groups: Vec<TabGroup>,
+    ungrouped_tab_ids: Vec<String>,
+    group_counter: u32,
+    accepting_new_work: bool,
+}
+
+impl WorkspaceService {
+    pub fn new() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active_tab_id: None,
+            pending_close: None,
+            host_names: HashMap::new(),
+            terminal_sessions: HashMap::new(),
+            groups: Vec::new(),
+            ungrouped_tab_ids: Vec::new(),
+            group_counter: 0,
+            accepting_new_work: true,
+        }
+    }
+
+    /// 增量更新主机名映射。
+    pub fn update_host_names(&mut self, mappings: Vec<(String, String)>) {
+        for (host_id, name) in mappings {
+            self.host_names.insert(host_id, name);
+        }
+    }
+
+    /// 返回当前标签页快照列表。
+    pub fn tab_list(&self) -> Vec<WorkspaceTab> {
+        self.tabs.iter().map(InternalTab::to_workspace_tab).collect()
+    }
+
+    /// 获取活动标签页 id。
+    pub fn active_tab_id(&self) -> Option<&str> {
+        self.active_tab_id.as_deref()
+    }
+
+    /// 打开新标签页。`tab_id` 由调用方生成。标题在创建时确定且不再变化。
+    /// 新标签自动成为活动标签。停机后拒绝新建，返回 None。
+    pub fn open_tab(
+        &mut self,
+        tab_id: String,
+        host_id: String,
+        kind: TabKind,
+    ) -> Option<WorkspaceTab> {
+        if !self.accepting_new_work {
+            return None;
+        }
+        let mut tabs = self.tab_list();
+        tabs.push(WorkspaceTab {
+            id: tab_id.clone(),
+            host_id: host_id.clone(),
+            kind,
+            title: String::new(),
+            connection_status: ConnectionStatus::Connecting,
+        });
+        let title = compute_disambiguated_titles(&tabs, &|current_host_id| {
+            self.host_names.get(current_host_id).cloned()
+        })
+        .pop()
+        .expect("new tab must receive a title");
+        let tab = InternalTab {
+            id: tab_id.clone(),
+            host_id,
+            kind,
+            title,
+            connection_status: ConnectionStatus::Connecting,
+            terminal_connected: false,
+        };
+        self.tabs.push(tab);
+        self.active_tab_id = Some(tab_id.clone());
+        self.ungrouped_tab_ids.push(tab_id.clone());
+        self.tabs.last().unwrap().to_workspace_tab().into()
+    }
+
+    /// 选择标签页为活动标签。未知 id 时返回 false。
+    pub fn select_tab(&mut self, tab_id: &str) -> bool {
+        if self.tabs.iter().any(|t| t.id == tab_id) {
+            self.active_tab_id = Some(tab_id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 请求关闭标签页。已连接的终端标签页需要确认，其余直接关闭。
+    pub fn request_close(&mut self, tab_id: &str) -> CloseResult {
+        let tab = match self.tabs.iter().find(|t| t.id == tab_id) {
+            Some(t) => t,
+            None => return CloseResult::Closed,
+        };
+        if tab.kind == TabKind::Terminal && tab.terminal_connected {
+            self.pending_close = Some(PendingClose::Single(tab_id.to_string()));
+            CloseResult::PendingConfirmation
+        } else {
+            self.close_tab_internal(tab_id);
+            CloseResult::Closed
+        }
+    }
+
+    /// 确认待处理的关闭请求。
+    pub fn confirm_close(&mut self) {
+        match self.pending_close.take() {
+            Some(PendingClose::Single(tab_id)) => {
+                self.close_tab_internal(&tab_id);
+            }
+            Some(PendingClose::Batch { target_ids, .. }) => {
+                for id in target_ids {
+                    self.close_tab_internal(&id);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// 取消待处理的关闭请求。
+    pub fn cancel_close(&mut self) {
+        self.pending_close = None;
+    }
+
+    /// 获取待关闭确认信息。
+    pub fn pending_close_info(&self) -> Option<CloseConfirmation> {
+        match &self.pending_close {
+            Some(PendingClose::Single(tab_id)) => {
+                let tab = self.tabs.iter().find(|t| &t.id == tab_id)?;
+                Some(CloseConfirmation {
+                    tab_ids: vec![tab_id.clone()],
+                    connected_terminal_count: if tab.terminal_connected { 1 } else { 0 },
+                    is_batch: false,
+                })
+            }
+            Some(PendingClose::Batch {
+                target_ids,
+                connected_terminal_count,
+                ..
+            }) => Some(CloseConfirmation {
+                tab_ids: target_ids.clone(),
+                connected_terminal_count: *connected_terminal_count,
+                is_batch: true,
+            }),
+            None => None,
+        }
+    }
+
+    /// 请求关闭其他标签页（保留指定标签页）。
+    pub fn request_close_others(&mut self, keeping: &str) -> CloseResult {
+        let connected_count = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != keeping && t.kind == TabKind::Terminal && t.terminal_connected)
+            .count() as u32;
+        if connected_count > 0 {
+            let target_ids: Vec<String> = self
+                .tabs
+                .iter()
+                .filter(|t| t.id != keeping)
+                .map(|t| t.id.clone())
+                .collect();
+            self.pending_close = Some(PendingClose::Batch {
+                target_ids,
+                connected_terminal_count: connected_count,
+            });
+            CloseResult::PendingConfirmation
+        } else {
+            self.close_others_internal(keeping);
+            CloseResult::Closed
+        }
+    }
+
+    /// 请求关闭全部标签页。
+    pub fn request_close_all(&mut self) -> CloseResult {
+        let connected_count = self
+            .tabs
+            .iter()
+            .filter(|t| t.kind == TabKind::Terminal && t.terminal_connected)
+            .count() as u32;
+        if connected_count > 0 {
+            let target_ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
+            self.pending_close = Some(PendingClose::Batch {
+                target_ids,
+                connected_terminal_count: connected_count,
+            });
+            CloseResult::PendingConfirmation
+        } else {
+            self.close_all_internal();
+            CloseResult::Closed
+        }
+    }
+
+    /// 更新标签页连接状态。
+    pub fn report_connection_status(&mut self, tab_id: &str, status: ConnectionStatus) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.connection_status = status;
+            if tab.kind == TabKind::Terminal {
+                match status {
+                    ConnectionStatus::Connected => {
+                        tab.terminal_connected = true;
+                    }
+                    ConnectionStatus::Failed | ConnectionStatus::Inactive => {
+                        tab.terminal_connected = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// 聚合同一主机的连接状态。
+    pub fn host_connection_status(&self, host_id: &str) -> ConnectionStatus {
+        let statuses: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|t| t.host_id == host_id)
+            .map(|t| t.connection_status)
+            .collect();
+        aggregate_connection_status(&statuses)
+    }
+
+    /// 是否仍在接受新工作。停机后返回 false。
+    pub fn is_accepting_new_work(&self) -> bool {
+        self.accepting_new_work
+    }
+
+    /// 开始应用停机：拒绝新工作、清除待处理关闭、强制关闭所有标签页。
+    /// 返回关闭的标签页数量。幂等——第二次调用时已无标签页可关。
+    pub fn begin_application_shutdown(&mut self) -> ShutdownSummary {
+        self.accepting_new_work = false;
+        self.pending_close = None;
+        let count = self.tabs.len();
+        self.tabs.clear();
+        self.terminal_sessions.clear();
+        self.active_tab_id = None;
+        self.ungrouped_tab_ids.clear();
+        self.groups.clear();
+        ShutdownSummary {
+            closed_tab_count: count,
+        }
+    }
+
+    /// 重置所有状态。
+    pub fn reset(&mut self) {
+        self.tabs.clear();
+        self.active_tab_id = None;
+        self.pending_close = None;
+        self.terminal_sessions.clear();
+        self.groups.clear();
+        self.ungrouped_tab_ids.clear();
+        self.group_counter = 0;
+        self.accepting_new_work = true;
+    }
+
+    // -- 终端会话管理 --
+
+    /// 注册终端会话。
+    pub fn terminal_session_register(
+        &mut self,
+        host_id: String,
+        tab_id: String,
+    ) -> TerminalSessionState {
+        let session = TerminalSessionState::new(tab_id.clone(), host_id);
+        self.terminal_sessions.insert(tab_id, session.clone());
+        session
+    }
+
+    /// 获取终端会话。
+    pub fn terminal_session_get(&self, tab_id: &str) -> Option<&TerminalSessionState> {
+        self.terminal_sessions.get(tab_id)
+    }
+
+    /// 终端会话转换到 shell 阶段。
+    pub fn terminal_session_transition_to_shell(&mut self, tab_id: &str) {
+        if let Some(session) = self.terminal_sessions.get(tab_id).cloned() {
+            if let Some(new_session) = transition_to_shell(&session) {
+                self.terminal_sessions.insert(tab_id.to_string(), new_session);
+            }
+        }
+    }
+
+    /// 终端会话转换到 failed 阶段。
+    pub fn terminal_session_transition_to_failed(
+        &mut self,
+        tab_id: &str,
+        category: TerminalFailureCategory,
+        message: String,
+    ) {
+        if let Some(session) = self.terminal_sessions.get(tab_id).cloned() {
+            let new_session = transition_to_failed(&session, category, message);
+            self.terminal_sessions.insert(tab_id.to_string(), new_session);
+        }
+    }
+
+    /// 终端会话重试。
+    pub fn terminal_session_retry(
+        &mut self,
+        tab_id: &str,
+    ) -> Option<TerminalSessionState> {
+        if let Some(session) = self.terminal_sessions.get(tab_id).cloned() {
+            if let Some(new_session) = transition_to_connecting(&session) {
+                self.terminal_sessions
+                    .insert(tab_id.to_string(), new_session.clone());
+                return Some(new_session);
+            }
+        }
+        None
+    }
+
+    /// 关闭终端会话。
+    pub fn terminal_session_close(&mut self, tab_id: &str) {
+        self.terminal_sessions.remove(tab_id);
+    }
+
+    /// 检测终端会话握手结果是否过期。
+    pub fn terminal_session_is_stale(&self, tab_id: &str, request_generation: u32) -> bool {
+        match self.terminal_sessions.get(tab_id) {
+            Some(session) => is_stale(session, request_generation),
+            None => true,
+        }
+    }
+
+    // -- 分组管理 --
+
+    /// 创建新分组并将指定标签页分配进去。
+    /// `name` 为 None 时自动生成 "分组 N"。返回新分组 id。
+    /// 标签页不存在时仍创建分组（空组），调用方负责验证。
+    pub fn create_group(&mut self, tab_id: &str, name: Option<String>) -> String {
+        self.group_counter += 1;
+        let group_name = name.unwrap_or_else(|| format!("分组 {}", self.group_counter));
+        let group_id = uuid::Uuid::new_v4().to_string();
+        let mut tab_ids = Vec::new();
+        if self.tabs.iter().any(|t| t.id == tab_id) {
+            tab_ids.push(tab_id.to_string());
+            self.ungrouped_tab_ids.retain(|id| id != tab_id);
+        }
+        self.groups.push(TabGroup {
+            id: group_id.clone(),
+            name: group_name,
+            tab_ids,
+        });
+        group_id
+    }
+
+    /// 删除分组。非空分组的标签页移至未分组。
+    pub fn delete_group(&mut self, group_id: &str) {
+        if let Some(index) = self.groups.iter().position(|g| g.id == group_id) {
+            let group = self.groups.remove(index);
+            for tab_id in &group.tab_ids {
+                if !self.ungrouped_tab_ids.contains(tab_id) {
+                    self.ungrouped_tab_ids.push(tab_id.clone());
+                }
+            }
+        }
+    }
+
+    /// 重命名分组。未知分组为 no-op。
+    pub fn rename_group(&mut self, group_id: &str, new_name: &str) {
+        if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            group.name = new_name.to_string();
+        }
+    }
+
+    /// 将标签页移动到目标分组。标签页已在其他分组时先从原分组移除。
+    /// 目标分组不存在时为 no-op。
+    pub fn move_tab_to_group(&mut self, tab_id: &str, group_id: &str) {
+        let target_index = match self.groups.iter().position(|g| g.id == group_id) {
+            Some(i) => i,
+            None => return,
+        };
+        self.remove_tab_from_any_group(tab_id);
+        self.ungrouped_tab_ids.retain(|id| id != tab_id);
+        if self.tabs.iter().any(|t| t.id == tab_id) {
+            self.groups[target_index].tab_ids.push(tab_id.to_string());
+        }
+    }
+
+    /// 将标签页从分组中移除，变为未分组。
+    pub fn remove_tab_from_group(&mut self, tab_id: &str) {
+        self.remove_tab_from_any_group(tab_id);
+        if self.tabs.iter().any(|t| t.id == tab_id)
+            && !self.ungrouped_tab_ids.contains(&tab_id.to_string())
+        {
+            self.ungrouped_tab_ids.push(tab_id.to_string());
+        }
+    }
+
+    /// 返回分组快照：有序分组列表 + 未分组标签页 id。
+    pub fn group_snapshot(&self) -> GroupSnapshot {
+        GroupSnapshot {
+            groups: self.groups.clone(),
+            ungrouped_tab_ids: self.ungrouped_tab_ids.clone(),
+        }
+    }
+
+    /// 返回显示顺序的标签页 id：按分组顺序输出各组标签页，再输出未分组标签页。
+    pub fn display_order(&self) -> Vec<String> {
+        let mut order = Vec::new();
+        for group in &self.groups {
+            for tab_id in &group.tab_ids {
+                if self.tabs.iter().any(|t| t.id == *tab_id) {
+                    order.push(tab_id.clone());
+                }
+            }
+        }
+        for tab_id in &self.ungrouped_tab_ids {
+            if self.tabs.iter().any(|t| t.id == *tab_id) {
+                order.push(tab_id.clone());
+            }
+        }
+        order
+    }
+
+    /// 查询标签页所在分组 id；未分组返回 None。
+    pub fn group_id_for_tab(&self, tab_id: &str) -> Option<&str> {
+        self.groups
+            .iter()
+            .find(|g| g.tab_ids.iter().any(|id| id == tab_id))
+            .map(|g| g.id.as_str())
+    }
+
+    fn remove_tab_from_any_group(&mut self, tab_id: &str) {
+        for group in &mut self.groups {
+            group.tab_ids.retain(|id| id != tab_id);
+        }
+    }
+
+    // -- 内部方法 --
+
+    fn close_tab_internal(&mut self, tab_id: &str) {
+        if let Some(index) = self.tabs.iter().position(|t| t.id == tab_id) {
+            self.tabs.remove(index);
+            self.terminal_sessions.remove(tab_id);
+            if self.active_tab_id.as_deref() == Some(tab_id) {
+                let remaining_ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
+                self.active_tab_id = next_active_tab_after_close(&remaining_ids, index);
+            }
+            self.ungrouped_tab_ids.retain(|id| id != tab_id);
+            for group in &mut self.groups {
+                group.tab_ids.retain(|id| id != tab_id);
+            }
+            self.groups.retain(|g| !g.is_empty());
+        }
+    }
+
+    fn close_others_internal(&mut self, keeping: &str) {
+        let to_remove: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != keeping)
+            .map(|t| t.id.clone())
+            .collect();
+        for id in to_remove {
+            self.close_tab_internal(&id);
+        }
+        if self.tabs.iter().any(|t| t.id == keeping) {
+            self.active_tab_id = Some(keeping.to_string());
+        }
+    }
+
+    fn close_all_internal(&mut self) {
+        let ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
+        for id in ids {
+            self.close_tab_internal(&id);
         }
     }
 }
@@ -793,5 +1336,870 @@ mod tests {
 
         // 代次 1 的握手结果到达，应为有效
         assert!(!is_stale(&retry, retry.attempt));
+    }
+
+    // -----------------------------------------------------------------------
+    // WorkspaceService 测试
+    // -----------------------------------------------------------------------
+
+    fn ws() -> WorkspaceService {
+        WorkspaceService::new()
+    }
+
+    fn ws_with_host(host_id: &str, name: &str) -> WorkspaceService {
+        let mut svc = ws();
+        svc.update_host_names(vec![(host_id.to_string(), name.to_string())]);
+        svc
+    }
+
+    // -- 正常流程：开/选/关 --
+
+    #[test]
+    fn ws_open_tab_adds_tab_and_sets_active() {
+        let mut svc = ws_with_host("h1", "server1");
+        let tab = svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal).unwrap();
+        assert_eq!(tab.id, "t1");
+        assert_eq!(tab.title, "server1");
+        assert_eq!(svc.active_tab_id(), Some("t1"));
+        assert_eq!(svc.tab_list().len(), 1);
+    }
+
+    #[test]
+    fn ws_open_multiple_tabs_gets_disambiguated_titles() {
+        let mut svc = ws_with_host("h1", "server1");
+        let t1 = svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal).unwrap();
+        let t2 = svc.open_tab("t2".into(), "h1".into(), TabKind::Sftp).unwrap();
+        let t3 = svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal).unwrap();
+        assert_eq!(t1.title, "server1");
+        assert_eq!(t2.title, "server1 (2)");
+        assert_eq!(t3.title, "server1 (3)");
+        assert_eq!(svc.active_tab_id(), Some("t3"));
+    }
+
+    #[test]
+    fn ws_title_is_fixed_at_creation_and_does_not_change() {
+        let mut svc = ws_with_host("h1", "server1");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        let t3 = svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal).unwrap();
+        assert_eq!(t3.title, "server1 (3)");
+        // 关闭中间标签后，t3 的标题保持不变
+        svc.close_tab_internal("t2");
+        let tabs = svc.tab_list();
+        assert_eq!(tabs[0].title, "server1");
+        assert_eq!(tabs[1].title, "server1 (3)");
+    }
+
+    #[test]
+    fn ws_select_tab_changes_active() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        assert_eq!(svc.active_tab_id(), Some("t2"));
+        assert!(svc.select_tab("t1"));
+        assert_eq!(svc.active_tab_id(), Some("t1"));
+    }
+
+    #[test]
+    fn ws_close_non_connected_terminal_closes_immediately() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        let result = svc.request_close("t1");
+        assert_eq!(result, CloseResult::Closed);
+        assert!(svc.tab_list().is_empty());
+        assert_eq!(svc.active_tab_id(), None);
+    }
+
+    #[test]
+    fn ws_close_sftp_always_closes_immediately() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Sftp);
+        // 即使报告为 connected，SFTP 也不需要确认
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        let result = svc.request_close("t1");
+        assert_eq!(result, CloseResult::Closed);
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn ws_close_connected_terminal_requires_confirmation() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        let result = svc.request_close("t1");
+        assert_eq!(result, CloseResult::PendingConfirmation);
+        // 标签页仍在
+        assert_eq!(svc.tab_list().len(), 1);
+        // 确认后才关闭
+        svc.confirm_close();
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn ws_cancel_close_keeps_tab() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        svc.request_close("t1");
+        svc.cancel_close();
+        assert_eq!(svc.tab_list().len(), 1);
+        assert!(svc.pending_close_info().is_none());
+    }
+
+    // -- 正常流程：逻辑顺序与连接聚合 --
+
+    #[test]
+    fn ws_tab_order_preserved() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        let ids: Vec<String> = svc.tab_list().iter().map(|t| t.id.clone()).collect();
+        assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn ws_host_connection_status_aggregated() {
+        let mut svc = ws();
+        svc.update_host_names(vec![
+            ("h1".into(), "s1".into()),
+            ("h2".into(), "s2".into()),
+        ]);
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Sftp);
+        svc.open_tab("t3".into(), "h2".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        svc.report_connection_status("t2", ConnectionStatus::Connecting);
+        assert_eq!(svc.host_connection_status("h1"), ConnectionStatus::Connected);
+        assert_eq!(svc.host_connection_status("h2"), ConnectionStatus::Connecting);
+    }
+
+    #[test]
+    fn ws_connection_status_updates_terminal_connected_flag() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        // 初始 terminal_connected = false
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        // 现在关闭需要确认
+        assert_eq!(
+            svc.request_close("t1"),
+            CloseResult::PendingConfirmation
+        );
+        svc.cancel_close();
+        // 断开后关闭不需要确认
+        svc.report_connection_status("t1", ConnectionStatus::Failed);
+        assert_eq!(svc.request_close("t1"), CloseResult::Closed);
+    }
+
+    // -- 正常流程：批量关闭 --
+
+    #[test]
+    fn ws_close_others_no_connected_closes_immediately() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        let result = svc.request_close_others("t2");
+        assert_eq!(result, CloseResult::Closed);
+        assert_eq!(svc.tab_list().len(), 1);
+        assert_eq!(svc.tab_list()[0].id, "t2");
+        assert_eq!(svc.active_tab_id(), Some("t2"));
+    }
+
+    #[test]
+    fn ws_close_others_with_connected_requires_confirmation() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        let result = svc.request_close_others("t2");
+        assert_eq!(result, CloseResult::PendingConfirmation);
+        let info = svc.pending_close_info().unwrap();
+        assert_eq!(info.tab_ids, vec!["t1"]);
+        assert_eq!(info.connected_terminal_count, 1);
+        svc.confirm_close();
+        assert_eq!(svc.tab_list().len(), 1);
+        assert_eq!(svc.tab_list()[0].id, "t2");
+    }
+
+    #[test]
+    fn ws_close_all_no_connected_closes_immediately() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Sftp);
+        let result = svc.request_close_all();
+        assert_eq!(result, CloseResult::Closed);
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn ws_close_all_with_connected_requires_confirmation() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        svc.report_connection_status("t2", ConnectionStatus::Connected);
+        let result = svc.request_close_all();
+        assert_eq!(result, CloseResult::PendingConfirmation);
+        let info = svc.pending_close_info().unwrap();
+        assert_eq!(info.connected_terminal_count, 2);
+        assert_eq!(info.tab_ids.len(), 2);
+    }
+
+    // -- 意外流程 --
+
+    #[test]
+    fn ws_close_unknown_tab_returns_closed() {
+        let mut svc = ws();
+        let result = svc.request_close("nonexistent");
+        assert_eq!(result, CloseResult::Closed);
+    }
+
+    #[test]
+    fn ws_select_unknown_tab_returns_false() {
+        let mut svc = ws();
+        assert!(!svc.select_tab("nonexistent"));
+        assert_eq!(svc.active_tab_id(), None);
+    }
+
+    #[test]
+    fn ws_report_status_unknown_tab_is_noop() {
+        let mut svc = ws();
+        svc.report_connection_status("nonexistent", ConnectionStatus::Connected);
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn ws_confirm_close_without_pending_is_noop() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.confirm_close();
+        assert_eq!(svc.tab_list().len(), 1);
+    }
+
+    #[test]
+    fn ws_pending_close_info_none_when_no_pending() {
+        let svc = ws();
+        assert!(svc.pending_close_info().is_none());
+    }
+
+    #[test]
+    fn ws_terminal_session_stale_for_unknown_tab() {
+        let svc = ws();
+        assert!(svc.terminal_session_is_stale("nonexistent", 0));
+    }
+
+    // -- 边界条件 --
+
+    #[test]
+    fn ws_empty_workspace_has_no_active_tab() {
+        let svc = ws();
+        assert_eq!(svc.active_tab_id(), None);
+        assert!(svc.tab_list().is_empty());
+        assert_eq!(
+            svc.host_connection_status("any"),
+            ConnectionStatus::Inactive
+        );
+    }
+
+    #[test]
+    fn ws_close_active_tab_selects_left_neighbor() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        svc.select_tab("t2");
+        svc.close_tab_internal("t2");
+        assert_eq!(svc.active_tab_id(), Some("t1"));
+    }
+
+    #[test]
+    fn ws_close_first_tab_selects_right_neighbor() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.close_tab_internal("t1");
+        assert_eq!(svc.active_tab_id(), Some("t2"));
+    }
+
+    #[test]
+    fn ws_close_last_tab_selects_left() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        svc.close_tab_internal("t3");
+        assert_eq!(svc.active_tab_id(), Some("t2"));
+    }
+
+    #[test]
+    fn ws_close_only_tab_clears_active() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.close_tab_internal("t1");
+        assert_eq!(svc.active_tab_id(), None);
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn ws_close_non_active_tab_does_not_change_active() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        svc.select_tab("t2");
+        svc.close_tab_internal("t1");
+        assert_eq!(svc.active_tab_id(), Some("t2"));
+    }
+
+    #[test]
+    fn ws_unknown_host_falls_back_to_host_id_in_service() {
+        let mut svc = ws();
+        let tab = svc.open_tab("t1".into(), "uuid-123".into(), TabKind::Terminal).unwrap();
+        assert_eq!(tab.title, "uuid-123");
+    }
+
+    #[test]
+    fn ws_reset_clears_all_state() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.reset();
+        assert!(svc.tab_list().is_empty());
+        assert_eq!(svc.active_tab_id(), None);
+        assert!(svc.pending_close_info().is_none());
+        assert!(svc.terminal_session_get("t1").is_none());
+    }
+
+    #[test]
+    fn ws_close_tab_also_removes_terminal_session() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        assert!(svc.terminal_session_get("t1").is_some());
+        svc.close_tab_internal("t1");
+        assert!(svc.terminal_session_get("t1").is_none());
+    }
+
+    // -- WorkspaceService 终端会话管理 --
+
+    #[test]
+    fn ws_terminal_session_lifecycle_through_service() {
+        let mut svc = ws_with_host("h1", "s");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        let session = svc.terminal_session_register("h1".into(), "t1".into());
+        assert_eq!(session.phase, TerminalPhase::Connecting);
+        assert_eq!(session.attempt, 0);
+
+        svc.terminal_session_transition_to_shell("t1");
+        assert_eq!(
+            svc.terminal_session_get("t1").unwrap().phase,
+            TerminalPhase::Shell
+        );
+
+        svc.terminal_session_transition_to_failed(
+            "t1",
+            TerminalFailureCategory::Timeout,
+            "超时".into(),
+        );
+        assert_eq!(
+            svc.terminal_session_get("t1").unwrap().phase,
+            TerminalPhase::Failed
+        );
+
+        let retry = svc.terminal_session_retry("t1").unwrap();
+        assert_eq!(retry.phase, TerminalPhase::Connecting);
+        assert_eq!(retry.attempt, 1);
+
+        assert!(!svc.terminal_session_is_stale("t1", 1));
+        assert!(svc.terminal_session_is_stale("t1", 0));
+
+        svc.terminal_session_close("t1");
+        assert!(svc.terminal_session_get("t1").is_none());
+    }
+
+    #[test]
+    fn ws_terminal_session_retry_unknown_returns_none() {
+        let mut svc = ws();
+        assert!(svc.terminal_session_retry("nonexistent").is_none());
+    }
+
+    #[test]
+    fn ws_host_name_update_is_incremental() {
+        let mut svc = ws();
+        svc.update_host_names(vec![("h1".into(), "server1".into())]);
+        let tab1 = svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal).unwrap();
+        assert_eq!(tab1.title, "server1");
+
+        svc.update_host_names(vec![("h2".into(), "server2".into())]);
+        let tab2 = svc.open_tab("t2".into(), "h2".into(), TabKind::Terminal).unwrap();
+        assert_eq!(tab2.title, "server2");
+        // h1 的映射仍然存在，t1 初始状态为 Connecting
+        assert_eq!(svc.host_connection_status("h1"), ConnectionStatus::Connecting);
+    }
+
+    // -- 10.3 关闭确认与会话资源集成 --
+
+    #[test]
+    fn ws_close_connected_terminal_confirms_and_cleans_session() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        assert_eq!(svc.request_close("t1"), CloseResult::PendingConfirmation);
+        assert!(svc.terminal_session_get("t1").is_some());
+
+        svc.confirm_close();
+        assert!(svc.tab_list().is_empty());
+        assert!(svc.terminal_session_get("t1").is_none());
+    }
+
+    #[test]
+    fn ws_cancel_close_preserves_session() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        svc.request_close("t1");
+        svc.cancel_close();
+
+        assert_eq!(svc.tab_list().len(), 1);
+        assert!(svc.terminal_session_get("t1").is_some());
+    }
+
+    #[test]
+    fn ws_batch_close_confirms_and_cleans_all_sessions() {
+        let mut svc = ws();
+        svc.update_host_names(vec![("h1".into(), "s1".into()), ("h2".into(), "s2".into())]);
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h2".into(), TabKind::Sftp);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.terminal_session_register("h1".into(), "t2".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        assert_eq!(svc.request_close_all(), CloseResult::PendingConfirmation);
+        let info = svc.pending_close_info().unwrap();
+        assert_eq!(info.connected_terminal_count, 1);
+        assert_eq!(info.tab_ids.len(), 3);
+
+        svc.confirm_close();
+        assert!(svc.tab_list().is_empty());
+        assert!(svc.terminal_session_get("t1").is_none());
+        assert!(svc.terminal_session_get("t2").is_none());
+    }
+
+    #[test]
+    fn ws_close_others_confirms_and_cleans_target_sessions() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.terminal_session_register("h1".into(), "t2".into());
+        svc.terminal_session_register("h1".into(), "t3".into());
+        svc.report_connection_status("t2", ConnectionStatus::Connected);
+
+        assert_eq!(svc.request_close_others("t1"), CloseResult::PendingConfirmation);
+        svc.confirm_close();
+
+        assert_eq!(svc.tab_list().len(), 1);
+        assert_eq!(svc.tab_list()[0].id, "t1");
+        assert!(svc.terminal_session_get("t1").is_some());
+        assert!(svc.terminal_session_get("t2").is_none());
+        assert!(svc.terminal_session_get("t3").is_none());
+    }
+
+    #[test]
+    fn ws_reconnect_during_close_confirmation_preserves_intent() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        svc.request_close("t1");
+        assert!(svc.pending_close_info().is_some());
+
+        // 用户在确认期间重试连接（状态变 Failed 再回 Connected）
+        svc.report_connection_status("t1", ConnectionStatus::Failed);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        // 确认关闭仍然有效
+        svc.confirm_close();
+        assert!(svc.tab_list().is_empty());
+        assert!(svc.terminal_session_get("t1").is_none());
+    }
+
+    #[test]
+    fn ws_new_tab_during_close_confirmation_not_affected() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        svc.request_close("t1");
+
+        // 确认前用户打开新标签
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t2".into());
+
+        svc.confirm_close();
+        // t1 被关闭，t2 保留
+        assert_eq!(svc.tab_list().len(), 1);
+        assert_eq!(svc.tab_list()[0].id, "t2");
+        assert!(svc.terminal_session_get("t1").is_none());
+        assert!(svc.terminal_session_get("t2").is_some());
+    }
+
+    #[test]
+    fn ws_sftp_close_does_not_affect_terminal_sessions() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Sftp);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        svc.report_connection_status("t2", ConnectionStatus::Connected);
+
+        // 关闭 SFTP 标签不需要确认，不影响终端会话
+        assert_eq!(svc.request_close("t2"), CloseResult::Closed);
+        assert_eq!(svc.tab_list().len(), 1);
+        assert!(svc.terminal_session_get("t1").is_some());
+    }
+
+    #[test]
+    fn ws_close_disconnected_terminal_cleans_session_immediately() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.report_connection_status("t1", ConnectionStatus::Failed);
+
+        assert_eq!(svc.request_close("t1"), CloseResult::Closed);
+        assert!(svc.tab_list().is_empty());
+        assert!(svc.terminal_session_get("t1").is_none());
+    }
+
+    #[test]
+    fn ws_confirm_without_pending_is_noop() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+
+        svc.confirm_close();
+        assert_eq!(svc.tab_list().len(), 1);
+        assert!(svc.terminal_session_get("t1").is_some());
+    }
+
+    #[test]
+    fn ws_close_captures_target_set_at_request_time() {
+        let mut svc = ws_with_host("h1", "server");
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t1".into());
+        svc.terminal_session_register("h1".into(), "t2".into());
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        svc.request_close_all();
+        let info = svc.pending_close_info().unwrap();
+        assert_eq!(info.tab_ids.len(), 2);
+
+        // 确认前新标签加入，不应被关闭
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        svc.terminal_session_register("h1".into(), "t3".into());
+
+        svc.confirm_close();
+        assert_eq!(svc.tab_list().len(), 1);
+        assert_eq!(svc.tab_list()[0].id, "t3");
+        assert!(svc.terminal_session_get("t3").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // 分组管理
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn group_create_default_name_assigns_tab() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        let gid = svc.create_group("t1", None);
+        let snap = svc.group_snapshot();
+        assert_eq!(snap.groups.len(), 1);
+        assert_eq!(snap.groups[0].name, "分组 1");
+        assert_eq!(snap.groups[0].tab_ids, vec!["t1"]);
+        assert!(snap.ungrouped_tab_ids.is_empty());
+        assert_eq!(svc.group_id_for_tab("t1"), Some(gid.as_str()));
+    }
+
+    #[test]
+    fn group_create_custom_name() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.create_group("t1", Some("生产".into()));
+        assert_eq!(svc.group_snapshot().groups[0].name, "生产");
+    }
+
+    #[test]
+    fn group_delete_empty_removes_group() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        let gid = svc.create_group("t1", None);
+        svc.remove_tab_from_group("t1");
+        // 手动移除最后一个成员后分组不为空（Swift 语义：移出时保留空组）
+        // 但 delete_group 应正常工作
+        svc.delete_group(&gid);
+        assert!(svc.group_snapshot().groups.is_empty());
+    }
+
+    #[test]
+    fn group_delete_non_empty_moves_tabs_to_ungrouped() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        let gid = svc.create_group("t1", None);
+        svc.move_tab_to_group("t2", &gid);
+        svc.delete_group(&gid);
+        let snap = svc.group_snapshot();
+        assert!(snap.groups.is_empty());
+        assert_eq!(snap.ungrouped_tab_ids, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn group_rename() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        let gid = svc.create_group("t1", None);
+        svc.rename_group(&gid, "测试");
+        assert_eq!(svc.group_snapshot().groups[0].name, "测试");
+    }
+
+    #[test]
+    fn group_move_tab_between_groups() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        let g1 = svc.create_group("t1", Some("A".into()));
+        let g2 = svc.create_group("t2", Some("B".into()));
+        svc.move_tab_to_group("t1", &g2);
+        let snap = svc.group_snapshot();
+        assert!(snap.groups[0].tab_ids.is_empty());
+        assert_eq!(snap.groups[1].tab_ids, vec!["t2", "t1"]);
+        assert_eq!(svc.group_id_for_tab("t1"), Some(g2.as_str()));
+        let _ = g1;
+    }
+
+    #[test]
+    fn group_remove_tab_becomes_ungrouped() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.create_group("t1", None);
+        svc.remove_tab_from_group("t1");
+        let snap = svc.group_snapshot();
+        assert!(snap.groups[0].tab_ids.is_empty());
+        assert_eq!(snap.ungrouped_tab_ids, vec!["t1"]);
+    }
+
+    #[test]
+    fn group_delete_nonexistent_is_noop() {
+        let mut svc = WorkspaceService::new();
+        svc.delete_group("nonexistent");
+        assert!(svc.group_snapshot().groups.is_empty());
+    }
+
+    #[test]
+    fn group_rename_nonexistent_is_noop() {
+        let mut svc = WorkspaceService::new();
+        svc.rename_group("nonexistent", "x");
+        assert!(svc.group_snapshot().groups.is_empty());
+    }
+
+    #[test]
+    fn group_move_tab_to_nonexistent_group_is_noop() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.move_tab_to_group("t1", "nonexistent");
+        assert_eq!(svc.group_snapshot().ungrouped_tab_ids, vec!["t1"]);
+    }
+
+    #[test]
+    fn group_auto_increment_names() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        svc.create_group("t1", None);
+        svc.create_group("t2", None);
+        svc.create_group("t3", None);
+        let snap = svc.group_snapshot();
+        assert_eq!(snap.groups[0].name, "分组 1");
+        assert_eq!(snap.groups[1].name, "分组 2");
+        assert_eq!(snap.groups[2].name, "分组 3");
+    }
+
+    #[test]
+    fn group_empty_auto_cleanup_on_tab_close() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.create_group("t1", None);
+        assert_eq!(svc.group_snapshot().groups.len(), 1);
+        svc.request_close("t1");
+        assert!(svc.group_snapshot().groups.is_empty());
+    }
+
+    #[test]
+    fn group_display_order_groups_then_ungrouped() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t2".into(), "h1".into(), TabKind::Terminal);
+        svc.open_tab("t3".into(), "h1".into(), TabKind::Terminal);
+        let gid = svc.create_group("t2", None);
+        svc.move_tab_to_group("t3", &gid);
+        let order = svc.display_order();
+        assert_eq!(order, vec!["t2", "t3", "t1"]);
+    }
+
+    #[test]
+    fn group_new_tab_starts_ungrouped() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        let snap = svc.group_snapshot();
+        assert!(snap.groups.is_empty());
+        assert_eq!(snap.ungrouped_tab_ids, vec!["t1"]);
+    }
+
+    #[test]
+    fn group_reset_clears_all() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.create_group("t1", None);
+        svc.reset();
+        let snap = svc.group_snapshot();
+        assert!(snap.groups.is_empty());
+        assert!(snap.ungrouped_tab_ids.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 应用停机
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shutdown_force_closes_connected_terminals() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        svc.open_tab("t2".into(), "h2".into(), TabKind::Sftp);
+
+        let summary = svc.begin_application_shutdown();
+
+        assert!(svc.tab_list().is_empty());
+        assert_eq!(summary.closed_tab_count, 2);
+        assert!(!svc.is_accepting_new_work());
+    }
+
+    #[test]
+    fn shutdown_rejects_new_tabs() {
+        let mut svc = WorkspaceService::new();
+        svc.begin_application_shutdown();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn shutdown_clears_pending_close() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        let result = svc.request_close_all();
+        assert_eq!(result, CloseResult::PendingConfirmation);
+        assert!(svc.pending_close_info().is_some());
+
+        svc.begin_application_shutdown();
+
+        assert!(svc.pending_close_info().is_none());
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn shutdown_is_idempotent() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+
+        let first = svc.begin_application_shutdown();
+        let second = svc.begin_application_shutdown();
+
+        assert_eq!(first.closed_tab_count, 1);
+        assert_eq!(second.closed_tab_count, 0);
+    }
+
+    #[test]
+    fn shutdown_with_no_tabs() {
+        let mut svc = WorkspaceService::new();
+        let summary = svc.begin_application_shutdown();
+        assert_eq!(summary.closed_tab_count, 0);
+        assert!(!svc.is_accepting_new_work());
+    }
+
+    #[test]
+    fn shutdown_with_pending_single_close() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+        let result = svc.request_close("t1");
+        assert_eq!(result, CloseResult::PendingConfirmation);
+        assert!(svc.pending_close_info().is_some());
+
+        let summary = svc.begin_application_shutdown();
+
+        assert_eq!(summary.closed_tab_count, 1);
+        assert!(svc.pending_close_info().is_none());
+        assert!(svc.tab_list().is_empty());
+    }
+
+    #[test]
+    fn shutdown_confirm_close_is_noop() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.begin_application_shutdown();
+        assert!(svc.tab_list().is_empty());
+
+        svc.confirm_close();
+
+        assert!(svc.tab_list().is_empty());
+        assert!(svc.pending_close_info().is_none());
+    }
+
+    #[test]
+    fn shutdown_request_close_returns_closed() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.begin_application_shutdown();
+
+        let result = svc.request_close("t1");
+        assert_eq!(result, CloseResult::Closed);
+    }
+
+    #[test]
+    fn reset_restores_accepting_new_work() {
+        let mut svc = WorkspaceService::new();
+        svc.begin_application_shutdown();
+        assert!(!svc.is_accepting_new_work());
+
+        svc.reset();
+
+        assert!(svc.is_accepting_new_work());
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        assert_eq!(svc.tab_list().len(), 1);
+    }
+
+    #[test]
+    fn shutdown_marks_terminals_inactive() {
+        let mut svc = WorkspaceService::new();
+        svc.open_tab("t1".into(), "h1".into(), TabKind::Terminal);
+        svc.report_connection_status("t1", ConnectionStatus::Connected);
+
+        svc.begin_application_shutdown();
+
+        assert!(svc.tab_list().is_empty());
+        assert!(!svc.is_accepting_new_work());
     }
 }

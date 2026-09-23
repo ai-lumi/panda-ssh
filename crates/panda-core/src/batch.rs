@@ -1,9 +1,14 @@
 //! 批量 SFTP 传输：递归扫描本地/远程目录，生成批量传输计划。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use uuid::Uuid;
 
 use crate::sftp::SftpClient;
 use crate::{Error, Result};
@@ -537,6 +542,433 @@ pub async fn execute_batch_download(
     Ok(outcome)
 }
 
+// ---------------------------------------------------------------------------
+// 批量传输任务服务
+// ---------------------------------------------------------------------------
+
+/// 批量传输方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BatchDirection {
+    Upload,
+    Download,
+}
+
+/// 批量传输任务状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchStatus {
+    Queued,
+    Running,
+    WaitingForConflict,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl BatchStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            BatchStatus::Completed | BatchStatus::Failed | BatchStatus::Cancelled
+        )
+    }
+}
+
+/// 批量传输中单个文件冲突的快照。
+#[derive(Debug, Clone)]
+pub struct BatchConflictInfo {
+    pub item_source: String,
+    pub item_destination: String,
+    pub source_size: u64,
+    pub source_mtime: Option<u64>,
+    pub target_size: u64,
+    pub target_mtime: Option<u64>,
+}
+
+/// 批量传输任务快照。
+#[derive(Debug, Clone)]
+pub struct BatchTaskSnapshot {
+    pub id: String,
+    pub direction: BatchDirection,
+    pub host_id: String,
+    pub dest_dir: String,
+    pub sources: Vec<String>,
+    pub total_size: u64,
+    pub transferred: u64,
+    pub status: BatchStatus,
+    pub error: Option<String>,
+    pub pending_conflict: Option<BatchConflictInfo>,
+}
+
+/// 冲突决策通道：由服务构造，注入执行器上下文。
+///
+/// 调用 `resolve` 时，任务状态进入 `WaitingForConflict`，等待外部决策或超时。
+#[derive(Clone)]
+pub struct BatchConflictResolver {
+    inner: Arc<ConflictResolverInner>,
+}
+
+struct ConflictResolverInner {
+    pending_conflict: Mutex<Option<BatchConflictInfo>>,
+    status: Mutex<BatchStatus>,
+    timeout: Duration,
+    decision_tx: Mutex<Option<tokio::sync::oneshot::Sender<ConflictResolution>>>,
+}
+
+impl BatchConflictResolver {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            inner: Arc::new(ConflictResolverInner {
+                pending_conflict: Mutex::new(None),
+                status: Mutex::new(BatchStatus::Queued),
+                timeout,
+                decision_tx: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// 等待外部对冲突的决策；超时按跳过处理。
+    pub fn resolve(&self) -> Pin<Box<dyn Future<Output = ConflictResolution> + Send>> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let rx = {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                *inner.decision_tx.lock().unwrap() = Some(tx);
+                rx
+            };
+            match tokio::time::timeout(inner.timeout, rx).await {
+                Ok(Ok(resolution)) => resolution,
+                _ => ConflictResolution::Skip,
+            }
+        })
+    }
+
+    pub fn set_pending(&self, info: BatchConflictInfo) {
+        *self.inner.pending_conflict.lock().unwrap() = Some(info);
+        *self.inner.status.lock().unwrap() = BatchStatus::WaitingForConflict;
+    }
+
+    pub fn clear_pending(&self) {
+        *self.inner.pending_conflict.lock().unwrap() = None;
+        *self.inner.decision_tx.lock().unwrap() = None;
+    }
+
+    fn send_decision(&self, resolution: ConflictResolution) -> bool {
+        let tx = self.inner.decision_tx.lock().unwrap().take();
+        if let Some(tx) = tx {
+            tx.send(resolution).is_ok()
+        } else {
+            false
+        }
+    }
+
+    fn is_waiting(&self) -> bool {
+        *self.inner.status.lock().unwrap() == BatchStatus::WaitingForConflict
+    }
+
+    fn pending_conflict(&self) -> Option<BatchConflictInfo> {
+        self.inner.pending_conflict.lock().unwrap().clone()
+    }
+
+    fn status(&self) -> BatchStatus {
+        *self.inner.status.lock().unwrap()
+    }
+
+    fn set_status(&self, status: BatchStatus) {
+        *self.inner.status.lock().unwrap() = status;
+    }
+}
+
+/// 批量传输执行器 trait：由调用方注入实际扫描与传输逻辑。
+pub trait BatchExecutor: Send + Sync + 'static {
+    fn execute(
+        &self,
+        ctx: &BatchContext,
+    ) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>>;
+}
+
+/// 执行器上下文：提供进度回报、取消检测与冲突决策通道，以及任务元数据。
+pub struct BatchContext {
+    pub progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+    pub cancel: Arc<AtomicBool>,
+    pub conflict: BatchConflictResolver,
+    pub direction: BatchDirection,
+    pub host_id: String,
+    pub sources: Vec<String>,
+    pub dest_dir: String,
+    pub password: Option<String>,
+    pub passphrase: Option<String>,
+}
+
+/// 批量传输服务：管理任务注册表、状态转换、冲突超时与取消。
+pub struct BatchTransferService {
+    inner: Arc<BatchServiceInner>,
+}
+
+struct BatchServiceInner {
+    tasks: Mutex<HashMap<Uuid, Arc<BatchTaskEntry>>>,
+    executor: Box<dyn BatchExecutor>,
+    conflict_timeout: Duration,
+    change_counter: AtomicU64,
+    on_change: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl BatchServiceInner {
+    fn notify_changed(&self) {
+        self.change_counter.fetch_add(1, Ordering::Relaxed);
+        if let Some(ref cb) = self.on_change {
+            cb();
+        }
+    }
+}
+
+struct BatchTaskEntry {
+    id: Uuid,
+    direction: BatchDirection,
+    host_id: String,
+    dest_dir: String,
+    sources: Vec<String>,
+    password: Option<String>,
+    passphrase: Option<String>,
+    total_size: AtomicU64,
+    transferred: AtomicU64,
+    error: Mutex<Option<String>>,
+    cancel: Arc<AtomicBool>,
+    resolver: BatchConflictResolver,
+}
+
+impl BatchTaskEntry {
+    fn snapshot(&self) -> BatchTaskSnapshot {
+        BatchTaskSnapshot {
+            id: self.id.to_string(),
+            direction: self.direction,
+            host_id: self.host_id.clone(),
+            dest_dir: self.dest_dir.clone(),
+            sources: self.sources.clone(),
+            total_size: self.total_size.load(Ordering::Relaxed),
+            transferred: self.transferred.load(Ordering::Relaxed),
+            status: self.resolver.status(),
+            error: self.error.lock().unwrap().clone(),
+            pending_conflict: self.resolver.pending_conflict(),
+        }
+    }
+}
+
+/// 创建批量传输服务的参数。
+pub struct BatchServiceParams {
+    pub conflict_timeout: Duration,
+    pub on_change: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Default for BatchServiceParams {
+    fn default() -> Self {
+        Self {
+            conflict_timeout: Duration::from_secs(300),
+            on_change: None,
+        }
+    }
+}
+
+impl BatchTransferService {
+    pub fn new(executor: Box<dyn BatchExecutor>) -> Self {
+        Self::with_params(executor, BatchServiceParams::default())
+    }
+
+    pub fn with_params(executor: Box<dyn BatchExecutor>, params: BatchServiceParams) -> Self {
+        Self {
+            inner: Arc::new(BatchServiceInner {
+                tasks: Mutex::new(HashMap::new()),
+                executor,
+                conflict_timeout: params.conflict_timeout,
+                change_counter: AtomicU64::new(0),
+                on_change: params.on_change,
+            }),
+        }
+    }
+
+    pub fn start_upload(
+        &self,
+        host_id: String,
+        sources: Vec<String>,
+        dest_dir: String,
+        password: Option<String>,
+        passphrase: Option<String>,
+    ) -> Result<String> {
+        self.start_task(BatchDirection::Upload, host_id, sources, dest_dir, password, passphrase)
+    }
+
+    pub fn start_download(
+        &self,
+        host_id: String,
+        sources: Vec<String>,
+        dest_dir: String,
+        password: Option<String>,
+        passphrase: Option<String>,
+    ) -> Result<String> {
+        self.start_task(BatchDirection::Download, host_id, sources, dest_dir, password, passphrase)
+    }
+
+    fn start_task(
+        &self,
+        direction: BatchDirection,
+        host_id: String,
+        sources: Vec<String>,
+        dest_dir: String,
+        password: Option<String>,
+        passphrase: Option<String>,
+    ) -> Result<String> {
+        let id = Uuid::new_v4();
+        let resolver = BatchConflictResolver::new(self.inner.conflict_timeout);
+        let entry = Arc::new(BatchTaskEntry {
+            id,
+            direction,
+            host_id,
+            dest_dir,
+            sources,
+            password,
+            passphrase,
+            total_size: AtomicU64::new(0),
+            transferred: AtomicU64::new(0),
+            error: Mutex::new(None),
+            cancel: Arc::new(AtomicBool::new(false)),
+            resolver,
+        });
+        self.inner
+            .tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, entry.clone());
+        self.inner.notify_changed();
+
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            run_batch_task(inner, entry).await;
+        });
+        Ok(id.to_string())
+    }
+
+    pub fn status(&self, task_id: &str) -> Result<BatchTaskSnapshot> {
+        let id = Uuid::parse_str(task_id)
+            .map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
+        let tasks = self.inner.tasks.lock().unwrap();
+        let entry = tasks
+            .get(&id)
+            .ok_or_else(|| Error::Other(format!("未知任务: {task_id}")))?;
+        Ok(entry.snapshot())
+    }
+
+    pub fn list(&self) -> Vec<BatchTaskSnapshot> {
+        let tasks = self.inner.tasks.lock().unwrap();
+        let mut snapshots: Vec<_> = tasks.values().map(|t| t.snapshot()).collect();
+        snapshots.sort_by(|a, b| a.id.cmp(&b.id));
+        snapshots
+    }
+
+    pub fn cancel(&self, task_id: &str) -> Result<()> {
+        let id = Uuid::parse_str(task_id)
+            .map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
+        let tasks = self.inner.tasks.lock().unwrap();
+        let entry = tasks
+            .get(&id)
+            .ok_or_else(|| Error::Other(format!("未知任务: {task_id}")))?;
+        entry.cancel.store(true, Ordering::Relaxed);
+        if entry.resolver.is_waiting() {
+            entry
+                .resolver
+                .send_decision(ConflictResolution::Skip);
+            entry.resolver.clear_pending();
+        }
+        self.inner.notify_changed();
+        Ok(())
+    }
+
+    pub fn resolve_conflict(
+        &self,
+        task_id: &str,
+        overwrite: bool,
+    ) -> Result<()> {
+        let id = Uuid::parse_str(task_id)
+            .map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
+        let tasks = self.inner.tasks.lock().unwrap();
+        let entry = tasks
+            .get(&id)
+            .ok_or_else(|| Error::Other(format!("未知任务: {task_id}")))?;
+        if !entry.resolver.is_waiting() {
+            return Err(Error::Other("任务不在等待冲突状态".to_string()));
+        }
+        let resolution = if overwrite {
+            ConflictResolution::Overwrite
+        } else {
+            ConflictResolution::Skip
+        };
+        entry.resolver.send_decision(resolution);
+        entry.resolver.clear_pending();
+        self.inner.notify_changed();
+        Ok(())
+    }
+
+    pub fn change_counter(&self) -> u64 {
+        self.inner.change_counter.load(Ordering::Relaxed)
+    }
+}
+
+impl Clone for BatchTransferService {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+async fn run_batch_task(inner: Arc<BatchServiceInner>, entry: Arc<BatchTaskEntry>) {
+    if entry.cancel.load(Ordering::Relaxed) {
+        entry.resolver.set_status(BatchStatus::Cancelled);
+        inner.notify_changed();
+        return;
+    }
+    entry.resolver.set_status(BatchStatus::Running);
+    inner.notify_changed();
+
+    let progress = {
+        let entry = entry.clone();
+        let inner_ref = inner.clone();
+        Arc::new(move |done: u64, total: u64| {
+            entry.transferred.store(done, Ordering::Relaxed);
+            if total > 0 {
+                entry.total_size.store(total, Ordering::Relaxed);
+            }
+            inner_ref.notify_changed();
+        }) as Arc<dyn Fn(u64, u64) + Send + Sync>
+    };
+
+    let ctx = BatchContext {
+        progress,
+        cancel: entry.cancel.clone(),
+        conflict: entry.resolver.clone(),
+        direction: entry.direction,
+        host_id: entry.host_id.clone(),
+        sources: entry.sources.clone(),
+        dest_dir: entry.dest_dir.clone(),
+        password: entry.password.clone(),
+        passphrase: entry.passphrase.clone(),
+    };
+
+    let outcome = inner.executor.execute(&ctx).await;
+
+    if outcome.cancelled || entry.cancel.load(Ordering::Relaxed) {
+        entry.resolver.set_status(BatchStatus::Cancelled);
+    } else if !outcome.errors.is_empty() {
+        entry.resolver.set_status(BatchStatus::Failed);
+        *entry.error.lock().unwrap() = Some(outcome.errors.join("; "));
+    } else {
+        entry.resolver.set_status(BatchStatus::Completed);
+        entry
+            .transferred
+            .store(entry.total_size.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+    entry.resolver.clear_pending();
+    inner.notify_changed();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +1183,579 @@ mod tests {
         assert_eq!(join_path("/remote", "file.txt"), "/remote/file.txt");
         assert_eq!(join_path("/remote/", "file.txt"), "/remote/file.txt");
         assert_eq!(join_path("/remote", ""), "/remote");
+    }
+}
+
+#[cfg(test)]
+mod batch_service_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct FakeExecutor {
+        outcome: BatchOutcome,
+        delay: Duration,
+    }
+
+    impl FakeExecutor {
+        fn success() -> Self {
+            Self {
+                outcome: BatchOutcome {
+                    completed: vec!["a".into()],
+                    skipped: vec![],
+                    errors: vec![],
+                    cancelled: false,
+                },
+                delay: Duration::from_millis(10),
+            }
+        }
+
+        fn with_outcome(outcome: BatchOutcome) -> Self {
+            Self {
+                outcome,
+                delay: Duration::from_millis(10),
+            }
+        }
+    }
+
+    impl BatchExecutor for FakeExecutor {
+        fn execute(
+            &self,
+            _ctx: &BatchContext,
+        ) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>> {
+            let outcome = self.outcome.clone();
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                outcome
+            })
+        }
+    }
+
+    struct ConflictExecutor {
+        conflicts: Arc<AtomicUsize>,
+    }
+
+    impl ConflictExecutor {
+        fn new() -> Self {
+            Self {
+                conflicts: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl BatchExecutor for ConflictExecutor {
+        fn execute(
+            &self,
+            ctx: &BatchContext,
+        ) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>> {
+            let conflict = ctx.conflict.clone();
+            let cancel = ctx.cancel.clone();
+            let progress = ctx.progress.clone();
+            let conflicts = self.conflicts.clone();
+            Box::pin(async move {
+                progress(0, 100);
+                loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        return BatchOutcome {
+                            completed: vec![],
+                            skipped: vec![],
+                            errors: vec![],
+                            cancelled: true,
+                        };
+                    }
+                    let n = conflicts.fetch_add(1, Ordering::Relaxed);
+                    if n >= 3 {
+                        break;
+                    }
+                    conflict.set_pending(BatchConflictInfo {
+                        item_source: format!("src{n}.txt"),
+                        item_destination: format!("dst{n}.txt"),
+                        source_size: 10,
+                        source_mtime: None,
+                        target_size: 5,
+                        target_mtime: None,
+                    });
+                    let resolution = conflict.resolve().await;
+                    if !conflict.is_waiting()
+                        && conflict.status() == BatchStatus::WaitingForConflict
+                    {
+                    }
+                    if matches!(resolution, ConflictResolution::Overwrite) {
+                        break;
+                    }
+                }
+                progress(100, 100);
+                BatchOutcome {
+                    completed: vec!["done".into()],
+                    skipped: vec![],
+                    errors: vec![],
+                    cancelled: false,
+                }
+            })
+        }
+    }
+
+    fn params_with_timeout(secs: u64) -> BatchServiceParams {
+        BatchServiceParams {
+            conflict_timeout: Duration::from_secs(secs),
+            on_change: None,
+        }
+    }
+
+    // ---- 正常流程 ----
+
+    #[tokio::test]
+    async fn start_upload_runs_to_completion() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let id = svc
+            .start_upload("h1".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert_eq!(snap.direction, BatchDirection::Upload);
+        assert_eq!(snap.host_id, "h1");
+        assert_eq!(snap.dest_dir, "/d");
+        assert_eq!(snap.sources, vec!["s".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn start_download_runs_to_completion() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let id = svc
+            .start_download("h2".into(), vec!["r".into()], "/local".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert_eq!(snap.direction, BatchDirection::Download);
+    }
+
+    #[tokio::test]
+    async fn conflict_overwrite_resolution() {
+        let svc = BatchTransferService::with_params(
+            Box::new(ConflictExecutor::new()),
+            params_with_timeout(300),
+        );
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+
+        let mut waited = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let snap = svc.status(&id).unwrap();
+            if snap.status == BatchStatus::WaitingForConflict {
+                waited = true;
+                break;
+            }
+        }
+        assert!(waited, "task should enter WaitingForConflict");
+
+        let snap = svc.status(&id).unwrap();
+        assert!(snap.pending_conflict.is_some());
+        assert_eq!(
+            snap.pending_conflict.as_ref().unwrap().item_source,
+            "src0.txt"
+        );
+
+        svc.resolve_conflict(&id, true).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert!(snap.pending_conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn conflict_skip_then_completes() {
+        let exec = ConflictExecutor::new();
+        let svc =
+            BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if svc.status(&id).unwrap().status == BatchStatus::WaitingForConflict {
+                break;
+            }
+        }
+        svc.resolve_conflict(&id, false).unwrap();
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if svc.status(&id).unwrap().status == BatchStatus::WaitingForConflict {
+                break;
+            }
+        }
+        svc.resolve_conflict(&id, true).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(svc.status(&id).unwrap().status, BatchStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn error_isolation_records_failure() {
+        let outcome = BatchOutcome {
+            completed: vec!["ok".into()],
+            skipped: vec![],
+            errors: vec!["file.txt: permission denied".into()],
+            cancelled: false,
+        };
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::with_outcome(outcome)));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Failed);
+        assert!(snap.error.as_ref().unwrap().contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn on_change_callback_fires() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let params = BatchServiceParams {
+            conflict_timeout: Duration::from_secs(300),
+            on_change: Some({
+                let counter = counter.clone();
+                Arc::new(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                })
+            }),
+        };
+        let svc = BatchTransferService::with_params(Box::new(FakeExecutor::success()), params);
+        let _id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(counter.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[tokio::test]
+    async fn list_orders_by_id() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let id_a = svc
+            .start_upload("h".into(), vec!["a".into()], "/d".into(), None, None)
+            .unwrap();
+        let id_b = svc
+            .start_upload("h".into(), vec!["b".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let list = svc.list();
+        let ids: Vec<_> = list.iter().map(|s| s.id.clone()).collect();
+        assert!(ids.contains(&id_a));
+        assert!(ids.contains(&id_b));
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "list should be sorted by id");
+    }
+
+    // ---- 意外/错误 ----
+
+    #[tokio::test]
+    async fn connection_failure_marks_failed() {
+        let outcome = BatchOutcome {
+            completed: vec![],
+            skipped: vec![],
+            errors: vec!["SSH 连接失败: 拒绝连接".into()],
+            cancelled: false,
+        };
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::with_outcome(outcome)));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Failed);
+        assert!(snap.error.unwrap().contains("拒绝连接"));
+    }
+
+    #[tokio::test]
+    async fn item_failure_records_error_and_continues() {
+        let outcome = BatchOutcome {
+            completed: vec!["ok.txt".into()],
+            skipped: vec![],
+            errors: vec!["bad.txt: 写入失败".into()],
+            cancelled: false,
+        };
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::with_outcome(outcome)));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Failed);
+        assert!(snap.error.unwrap().contains("写入失败"));
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_when_not_waiting_returns_error() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let result = svc.resolve_conflict(&id, true);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_unknown_task_returns_error() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let fake_id = Uuid::new_v4().to_string();
+        let result = svc.resolve_conflict(&fake_id, true);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn status_unknown_task_returns_error() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        assert!(svc.status("not-a-uuid").is_err());
+        assert!(svc.status(&Uuid::new_v4().to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_task_returns_error() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        assert!(svc.cancel("garbage").is_err());
+        assert!(svc.cancel(&Uuid::new_v4().to_string()).is_err());
+    }
+
+    // ---- 边界 ----
+
+    #[tokio::test]
+    async fn empty_sources_still_runs_executor() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let id = svc
+            .start_upload("h".into(), vec![], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert!(snap.sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn conflict_timeout_defaults_to_skip() {
+        let exec = ConflictExecutor::new();
+        let svc =
+            BatchTransferService::with_params(Box::new(exec), params_with_timeout(0));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert!(snap.pending_conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_before_start_marks_cancelled() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        struct GatedExecutor {
+            gate: Arc<tokio::sync::Notify>,
+        }
+        impl BatchExecutor for GatedExecutor {
+            fn execute(
+                &self,
+                ctx: &BatchContext,
+            ) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>> {
+                let gate = self.gate.clone();
+                let cancel = ctx.cancel.clone();
+                Box::pin(async move {
+                    gate.notified().await;
+                    if cancel.load(Ordering::Relaxed) {
+                        BatchOutcome {
+                            completed: vec![],
+                            skipped: vec![],
+                            errors: vec![],
+                            cancelled: true,
+                        }
+                    } else {
+                        BatchOutcome {
+                            completed: vec!["ok".into()],
+                            skipped: vec![],
+                            errors: vec![],
+                            cancelled: false,
+                        }
+                    }
+                })
+            }
+        }
+
+        let svc = BatchTransferService::new(Box::new(GatedExecutor {
+            gate: gate.clone(),
+        }));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        svc.cancel(&id).unwrap();
+        gate.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_during_conflict_wait_sends_skip() {
+        let exec = ConflictExecutor::new();
+        let svc =
+            BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if svc.status(&id).unwrap().status == BatchStatus::WaitingForConflict {
+                break;
+            }
+        }
+        assert_eq!(
+            svc.status(&id).unwrap().status,
+            BatchStatus::WaitingForConflict
+        );
+
+        svc.cancel(&id).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.status, BatchStatus::Cancelled);
+        assert!(snap.pending_conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn consecutive_conflicts_resolve_independently() {
+        let exec = ConflictExecutor::new();
+        let svc =
+            BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+
+        for expected_src in ["src0.txt", "src1.txt"] {
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if svc.status(&id).unwrap().status == BatchStatus::WaitingForConflict {
+                    break;
+                }
+            }
+            let snap = svc.status(&id).unwrap();
+            assert_eq!(snap.status, BatchStatus::WaitingForConflict);
+            assert_eq!(
+                snap.pending_conflict.as_ref().unwrap().item_source,
+                expected_src
+            );
+            svc.resolve_conflict(&id, false).unwrap();
+        }
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if svc.status(&id).unwrap().status == BatchStatus::WaitingForConflict {
+                break;
+            }
+        }
+        svc.resolve_conflict(&id, true).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(svc.status(&id).unwrap().status, BatchStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn progress_callback_updates_transferred() {
+        struct ProgressExecutor;
+        impl BatchExecutor for ProgressExecutor {
+            fn execute(
+                &self,
+                ctx: &BatchContext,
+            ) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>> {
+                let progress = ctx.progress.clone();
+                Box::pin(async move {
+                    progress(50, 100);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    progress(100, 100);
+                    BatchOutcome {
+                        completed: vec!["ok".into()],
+                        skipped: vec![],
+                        errors: vec![],
+                        cancelled: false,
+                    }
+                })
+            }
+        }
+
+        let svc = BatchTransferService::new(Box::new(ProgressExecutor));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.transferred, 100);
+        assert_eq!(snap.total_size, 100);
+    }
+
+    #[tokio::test]
+    async fn change_counter_increments_on_transitions() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let before = svc.change_counter();
+        let _id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after = svc.change_counter();
+        assert!(after > before);
+    }
+
+    #[tokio::test]
+    async fn list_empty_service_returns_empty() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        assert!(svc.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_outcome_sets_cancelled_status() {
+        let outcome = BatchOutcome {
+            completed: vec![],
+            skipped: vec![],
+            errors: vec![],
+            cancelled: true,
+        };
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::with_outcome(outcome)));
+        let id = svc
+            .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(svc.status(&id).unwrap().status, BatchStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn snapshot_contains_all_fields() {
+        let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
+        let id = svc
+            .start_upload("host-abc".into(), vec!["x".into(), "y".into()], "/dest".into(), None, None)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = svc.status(&id).unwrap();
+        assert_eq!(snap.id, id);
+        assert_eq!(snap.direction, BatchDirection::Upload);
+        assert_eq!(snap.host_id, "host-abc");
+        assert_eq!(snap.dest_dir, "/dest");
+        assert_eq!(snap.sources, vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert!(snap.error.is_none());
+        assert!(snap.pending_conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_status_is_terminal() {
+        assert!(!BatchStatus::Queued.is_terminal());
+        assert!(!BatchStatus::Running.is_terminal());
+        assert!(!BatchStatus::WaitingForConflict.is_terminal());
+        assert!(BatchStatus::Completed.is_terminal());
+        assert!(BatchStatus::Failed.is_terminal());
+        assert!(BatchStatus::Cancelled.is_terminal());
     }
 }

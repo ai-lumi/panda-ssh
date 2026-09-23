@@ -5,7 +5,6 @@
     fn reset_workspace() -> GlobalTestGuard {
         let guard = global_test_lock();
         workspace_reset();
-        preconnect_tofu_reset();
         guard
     }
 
@@ -30,9 +29,9 @@
     #[test]
     fn workspace_open_tab_creates_tab_with_disambiguated_title() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
-        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp).unwrap();
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
         let list = state.tab_list();
         assert_eq!(list.len(), 3);
@@ -52,9 +51,9 @@
     #[test]
     fn workspace_close_tab_preserves_remaining_titles() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
         state.request_close(&id1);
 
@@ -64,28 +63,28 @@
         assert_eq!(list[1].title, "server (3)");
         assert!(list.iter().any(|t| t.id == id3));
 
-        state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
         assert_eq!(state.tab_list()[2].title, "server");
     }
 
     #[test]
     fn workspace_close_active_tab_selects_neighbor() {
         let mut state = make_state(&[("h1", "server")]);
-        let _id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
-        assert_eq!(state.active_tab_id, Some(id3.clone()));
+        assert_eq!(state.active_tab_id(), Some(id3.clone()));
 
         state.request_close(&id3);
-        assert_eq!(state.active_tab_id, Some(id2.clone()));
+        assert_eq!(state.active_tab_id(), Some(id2.clone()));
     }
 
     #[test]
     fn workspace_host_connection_status_aggregates_with_priority() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
         assert_eq!(
             state.host_connection_status("h1"),
@@ -105,8 +104,8 @@
             panda_core::ConnectionStatus::Failed
         );
 
-        state.close_tab_internal(&id1);
-        state.close_tab_internal(&id2);
+        state.request_close(&id1);
+        state.request_close(&id2);
         assert_eq!(
             state.host_connection_status("h1"),
             panda_core::ConnectionStatus::Inactive
@@ -116,7 +115,7 @@
     #[test]
     fn workspace_close_connected_terminal_triggers_confirmation() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
 
         state.request_close(&id1);
@@ -137,7 +136,7 @@
     #[test]
     fn workspace_cancel_close_preserves_tab() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
 
         state.request_close(&id1);
@@ -153,7 +152,7 @@
     #[test]
     fn workspace_close_sftp_tab_does_not_require_confirmation() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Sftp).unwrap();
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
 
         state.request_close(&id1);
@@ -164,9 +163,9 @@
     #[test]
     fn workspace_close_all_with_connected_terminals_triggers_batch_confirmation() {
         let mut state = make_state(&[("h1", "server"), ("h2", "other")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id3 = state.open_tab("h2".into(), panda_core::TabKind::Sftp);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id3 = state.open_tab("h2".into(), panda_core::TabKind::Sftp).unwrap();
 
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
 
@@ -178,15 +177,15 @@
         assert_eq!(pending.connected_terminal_count, 1);
         assert_eq!(pending.tab_ids.len(), 3);
 
-        state.confirm_batch_close();
+        state.confirm_close();
         assert!(state.tab_list().is_empty());
     }
 
     #[test]
     fn workspace_close_all_without_connected_terminals_closes_immediately() {
         let mut state = make_state(&[("h1", "server")]);
-        let _id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+        let _id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp).unwrap();
 
         state.request_close_all();
 
@@ -197,9 +196,9 @@
     #[test]
     fn workspace_close_others_with_connected_terminals_triggers_confirmation() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
         state.report_connection_status(&id2, panda_core::ConnectionStatus::Connected);
 
@@ -213,7 +212,7 @@
         assert!(pending.tab_ids.contains(&id3));
         assert!(!pending.tab_ids.contains(&id1));
 
-        state.confirm_batch_close();
+        state.confirm_close();
         assert_eq!(state.tab_list().len(), 1);
         assert_eq!(state.tab_list()[0].id, id1);
     }
@@ -221,8 +220,8 @@
     #[test]
     fn workspace_close_others_without_connected_closes_immediately() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Sftp).unwrap();
 
         state.request_close_others(&id1);
 
@@ -234,19 +233,19 @@
     #[test]
     fn workspace_select_tab_updates_active() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
-        assert_eq!(state.active_tab_id, Some(id2.clone()));
+        assert_eq!(state.active_tab_id(), Some(id2.clone()));
 
-        state.active_tab_id = Some(id1.clone());
-        assert_eq!(state.active_tab_id, Some(id1.clone()));
+        state.select_tab(&id1);
+        assert_eq!(state.active_tab_id(), Some(id1.clone()));
     }
 
     #[test]
     fn workspace_disconnected_terminal_closes_without_confirmation() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Failed);
 
@@ -258,7 +257,7 @@
     #[test]
     fn workspace_unknown_host_uses_host_id_as_title() {
         let mut state = make_state(&[]);
-        let _id1 = state.open_tab("unknown-host-id".into(), panda_core::TabKind::Terminal);
+        let _id1 = state.open_tab("unknown-host-id".into(), panda_core::TabKind::Terminal).unwrap();
         let list = state.tab_list();
         assert_eq!(list[0].title, "unknown-host-id");
     }
@@ -266,43 +265,40 @@
     #[test]
     fn workspace_close_first_tab_selects_right_neighbor() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
-        state.active_tab_id = Some(id1.clone());
+        state.select_tab(&id1);
         state.request_close(&id1);
-        assert_eq!(state.active_tab_id, Some(id2.clone()));
+        assert_eq!(state.active_tab_id(), Some(id2.clone()));
     }
 
     #[test]
     fn workspace_batch_close_confirmed_by_confirm_close() {
         let mut state = make_state(&[("h1", "server")]);
-        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let id1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _id2 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
         state.report_connection_status(&id1, panda_core::ConnectionStatus::Connected);
 
         state.request_close_all();
         assert!(state.pending_close_info().is_some());
 
-        let is_batch = matches!(&state.pending_close, Some(PendingClose::Batch { .. }));
-        assert!(is_batch);
+        let info = state.pending_close_info();
+        assert!(info.is_some());
+        assert!(info.unwrap().is_batch);
 
-        if is_batch {
-            state.confirm_batch_close();
-        } else {
-            state.confirm_close();
-        }
+        state.confirm_close();
         assert!(state.tab_list().is_empty());
     }
 
     #[test]
     fn workspace_multiple_hosts_independent_numbering() {
         let mut state = make_state(&[("h1", "alpha"), ("h2", "beta")]);
-        let _t1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
-        let _t2 = state.open_tab("h2".into(), panda_core::TabKind::Terminal);
-        let _t3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal);
+        let _t1 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
+        let _t2 = state.open_tab("h2".into(), panda_core::TabKind::Terminal).unwrap();
+        let _t3 = state.open_tab("h1".into(), panda_core::TabKind::Terminal).unwrap();
 
         let list = state.tab_list();
         assert_eq!(list[0].title, "alpha");
@@ -504,60 +500,69 @@
     fn terminal_session_close_via_tab_close() {
         let _test_guard = reset_workspace();
         let mut state = workspace_state().lock().unwrap();
-        let tab_id = state.open_tab("host-1".into(), panda_core::TabKind::Terminal);
-        state.terminal_sessions.insert(
-            tab_id.clone(),
-            panda_core::TerminalSessionState::new(tab_id.clone(), "host-1".into()),
-        );
-        assert!(state.terminal_sessions.contains_key(&tab_id));
+        let tab_id = state.open_tab("host-1".into(), panda_core::TabKind::Terminal).unwrap();
+        state.service.terminal_session_register("host-1".into(), tab_id.clone());
+        assert!(state.service.terminal_session_get(&tab_id).is_some());
 
-        state.close_tab_internal(&tab_id);
-        assert!(!state.terminal_sessions.contains_key(&tab_id));
+        state.request_close(&tab_id);
+        assert!(state.service.terminal_session_get(&tab_id).is_none());
     }
 
     // -----------------------------------------------------------------------
-    // TOFU tests
+    // 应用停机 (FFI 层)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn tofu_first_waiter_gets_probe_true() {
-        let _test_guard = reset_workspace();
-        assert!(preconnect_tofu_register_waiter("host-1".into()));
-        preconnect_tofu_resolve("host-1".into(), true);
+    fn ffi_shutdown_returns_summary_and_rejects_new_tabs() {
+        let _guard = reset_workspace();
+        let _t1 = workspace_open_tab("sh-host".into(), TabKindEnum::Terminal).unwrap();
+        let _t2 = workspace_open_tab("sh-host".into(), TabKindEnum::Sftp).unwrap();
+        assert!(workspace_is_accepting_new_work());
+
+        let summary = workspace_begin_application_shutdown();
+
+        assert_eq!(summary.closed_tab_count, 2);
+        assert!(!workspace_is_accepting_new_work());
+        assert!(workspace_tab_list().is_empty());
+        assert!(workspace_open_tab("sh-host".into(), TabKindEnum::Terminal).is_none());
     }
 
     #[test]
-    fn tofu_second_waiter_gets_probe_false() {
-        let _test_guard = reset_workspace();
-        assert!(preconnect_tofu_register_waiter("host-2".into()));
-        assert!(!preconnect_tofu_register_waiter("host-2".into()));
-        preconnect_tofu_resolve("host-2".into(), true);
+    fn ffi_shutdown_idempotent() {
+        let _guard = reset_workspace();
+        let _t1 = workspace_open_tab("sh2-host".into(), TabKindEnum::Terminal).unwrap();
+
+        let first = workspace_begin_application_shutdown();
+        let second = workspace_begin_application_shutdown();
+
+        assert_eq!(first.closed_tab_count, 1);
+        assert_eq!(second.closed_tab_count, 0);
     }
 
     #[test]
-    fn tofu_resolve_clears_probing_state() {
-        let _test_guard = reset_workspace();
-        assert!(preconnect_tofu_register_waiter("host-3".into()));
-        preconnect_tofu_resolve("host-3".into(), true);
-        assert!(preconnect_tofu_register_waiter("host-3".into()));
-        preconnect_tofu_resolve("host-3".into(), false);
+    fn ffi_shutdown_clears_pending_close() {
+        let _guard = reset_workspace();
+        let tab = workspace_open_tab("sh3-host".into(), TabKindEnum::Terminal).unwrap();
+        workspace_report_connection_status(tab.id.clone(), ConnectionStatusEnum::Connected);
+        workspace_close_all_tabs();
+        assert!(workspace_pending_close().is_some());
+
+        workspace_begin_application_shutdown();
+
+        assert!(workspace_pending_close().is_none());
+        assert!(workspace_tab_list().is_empty());
     }
 
     #[test]
-    fn tofu_different_hosts_are_independent() {
-        let _test_guard = reset_workspace();
-        assert!(preconnect_tofu_register_waiter("host-a".into()));
-        assert!(preconnect_tofu_register_waiter("host-b".into()));
-        assert!(!preconnect_tofu_register_waiter("host-a".into()));
-        assert!(!preconnect_tofu_register_waiter("host-b".into()));
-        preconnect_tofu_resolve("host-a".into(), true);
-        preconnect_tofu_resolve("host-b".into(), false);
-    }
+    fn ffi_reset_restores_accepting_new_work() {
+        let _guard = reset_workspace();
+        workspace_begin_application_shutdown();
+        assert!(!workspace_is_accepting_new_work());
 
-    #[test]
-    fn tofu_resolve_without_waiters_is_noop() {
-        let _test_guard = reset_workspace();
-        preconnect_tofu_resolve("nonexistent".into(), true);
+        workspace_reset();
+
+        assert!(workspace_is_accepting_new_work());
+        assert!(workspace_open_tab("restore-host".into(), TabKindEnum::Terminal).is_some());
     }
 
     // -----------------------------------------------------------------------
@@ -647,7 +652,7 @@
         let _guard = reset_workspace();
         let host = unique_tab_id("ffi-h");
 
-        let tab = workspace_open_tab(host.clone(), TabKindEnum::Terminal);
+        let tab = workspace_open_tab(host.clone(), TabKindEnum::Terminal).unwrap();
         assert_eq!(tab.host_id, host);
         assert!(matches!(tab.kind, TabKindEnum::Terminal));
         assert!(matches!(
@@ -656,7 +661,7 @@
         ));
         assert_eq!(workspace_active_tab_id(), Some(tab.id.clone()));
 
-        workspace_open_tab(host.clone(), TabKindEnum::Sftp);
+        workspace_open_tab(host.clone(), TabKindEnum::Sftp).unwrap();
         assert_eq!(workspace_tab_list().len(), 2);
 
         workspace_set_host_names(vec![HostNameMapping {
@@ -674,7 +679,7 @@
     #[test]
     fn workspace_ffi_connected_terminal_close_requires_confirmation() {
         let _guard = reset_workspace();
-        let tab = workspace_open_tab("ffi-confirm-host".into(), TabKindEnum::Terminal);
+        let tab = workspace_open_tab("ffi-confirm-host".into(), TabKindEnum::Terminal).unwrap();
         workspace_report_connection_status(tab.id.clone(), ConnectionStatusEnum::Connected);
         assert!(matches!(
             workspace_host_connection_status("ffi-confirm-host".into()),
@@ -704,8 +709,8 @@
     #[test]
     fn workspace_ffi_confirm_close_handles_batch_and_single_paths() {
         let _guard = reset_workspace();
-        let t1 = workspace_open_tab("ffi-batch-host".into(), TabKindEnum::Terminal);
-        let t2 = workspace_open_tab("ffi-batch-host".into(), TabKindEnum::Terminal);
+        let t1 = workspace_open_tab("ffi-batch-host".into(), TabKindEnum::Terminal).unwrap();
+        let t2 = workspace_open_tab("ffi-batch-host".into(), TabKindEnum::Terminal).unwrap();
         workspace_report_connection_status(t1.id.clone(), ConnectionStatusEnum::Connected);
 
         // 关闭其他：批量确认分支
@@ -726,8 +731,8 @@
     #[test]
     fn workspace_ffi_close_all_with_connected_terminal_waits_for_confirmation() {
         let _guard = reset_workspace();
-        let t1 = workspace_open_tab("ffi-all-host".into(), TabKindEnum::Terminal);
-        let _t2 = workspace_open_tab("ffi-all-host".into(), TabKindEnum::Sftp);
+        let t1 = workspace_open_tab("ffi-all-host".into(), TabKindEnum::Terminal).unwrap();
+        let _t2 = workspace_open_tab("ffi-all-host".into(), TabKindEnum::Sftp).unwrap();
         workspace_report_connection_status(t1.id.clone(), ConnectionStatusEnum::Connected);
 
         workspace_close_all_tabs();

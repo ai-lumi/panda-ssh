@@ -1,186 +1,370 @@
-    use super::*;
-    use crate::test_support::global_test_lock;
+use super::*;
+use crate::test_support::global_test_lock;
+use crate::ffi_transfers::reset_transfer_service_for_test;
+use std::time::Duration;
 
-    fn task(status: BatchTransferStatusEnum) -> BatchTransferTask {
-        BatchTransferTask {
-            id: Uuid::new_v4(),
-            direction: BatchTransferDirectionEnum::Upload,
-            host_id: "host".into(),
-            dest_dir: "/dest".into(),
-            sources: vec!["source".into()],
-            password: None,
-            passphrase: None,
-            total_size: Arc::new(AtomicU64::new(7)),
-            transferred: Arc::new(AtomicU64::new(3)),
-            status: Arc::new(Mutex::new(status)),
-            error: Arc::new(Mutex::new(None)),
-            cancel: Arc::new(AtomicBool::new(false)),
-            pending_conflict: Arc::new(Mutex::new(None)),
-            conflict_tx: Arc::new(Mutex::new(None)),
+fn reset() {
+    reset_transfer_service_for_test();
+    reset_batch_service_for_test();
+}
+
+fn wait_for_batch_status(id: &str, expected: BatchTransferStatusEnum) -> BatchTransferStatusRecord {
+    for _ in 0..300 {
+        if let Ok(snap) = batch_transfer_status(id.to_string()) {
+            if snap.status == expected {
+                return snap;
+            }
         }
+        std::thread::sleep(Duration::from_millis(10));
     }
+    panic!("batch task {id} did not reach {expected:?} in time");
+}
 
-    #[test]
-    fn snapshot_and_conflict_resolution_reject_invalid_states() {
-        let _guard = global_test_lock();
-        let queued = task(BatchTransferStatusEnum::Queued);
-        let snapshot = queued.snapshot();
-        assert_eq!(snapshot.total_size, 7);
-        assert_eq!(snapshot.transferred, 3);
-        assert_eq!(snapshot.status, BatchTransferStatusEnum::Queued);
-        let id = queued.id.to_string();
-        batch_transfer_tasks()
-            .lock()
-            .unwrap()
-            .insert(queued.id, queued);
-        assert!(matches!(
-            batch_transfer_resolve_conflict(id.clone(), true),
-            Err(PandaError::Core(_))
-        ));
-        assert!(matches!(
-            batch_transfer_status("invalid".into()),
-            Err(PandaError::Core(_))
-        ));
-        batch_transfer_tasks()
-            .lock()
-            .unwrap()
-            .remove(&Uuid::parse_str(&id).unwrap());
+// ---------------------------------------------------------------------------
+// 类型转换
+// ---------------------------------------------------------------------------
+
+#[test]
+fn direction_conversion_round_trip() {
+    assert_eq!(
+        from_core_direction(to_core_direction(BatchTransferDirectionEnum::Upload)),
+        BatchTransferDirectionEnum::Upload
+    );
+    assert_eq!(
+        from_core_direction(to_core_direction(BatchTransferDirectionEnum::Download)),
+        BatchTransferDirectionEnum::Download
+    );
+}
+
+#[test]
+fn status_conversion_covers_all_variants() {
+    let cases = [
+        (BatchStatus::Queued, BatchTransferStatusEnum::Queued),
+        (BatchStatus::Running, BatchTransferStatusEnum::Running),
+        (BatchStatus::WaitingForConflict, BatchTransferStatusEnum::WaitingForConflict),
+        (BatchStatus::Completed, BatchTransferStatusEnum::Completed),
+        (BatchStatus::Failed, BatchTransferStatusEnum::Failed),
+        (BatchStatus::Cancelled, BatchTransferStatusEnum::Cancelled),
+    ];
+    for (core, ffi) in cases {
+        assert_eq!(from_core_status(core), ffi);
     }
+}
 
-    #[test]
-    fn conflict_resolution_requires_a_live_decision_channel() {
-        let _guard = global_test_lock();
-        let waiting = task(BatchTransferStatusEnum::WaitingForConflict);
-        let id = waiting.id;
-        batch_transfer_tasks().lock().unwrap().insert(id, waiting);
-        assert!(matches!(
-            batch_transfer_resolve_conflict(id.to_string(), false),
-            Err(PandaError::Core(_))
-        ));
-        batch_transfer_tasks().lock().unwrap().remove(&id);
+#[test]
+fn snapshot_to_record_converts_all_fields() {
+    let snap = BatchTaskSnapshot {
+        id: "t1".into(),
+        direction: BatchDirection::Upload,
+        host_id: "h1".into(),
+        dest_dir: "/dest".into(),
+        sources: vec!["/a".into(), "/b".into()],
+        total_size: 100,
+        transferred: 50,
+        status: BatchStatus::Running,
+        error: Some("err".into()),
+        pending_conflict: Some(BatchConflictInfo {
+            item_source: "src".into(),
+            item_destination: "dst".into(),
+            source_size: 10,
+            source_mtime: Some(20),
+            target_size: 30,
+            target_mtime: Some(40),
+        }),
+    };
+    let rec = snapshot_to_record(snap);
+    assert_eq!(rec.id, "t1");
+    assert_eq!(rec.direction, BatchTransferDirectionEnum::Upload);
+    assert_eq!(rec.host_id, "h1");
+    assert_eq!(rec.dest_dir, "/dest");
+    assert_eq!(rec.sources, vec!["/a", "/b"]);
+    assert_eq!(rec.total_size, 100);
+    assert_eq!(rec.transferred, 50);
+    assert_eq!(rec.status, BatchTransferStatusEnum::Running);
+    assert_eq!(rec.error, Some("err".into()));
+    let conflict = rec.pending_conflict.unwrap();
+    assert_eq!(conflict.item_source, "src");
+    assert_eq!(conflict.item_destination, "dst");
+    assert_eq!(conflict.source_size, 10);
+    assert_eq!(conflict.source_mtime, Some(20));
+    assert_eq!(conflict.target_size, 30);
+    assert_eq!(conflict.target_mtime, Some(40));
+}
+
+#[test]
+fn snapshot_to_record_without_conflict() {
+    let snap = BatchTaskSnapshot {
+        id: "t2".into(),
+        direction: BatchDirection::Download,
+        host_id: "h2".into(),
+        dest_dir: "/dl".into(),
+        sources: vec![],
+        total_size: 0,
+        transferred: 0,
+        status: BatchStatus::Queued,
+        error: None,
+        pending_conflict: None,
+    };
+    let rec = snapshot_to_record(snap);
+    assert_eq!(rec.status, BatchTransferStatusEnum::Queued);
+    assert!(rec.pending_conflict.is_none());
+    assert!(rec.error.is_none());
+}
+
+#[test]
+fn from_core_conflict_maps_all_fields() {
+    let info = BatchConflictInfo {
+        item_source: "s".into(),
+        item_destination: "d".into(),
+        source_size: 1,
+        source_mtime: None,
+        target_size: 2,
+        target_mtime: None,
+    };
+    let rec = from_core_conflict(info);
+    assert_eq!(rec.item_source, "s");
+    assert_eq!(rec.item_destination, "d");
+    assert_eq!(rec.source_size, 1);
+    assert_eq!(rec.source_mtime, None);
+    assert_eq!(rec.target_size, 2);
+    assert_eq!(rec.target_mtime, None);
+}
+
+// ---------------------------------------------------------------------------
+// 错误映射
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unknown_task_returns_structured_error() {
+    let _g = global_test_lock();
+    reset();
+    let id = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        batch_transfer_status(id.clone()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(matches!(
+        batch_transfer_cancel(id.clone()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(matches!(
+        batch_transfer_resolve_conflict(id, true),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+}
+
+#[test]
+fn invalid_task_id_returns_error() {
+    let _g = global_test_lock();
+    reset();
+    assert!(batch_transfer_status("not-a-uuid".into()).is_err());
+    assert!(batch_transfer_cancel("not-a-uuid".into()).is_err());
+    assert!(batch_transfer_resolve_conflict("not-a-uuid".into(), true).is_err());
+}
+
+#[test]
+fn start_upload_unknown_host_returns_error() {
+    let _g = global_test_lock();
+    reset();
+    let err = start_batch_upload(
+        "nonexistent-host".into(),
+        vec!["/tmp/f".into()],
+        "/remote".into(),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, PandaError::UnknownHost(_)));
+}
+
+#[test]
+fn start_download_unknown_host_returns_error() {
+    let _g = global_test_lock();
+    reset();
+    let err = start_batch_download(
+        "nonexistent-host".into(),
+        vec!["/remote/f".into()],
+        "/tmp".into(),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, PandaError::UnknownHost(_)));
+}
+
+// ---------------------------------------------------------------------------
+// 正常流程（通过真实 FfiBatchExecutor + 拒绝连接主机）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn start_batch_upload_reaches_failed_for_refused_host() {
+    let _g = global_test_lock();
+    reset();
+    let id = start_batch_upload(
+        "refused-host".into(),
+        vec!["/tmp/test".into()],
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    let snap = wait_for_batch_status(&id, BatchTransferStatusEnum::Failed);
+    assert_eq!(snap.direction, BatchTransferDirectionEnum::Upload);
+    assert_eq!(snap.host_id, "refused-host");
+    assert!(snap.error.is_some(), "连接拒绝应设置错误信息");
+}
+
+#[test]
+fn start_batch_download_reaches_failed_for_refused_host() {
+    let _g = global_test_lock();
+    reset();
+    let id = start_batch_download(
+        "refused-host".into(),
+        vec!["/remote/test".into()],
+        "/tmp".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    let snap = wait_for_batch_status(&id, BatchTransferStatusEnum::Failed);
+    assert_eq!(snap.direction, BatchTransferDirectionEnum::Download);
+    assert!(snap.error.is_some());
+}
+
+#[test]
+fn batch_transfer_list_returns_all_tasks() {
+    let _g = global_test_lock();
+    reset();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id = start_batch_upload(
+            "refused-host".into(),
+            vec![format!("/tmp/f{i}")],
+            format!("/remote/d{i}"),
+            Some("pw".into()),
+            None,
+        )
+        .unwrap();
+        ids.push(id);
     }
-
-    #[test]
-    fn cancel_marks_queued_task_and_wakes_waiting_task() {
-        let _guard = global_test_lock();
-
-        let queued = task(BatchTransferStatusEnum::Queued);
-        let queued_id = queued.id;
-        batch_transfer_tasks()
-            .lock()
-            .unwrap()
-            .insert(queued_id, queued);
-        batch_transfer_cancel(queued_id.to_string()).unwrap();
-        let queued = batch_transfer_status(queued_id.to_string()).unwrap();
-        assert_eq!(queued.status, BatchTransferStatusEnum::Cancelled);
-        batch_transfer_tasks().lock().unwrap().remove(&queued_id);
-
-        let waiting = task(BatchTransferStatusEnum::WaitingForConflict);
-        let waiting_id = waiting.id;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        *waiting.conflict_tx.lock().unwrap() = Some(tx);
-        batch_transfer_tasks()
-            .lock()
-            .unwrap()
-            .insert(waiting_id, waiting);
-        batch_transfer_cancel(waiting_id.to_string()).unwrap();
-        assert_eq!(rx.blocking_recv().unwrap(), ConflictResolution::Skip);
-        let waiting = batch_transfer_status(waiting_id.to_string()).unwrap();
-        assert_eq!(waiting.status, BatchTransferStatusEnum::WaitingForConflict);
-        batch_transfer_tasks().lock().unwrap().remove(&waiting_id);
+    ids.sort();
+    let list = batch_transfer_list().unwrap();
+    assert!(list.len() >= 3);
+    let mut list_ids: Vec<String> = list.iter().map(|r| r.id.clone()).collect();
+    list_ids.sort();
+    for id in &ids {
+        assert!(list_ids.contains(id), "列表应包含任务 {id}");
     }
-
-    #[test]
-    fn conflict_resolution_sends_selected_decision_and_clears_snapshot() {
-        let _guard = global_test_lock();
-
-        for (overwrite, expected) in [
-            (true, ConflictResolution::Overwrite),
-            (false, ConflictResolution::Skip),
-        ] {
-            let waiting = task(BatchTransferStatusEnum::WaitingForConflict);
-            let id = waiting.id;
-            *waiting.pending_conflict.lock().unwrap() = Some(BatchConflictRecord {
-                item_source: "source".into(),
-                item_destination: "destination".into(),
-                source_size: 1,
-                source_mtime: Some(2),
-                target_size: 3,
-                target_mtime: Some(4),
-            });
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            *waiting.conflict_tx.lock().unwrap() = Some(tx);
-            batch_transfer_tasks().lock().unwrap().insert(id, waiting);
-
-            batch_transfer_resolve_conflict(id.to_string(), overwrite).unwrap();
-            assert_eq!(rx.blocking_recv().unwrap(), expected);
-            let status = batch_transfer_status(id.to_string()).unwrap();
-            assert_eq!(status.status, BatchTransferStatusEnum::Running);
-            assert!(status.pending_conflict.is_none());
-            batch_transfer_tasks().lock().unwrap().remove(&id);
-        }
+    for id in &ids {
+        wait_for_batch_status(id, BatchTransferStatusEnum::Failed);
     }
+}
 
-    #[test]
-    fn conflict_resolution_reports_closed_channel_after_updating_snapshot() {
-        let _guard = global_test_lock();
-        let waiting = task(BatchTransferStatusEnum::WaitingForConflict);
-        let id = waiting.id;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        drop(rx);
-        *waiting.conflict_tx.lock().unwrap() = Some(tx);
-        batch_transfer_tasks().lock().unwrap().insert(id, waiting);
+#[test]
+fn batch_list_empty_after_reset() {
+    let _g = global_test_lock();
+    reset();
+    let list = batch_transfer_list().unwrap();
+    assert!(list.is_empty());
+}
 
-        assert!(matches!(
-            batch_transfer_resolve_conflict(id.to_string(), true),
-            Err(PandaError::Core(_))
-        ));
-        assert_eq!(
-            batch_transfer_status(id.to_string()).unwrap().status,
-            BatchTransferStatusEnum::Running
-        );
-        batch_transfer_tasks().lock().unwrap().remove(&id);
-    }
+// ---------------------------------------------------------------------------
+// scan_local_batch
+// ---------------------------------------------------------------------------
 
-    #[test]
-    fn list_orders_task_snapshots_and_cancel_rejects_unknown_task() {
-        let _guard = global_test_lock();
-        let mut later = task(BatchTransferStatusEnum::Running);
-        later.id = Uuid::from_u128(2);
-        let mut earlier = task(BatchTransferStatusEnum::Completed);
-        earlier.id = Uuid::from_u128(1);
-        batch_transfer_tasks()
-            .lock()
-            .unwrap()
-            .insert(later.id, later);
-        batch_transfer_tasks()
-            .lock()
-            .unwrap()
-            .insert(earlier.id, earlier);
+#[test]
+fn scan_local_batch_with_files() {
+    let _g = global_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let f1 = dir.path().join("a.txt");
+    let f2 = dir.path().join("b.txt");
+    std::fs::write(&f1, b"hello").unwrap();
+    std::fs::write(&f2, b"world!").unwrap();
+    let items = scan_local_batch(
+        vec![f1.to_string_lossy().into(), f2.to_string_lossy().into()],
+        "/remote/dest".into(),
+    )
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    let sizes: Vec<u64> = items.iter().map(|i| i.size).collect();
+    assert!(sizes.contains(&5), "应包含 5 字节文件: sizes={sizes:?}");
+    assert!(sizes.contains(&6), "应包含 6 字节文件: sizes={sizes:?}");
+    assert!(!items[0].is_dir);
+    assert!(!items[1].is_dir);
+}
 
-        let records = batch_transfer_list().unwrap();
-        let relevant: Vec<_> = records
-            .into_iter()
-            .filter(|record| {
-                record.id == Uuid::from_u128(1).to_string()
-                    || record.id == Uuid::from_u128(2).to_string()
-            })
-            .collect();
-        assert_eq!(
-            relevant
-                .iter()
-                .map(|record| record.id.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                Uuid::from_u128(1).to_string(),
-                Uuid::from_u128(2).to_string()
-            ]
-        );
-        assert!(matches!(
-            batch_transfer_cancel(Uuid::new_v4().to_string()),
-            Err(PandaError::UnknownTransferTask(_))
-        ));
-        let mut tasks = batch_transfer_tasks().lock().unwrap();
-        tasks.remove(&Uuid::from_u128(1));
-        tasks.remove(&Uuid::from_u128(2));
-    }
+#[test]
+fn scan_local_batch_with_directory() {
+    let _g = global_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("inner.txt"), b"data").unwrap();
+    let items = scan_local_batch(
+        vec![dir.path().to_string_lossy().into()],
+        "/remote".into(),
+    )
+    .unwrap();
+    assert!(items.len() >= 2, "应包含目录和文件");
+    let dir_item = items.iter().find(|i| i.is_dir).unwrap();
+    assert!(dir_item.source.contains(dir.path().file_name().unwrap().to_str().unwrap()));
+    let file_item = items.iter().find(|i| !i.is_dir).unwrap();
+    assert_eq!(file_item.size, 4);
+}
+
+#[test]
+fn scan_local_batch_nonexistent_source_returns_error() {
+    let _g = global_test_lock();
+    let result = scan_local_batch(
+        vec!["/nonexistent/path/xyz".into()],
+        "/remote".into(),
+    );
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// 变更计数器
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_change_counter_increments_via_on_change_callback() {
+    let _g = global_test_lock();
+    reset();
+    let before = crate::ffi_transfers::transfer_change_counter();
+    let id = start_batch_upload(
+        "refused-host".into(),
+        vec!["/tmp/test".into()],
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    wait_for_batch_status(&id, BatchTransferStatusEnum::Failed);
+    let after = crate::ffi_transfers::transfer_change_counter();
+    assert!(
+        after > before,
+        "批量任务状态转换应通过 on_change 回调递增 FFI 计数器: before={before}, after={after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 取消
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_failed_task_via_ffi() {
+    let _g = global_test_lock();
+    reset();
+    let id = start_batch_upload(
+        "refused-host".into(),
+        vec!["/tmp/test".into()],
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    wait_for_batch_status(&id, BatchTransferStatusEnum::Failed);
+    batch_transfer_cancel(id.clone()).unwrap();
+    let snap = batch_transfer_status(id).unwrap();
+    assert_eq!(snap.status, BatchTransferStatusEnum::Failed);
+}

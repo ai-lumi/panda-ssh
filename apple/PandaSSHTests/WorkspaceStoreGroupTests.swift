@@ -33,7 +33,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         XCTAssertEqual(store.groups.first?.id, groupID)
         XCTAssertEqual(store.groups.first?.name, "分组 1")
         XCTAssertEqual(store.groups.first?.tabIDs, [tabID])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testCreateGroupWithCustomName() {
@@ -43,7 +43,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         let groupID = store.createGroup(forTabID: tabID, name: "开发环境")
 
         XCTAssertEqual(store.groups.first?.name, "开发环境")
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testDeleteEmptyGroup() {
@@ -57,7 +57,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         store.deleteGroup(id: groupID)
 
         XCTAssertTrue(store.groups.isEmpty)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testDeleteNonEmptyGroupMovesTabsToUngrouped() {
@@ -75,7 +75,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         XCTAssertEqual(store.ungroupedTabIDs.count, 2)
         XCTAssertTrue(store.ungroupedTabIDs.contains(tab1))
         XCTAssertTrue(store.ungroupedTabIDs.contains(tab2))
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testRenameGroup() {
@@ -86,7 +86,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         store.renameGroup(id: groupID, to: "新名称")
 
         XCTAssertEqual(store.groups.first?.name, "新名称")
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testMoveTabToExistingGroup() {
@@ -98,7 +98,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         store.moveTab(tab2, toGroup: groupID)
 
         XCTAssertEqual(store.groups.first?.tabIDs, [tab1, tab2])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testRemoveTabFromGroup() {
@@ -110,7 +110,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
 
         XCTAssertTrue(store.groups.first?.isEmpty ?? false)
         XCTAssertEqual(store.ungroupedTabIDs, [tabID])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     // MARK: - 意外操作
@@ -122,7 +122,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         store.deleteGroup(id: UUID())
 
         XCTAssertTrue(store.groups.isEmpty)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testRenameNonExistentGroupIsNoOp() {
@@ -132,7 +132,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         store.renameGroup(id: UUID(), to: "新名称")
 
         XCTAssertTrue(store.groups.isEmpty)
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testMoveTabToNonExistentGroupIsNoOp() {
@@ -143,7 +143,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
 
         XCTAssertTrue(store.groups.isEmpty)
         XCTAssertTrue(store.ungroupedTabIDs.contains(tabID))
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testRemoveUngroupedTabFromGroupIsNoOp() {
@@ -155,7 +155,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
 
         XCTAssertTrue(store.groups.isEmpty)
         XCTAssertTrue(store.ungroupedTabIDs.contains(tabID))
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     // MARK: - 边界条件
@@ -171,7 +171,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         _ = store.createGroup(forTabID: tab3)
 
         XCTAssertEqual(store.groups.map(\.name), ["分组 1", "分组 2", "分组 3"])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     func testEmptyGroupAutoCleanupOnTabClose() {
@@ -198,7 +198,7 @@ final class WorkspaceStoreGroupTests: XCTestCase {
         let displayed = store.displayedTabs
         // tab1 未分组，应在最后；tab2, tab3 在分组中
         XCTAssertEqual(displayed.map(\.id), [tab2, tab3, tab1])
-        store.closeAll()
+        store.requestCloseAll()
     }
 
     // MARK: - Helpers

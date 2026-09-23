@@ -1,0 +1,107 @@
+# FFI 例外登记表
+#
+# 每笔记录描述一个 FFI 模块持有的超出纯转换/转发的状态或职责。
+# 字段：路径/符号、技术限制、最小状态与作用域、释放方式、替代方案、
+#       正常/失败/边界测试、复审触发条件。
+#
+# 允许的 FFI 职责类别（见 design.md §7）：
+#   A. DTO/错误/路径表示转换
+#   B. 同步/异步适配
+#   C. 默认核心实例装配
+#   D. 不透明资源句柄
+#   E. 请求/快照投递
+#
+# 本表不是预先批准清单；每笔必须可解释为何不能迁入核心。
+
+---
+路径: crates/panda-ffi/src/ffi_runtime.rs
+符号: RUNTIME (OnceLock<tokio::Runtime>)
+职责类别: B（同步/异步适配）
+技术限制: UniFFI 导出为同步函数，需要共享 runtime 桥接异步核心
+最小状态与作用域: 单个懒初始化 tokio Runtime，进程级单例
+释放方式: 进程退出时自动释放
+替代方案: 每个 FFI 调用创建/销毁 runtime（性能不可接受）
+测试:
+  正常: runtime() 返回可用 Handle
+  失败: N/A（OnceLock 不会失败）
+  边界: 多线程并发首次调用只初始化一次
+复审触发: UniFFI 契约改为原生异步；或核心引入自有 runtime
+---
+路径: crates/panda-ffi/src/ffi_store.rs
+符号: STORES (Mutex<Option<Arc<Stores>>>)
+职责类别: C（默认核心实例装配）
+技术限制: 全局导出函数需要访问核心上下文；init_store 首次调用生效、之后 no-op
+最小状态与作用域: 单个 PandaCore 实例引用，init_store 参数决定配置根
+释放方式: init_store 可替换旧引用；旧任务结束后释放原上下文
+替代方案: 每个 FFI 调用传入核心句柄（破坏既有 Swift 契约）
+测试:
+  正常: init_store → stores() 返回有效引用 (config_export_then_import_roundtrip_restores_hosts)
+  失败: 未初始化时 stores() 返回错误 (snippet_helpers_report_not_initialized_then_support_empty_store)
+  边界: 重复 init_store 保持幂等；损坏配置文件返回结构化错误
+复审触发: Swift 改为句柄传递模式；或多窗口需要多个独立上下文
+---
+路径: crates/panda-ffi/src/ffi_sessions.rs
+符号: 通过 stores() 间接持有句柄映射
+职责类别: D（不透明资源句柄）
+技术限制: SFTP/Shell 会话需要整数句柄跨 FFI 传递
+最小状态与作用域: 句柄 → SshSession/SftpClient 映射由核心 PandaCore 持有
+释放方式: close_sftp_session / shell 关闭时精确释放
+替代方案: 返回指针或不透明对象（UniFFI 不支持）
+测试:
+  正常: 完整 shell/SFTP 生命周期 (ffi_shell_session_lifecycle)
+  失败: 未知句柄操作返回错误 (every_session_handle_operation_rejects_an_unknown_handle_without_network_io)
+  边界: 同主机多 SFTP 句柄隔离、close 幂等 (ffi_same_host_sftp_handles_are_isolated_and_close_is_idempotent)
+复审触发: 核心改为句柄自管理且 FFI 不再持有索引
+---
+路径: crates/panda-ffi/src/ffi_transfers.rs
+符号: TRANSFER_SERVICE (Mutex<Option<TransferService>>), TRANSFER_CHANGE_COUNTER (AtomicU64)
+职责类别: C（默认核心实例装配）+ E（变更通知投递）
+技术限制: 传输服务需要全局可访问以支持 UI 增量轮询
+最小状态与作用域: TransferService 由核心实现；FFI 仅持有懒初始化引用和变更计数器
+释放方式: 进程退出释放；reset_transfer_service_for_test 用于测试隔离
+替代方案: 每次调用构造新服务（丢失任务状态）
+测试:
+  正常: 传输重试重置状态 (retry_resets_state_and_runs_again)
+  失败: 未知任务返回结构化错误 (unknown_task_returns_structured_error)
+  边界: 暂停中取消立即返回 (cancel_before_execution_sets_cancelled)
+复审触发: 核心引入事件推送替代轮询计数器
+---
+路径: crates/panda-ffi/src/ffi_delete.rs
+符号: DELETE_SERVICE (Mutex<Option<DeleteService>>), DELETE_CHANGE_COUNTER (AtomicU64)
+职责类别: C（默认核心实例装配）+ E（变更通知投递）
+技术限制: 删除服务需要全局可访问以支持 UI 增量轮询
+最小状态与作用域: DeleteService 由核心实现；FFI 仅持有懒初始化引用和变更计数器
+释放方式: 进程退出释放；reset_delete_service_for_test 用于测试隔离
+替代方案: 每次调用构造新服务（丢失任务状态）
+测试:
+  正常: 本地删除单文件完成 (local_delete_single_file_completes)
+  失败: 取消未知任务返回错误 (delete_task_cancel_unknown_returns_error)
+  边界: 空目标列表返回错误 (local_delete_empty_targets_returns_error)
+复审触发: 核心引入事件推送替代轮询计数器
+---
+路径: crates/panda-ffi/src/ffi_workspace.rs
+符号: WORKSPACE_STATE (OnceLock<Mutex<WorkspaceState>>), TOFU_WAITER_CHANNELS
+职责类别: C（默认核心实例装配）+ E（TOFU 请求投递）
+技术限制: 工作区标签/终端状态需要全局可访问；TOFU 等待需要跨调用关联
+最小状态与作用域: WorkspaceState 由核心 WorkspaceService 实现；TOFU 通道按地址+端口键入
+释放方式: 进程退出释放；TOFU 通道在信任决策或连接关闭后清理
+替代方案: 工作区状态由 Swift 持有（违反业务归属在核心的原则）
+测试:
+  正常: 标签页创建/选择/标题 (workspace_ffi_open_tab_titles_and_selection)
+  失败: 已连接终端关闭需确认 (workspace_ffi_connected_terminal_close_requires_confirmation)
+  边界: 未知标签重试返回 None (terminal_session_retry_unknown_tab_returns_none)
+复审触发: 多窗口需求要求多个独立工作区上下文
+---
+路径: crates/panda-ffi/src/batch_transfer.rs
+符号: BATCH_SERVICE (Mutex<Option<BatchTransferService>>)
+职责类别: C（默认核心实例装配）
+技术限制: 批量传输服务需要全局可访问以支持 UI 增量轮询
+最小状态与作用域: BatchTransferService 由核心实现；FFI 仅持有懒初始化引用
+释放方式: 进程退出释放；reset_batch_service_for_test 用于测试隔离
+替代方案: 每次调用构造新服务（丢失任务状态）
+测试:
+  正常: 批量列表返回所有任务 (batch_transfer_list_returns_all_tasks)
+  失败: 未知主机上传返回错误 (start_upload_unknown_host_returns_error)
+  边界: 终态任务取消为 no-op (cancel_failed_task_via_ffi)
+复审触发: 核心引入事件推送替代轮询计数器
+---

@@ -101,6 +101,7 @@ required_ffi_files=(
   ffi_telemetry.rs
   ffi_transfers.rs
   ffi_workspace.rs
+  ffi_delete.rs
   batch_transfer.rs
   task_aggregation.rs
 )

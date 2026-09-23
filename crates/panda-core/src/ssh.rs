@@ -1211,4 +1211,210 @@ mod tests {
         assert_eq!(record.category, FailureCategory::Other);
         assert!(record.title.contains("未知主机密钥"));
     }
+
+    // --- 6.3 统一信任策略测试 ---
+
+    /// 真实 ed25519 公钥 A（仅测试用）。
+    const REAL_KEY_A: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHMsmgYcK4Wqni1Hwt2jN6jEhByRB3hzuv6h3k9+s/wX";
+    /// 真实 ed25519 公钥 B，与 A 同类型但不同密钥材料。
+    const REAL_KEY_B: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJOj4XxVlCZU+pUMLCrGNkB+46xrOD1ZQZ4kGKd/gAEx";
+
+    fn parse_test_key(openssh: &str) -> russh::keys::ssh_key::PublicKey {
+        use std::str::FromStr;
+        russh::keys::ssh_key::PublicKey::from_str(openssh).expect("测试密钥解析必须成功")
+    }
+
+    fn make_handler(
+        host: &str,
+        port: u16,
+        known_hosts_path: PathBuf,
+        policy: UnknownHostKeyPolicy,
+    ) -> (ClientHandler, Arc<Mutex<KeyCheckFailure>>) {
+        let failure = Arc::new(Mutex::new(KeyCheckFailure::default()));
+        let telemetry_id =
+            global_registry().register_connection("fixture".into(), format!("{host}:{port}"));
+        let handler = ClientHandler {
+            host: host.into(),
+            port,
+            known_hosts_path,
+            policy,
+            failure: failure.clone(),
+            telemetry_id,
+        };
+        (handler, failure)
+    }
+
+    /// 正常：已信任主机无论策略均通过。
+    #[tokio::test]
+    async fn trusted_host_key_accepted_regardless_of_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let kh = KnownHosts::new(kh_path.clone());
+        kh.store("example.com", 22, REAL_KEY_A).unwrap();
+
+        let pk = parse_test_key(REAL_KEY_A);
+
+        for policy in [UnknownHostKeyPolicy::Reject, UnknownHostKeyPolicy::AcceptAndStore] {
+            let (mut handler, failure) =
+                make_handler("example.com", 22, kh_path.clone(), policy);
+            let result = client::Handler::check_server_key(&mut handler, &pk).await;
+            assert!(result.unwrap(), "policy={policy:?}");
+            let guard = failure.lock().unwrap();
+            assert!(guard.unknown.is_none());
+            assert!(guard.mismatch.is_none());
+        }
+        global_registry().unregister_connection(0);
+        global_registry().unregister_connection(1);
+    }
+
+    /// 正常：AcceptAndStore 策略对未知主机自动存储并连接。
+    #[tokio::test]
+    async fn accept_and_store_unknown_host_stores_key_and_connects() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let pk = parse_test_key(REAL_KEY_A);
+
+        let (mut handler, _failure) =
+            make_handler("new-host.test", 22, kh_path.clone(), UnknownHostKeyPolicy::AcceptAndStore);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(result.unwrap());
+
+        let kh = KnownHosts::new(kh_path);
+        assert_eq!(
+            kh.check("new-host.test", 22, REAL_KEY_A).unwrap(),
+            HostKeyStatus::Match
+        );
+        global_registry().unregister_connection(0);
+    }
+
+    /// 意外：Reject 策略对未知主机不认证不存储。
+    #[tokio::test]
+    async fn reject_unknown_host_does_not_authenticate_or_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let pk = parse_test_key(REAL_KEY_A);
+
+        let (mut handler, failure) =
+            make_handler("unknown.test", 22, kh_path.clone(), UnknownHostKeyPolicy::Reject);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(!result.unwrap(), "Reject 策略必须拒绝未知主机");
+
+        let guard = failure.lock().unwrap();
+        assert!(guard.unknown.is_some(), "必须记录未知密钥信息");
+        let (ref key_str, ref fp) = guard.unknown.as_ref().unwrap();
+        assert!(key_str.starts_with("ssh-ed25519 "));
+        assert!(fp.starts_with("SHA256:"));
+        drop(guard);
+
+        let kh = KnownHosts::new(kh_path);
+        assert_eq!(
+            kh.check("unknown.test", 22, REAL_KEY_A).unwrap(),
+            HostKeyStatus::Unknown,
+            "Reject 策略不得将密钥写入 known_hosts"
+        );
+        assert!(!kh.path().exists(), "known_hosts 文件不应被创建");
+        global_registry().unregister_connection(0);
+    }
+
+    /// 意外：传输/扫描入口使用 Reject 策略时，未知主机不认证不保存。
+    /// 此测试验证 6.4 统一后的预期行为：所有入口均遵守策略参数。
+    #[tokio::test]
+    async fn transfer_entry_with_reject_policy_must_not_store_unknown_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let pk = parse_test_key(REAL_KEY_A);
+
+        // 模拟传输入口使用 Reject 策略（6.4 统一后的行为）
+        let (mut handler, failure) =
+            make_handler("transfer-host.test", 22, kh_path.clone(), UnknownHostKeyPolicy::Reject);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(!result.unwrap());
+
+        let guard = failure.lock().unwrap();
+        assert!(guard.unknown.is_some());
+        drop(guard);
+
+        // 确认密钥未被存储
+        assert!(!kh_path.exists());
+        global_registry().unregister_connection(0);
+    }
+
+    /// 边界：预确认后呈现不同密钥触发 Mismatch。
+    #[tokio::test]
+    async fn mismatch_after_preconfirmation_with_different_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let kh = KnownHosts::new(kh_path.clone());
+        // 预确认：存储 KEY_A
+        kh.accept("example.com", 22, REAL_KEY_A).unwrap();
+
+        // 呈现不同的 KEY_B
+        let pk_b = parse_test_key(REAL_KEY_B);
+        let (mut handler, failure) =
+            make_handler("example.com", 22, kh_path.clone(), UnknownHostKeyPolicy::Reject);
+        let result = client::Handler::check_server_key(&mut handler, &pk_b).await;
+        assert!(!result.unwrap(), "密钥变更必须拒绝连接");
+
+        let guard = failure.lock().unwrap();
+        assert!(guard.mismatch.is_some(), "必须记录密钥变更");
+        let (ref stored_fp, ref presented_fp) = guard.mismatch.as_ref().unwrap();
+        assert!(stored_fp.starts_with("SHA256:"));
+        assert!(presented_fp.starts_with("SHA256:"));
+        assert_ne!(stored_fp, presented_fp, "两个指纹必须不同");
+        global_registry().unregister_connection(0);
+    }
+
+    /// 边界：AcceptAndStore 存储后，再次连接同一密钥直接匹配。
+    #[tokio::test]
+    async fn accept_and_store_then_reconnect_same_key_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let pk = parse_test_key(REAL_KEY_A);
+
+        // 首次连接：AcceptAndStore
+        let (mut handler, _) =
+            make_handler("reconnect.test", 22, kh_path.clone(), UnknownHostKeyPolicy::AcceptAndStore);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(result.unwrap());
+        global_registry().unregister_connection(0);
+
+        // 再次连接：即使使用 Reject 策略也应匹配
+        let (mut handler, failure) =
+            make_handler("reconnect.test", 22, kh_path.clone(), UnknownHostKeyPolicy::Reject);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(result.unwrap(), "已存储密钥必须匹配");
+        let guard = failure.lock().unwrap();
+        assert!(guard.unknown.is_none());
+        assert!(guard.mismatch.is_none());
+        global_registry().unregister_connection(1);
+    }
+
+    /// 边界：非默认端口使用 bracket 形式，不同端口互不影响。
+    #[tokio::test]
+    async fn non_default_port_uses_bracket_form_and_isolates_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let kh_path = dir.path().join("known_hosts");
+        let kh = KnownHosts::new(kh_path.clone());
+        kh.store("example.com", 2222, REAL_KEY_A).unwrap();
+
+        let pk = parse_test_key(REAL_KEY_A);
+
+        // 端口 2222 匹配
+        let (mut handler, _) =
+            make_handler("example.com", 2222, kh_path.clone(), UnknownHostKeyPolicy::Reject);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(result.unwrap());
+        global_registry().unregister_connection(0);
+
+        // 端口 22 未知（不同 host token）
+        let (mut handler, failure) =
+            make_handler("example.com", 22, kh_path.clone(), UnknownHostKeyPolicy::Reject);
+        let result = client::Handler::check_server_key(&mut handler, &pk).await;
+        assert!(!result.unwrap(), "端口 22 应为未知");
+        let guard = failure.lock().unwrap();
+        assert!(guard.unknown.is_some());
+        global_registry().unregister_connection(1);
+    }
 }

@@ -918,16 +918,26 @@ mod tests {
     fn protection_status_unprotected_when_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = CredentialStore::new(dir.path().join("credentials.toml"));
-        assert_eq!(store.protection_status().unwrap(), ProtectionStatus::Unprotected);
+        assert_eq!(
+            store.protection_status().unwrap(),
+            ProtectionStatus::Unprotected
+        );
     }
 
     #[test]
     fn protection_status_unprotected_when_plaintext() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
-        std::fs::write(&path, "version = 1\n[entries]\n\"host.a.password\" = \"secret\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "version = 1\n[entries]\n\"host.a.password\" = \"secret\"\n",
+        )
+        .unwrap();
         let store = CredentialStore::new(path);
-        assert_eq!(store.protection_status().unwrap(), ProtectionStatus::Unprotected);
+        assert_eq!(
+            store.protection_status().unwrap(),
+            ProtectionStatus::Unprotected
+        );
     }
 
     #[test]
@@ -935,12 +945,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
-        store.set_protection_key(None, Some("protect".into())).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
+        store
+            .set_protection_key(None, Some("protect".into()))
+            .unwrap();
 
         // 模拟重启：新建 store 实例，内存密钥为空
         let restarted = CredentialStore::new(path);
-        assert_eq!(restarted.protection_status().unwrap(), ProtectionStatus::ProtectedLocked);
+        assert_eq!(
+            restarted.protection_status().unwrap(),
+            ProtectionStatus::ProtectedLocked
+        );
     }
 
     #[test]
@@ -948,11 +965,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
-        store.set_protection_key(None, Some("protect".into())).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
+        store
+            .set_protection_key(None, Some("protect".into()))
+            .unwrap();
 
         // 同一进程内已解锁
-        assert_eq!(store.protection_status().unwrap(), ProtectionStatus::ProtectedUnlocked);
+        assert_eq!(
+            store.protection_status().unwrap(),
+            ProtectionStatus::ProtectedUnlocked
+        );
     }
 
     #[test]
@@ -962,7 +986,10 @@ mod tests {
         // 写入非法 TOML
         std::fs::write(&path, "[broken").unwrap();
         let store = CredentialStore::new(path);
-        assert!(matches!(store.protection_status(), Err(Error::InvalidCredentialFile)));
+        assert!(matches!(
+            store.protection_status(),
+            Err(Error::InvalidCredentialFile)
+        ));
     }
 
     #[test]
@@ -970,14 +997,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
-        store.set_protection_key(None, Some("protect".into())).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
+        store
+            .set_protection_key(None, Some("protect".into()))
+            .unwrap();
 
         let before_bytes = std::fs::read(&path).unwrap();
         let before_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         let restarted = CredentialStore::new(path.clone());
-        assert_eq!(restarted.protection_status().unwrap(), ProtectionStatus::ProtectedLocked);
+        assert_eq!(
+            restarted.protection_status().unwrap(),
+            ProtectionStatus::ProtectedLocked
+        );
 
         let status = restarted.unlock_only("protect").unwrap();
         assert_eq!(status, ProtectionStatus::ProtectedUnlocked);
@@ -1002,8 +1036,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
-        store.set_protection_key(None, Some("correct".into())).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
+        store
+            .set_protection_key(None, Some("correct".into()))
+            .unwrap();
 
         // 已解锁状态下提交错误候选密钥
         let status = store.unlock_only("wrong").unwrap();
@@ -1022,8 +1060,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
-        store.set_protection_key(None, Some("protect".into())).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
+        store
+            .set_protection_key(None, Some("protect".into()))
+            .unwrap();
 
         let restarted = CredentialStore::new(path);
         assert!(matches!(
@@ -1050,9 +1092,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
         let unicode_key = " 密码 🐼 ";
-        store.set_protection_key(None, Some(unicode_key.into())).unwrap();
+        store
+            .set_protection_key(None, Some(unicode_key.into()))
+            .unwrap();
 
         let restarted = CredentialStore::new(path);
         let status = restarted.unlock_only(unicode_key).unwrap();
@@ -1122,7 +1168,8 @@ mod tests {
         // 空白和 Unicode 按原值比较
         let key_with_spaces = "  key  ";
         assert_eq!(
-            validate_protection_input(None, Some(key_with_spaces), Some(key_with_spaces), false).unwrap(),
+            validate_protection_input(None, Some(key_with_spaces), Some(key_with_spaces), false)
+                .unwrap(),
             ProtectionAction::Enable
         );
         // 不同空白不应被视为一致
@@ -1139,16 +1186,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "secret".into()).unwrap();
-        store.set_protection_key(None, Some("same-key".into())).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
+        store
+            .set_protection_key(None, Some("same-key".into()))
+            .unwrap();
         let first_content = std::fs::read_to_string(&path).unwrap();
 
         // 用相同密钥重新加密
-        store.set_protection_key(Some("same-key".into()), Some("same-key".into())).unwrap();
+        store
+            .set_protection_key(Some("same-key".into()), Some("same-key".into()))
+            .unwrap();
         let second_content = std::fs::read_to_string(&path).unwrap();
 
         // 内容应不同（盐/nonce 已更新）
-        assert_ne!(first_content, second_content, "相同密钥重新加密应产生不同密文");
+        assert_ne!(
+            first_content, second_content,
+            "相同密钥重新加密应产生不同密文"
+        );
 
         // 原密钥仍有效
         assert_eq!(
@@ -1163,12 +1219,19 @@ mod tests {
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
         // 无文件时启用保护
-        store.set_protection_key(None, Some("protect".into())).unwrap();
+        store
+            .set_protection_key(None, Some("protect".into()))
+            .unwrap();
         assert!(store.is_protected().unwrap());
-        assert_eq!(store.protection_status().unwrap(), ProtectionStatus::ProtectedUnlocked);
+        assert_eq!(
+            store.protection_status().unwrap(),
+            ProtectionStatus::ProtectedUnlocked
+        );
 
         // 后续保存立即受保护
-        store.save("host.a.password".into(), "secret".into()).unwrap();
+        store
+            .save("host.a.password".into(), "secret".into())
+            .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("mode = \"encrypted\""));
         assert!(!text.contains("secret"));
@@ -1179,16 +1242,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.toml");
         let store = CredentialStore::new(path.clone());
-        store.save("host.a.password".into(), "pass1".into()).unwrap();
-        store.save("host.b.passphrase".into(), "phrase2".into()).unwrap();
-        store.save("host.c.password".into(), "密码三".into()).unwrap();
+        store
+            .save("host.a.password".into(), "pass1".into())
+            .unwrap();
+        store
+            .save("host.b.passphrase".into(), "phrase2".into())
+            .unwrap();
+        store
+            .save("host.c.password".into(), "密码三".into())
+            .unwrap();
 
-        store.set_protection_key(None, Some("protect".into())).unwrap();
+        store
+            .set_protection_key(None, Some("protect".into()))
+            .unwrap();
 
         // 所有条目在解密后一致
-        assert_eq!(store.get("host.a.password").unwrap().as_deref(), Some("pass1"));
-        assert_eq!(store.get("host.b.passphrase").unwrap().as_deref(), Some("phrase2"));
-        assert_eq!(store.get("host.c.password").unwrap().as_deref(), Some("密码三"));
+        assert_eq!(
+            store.get("host.a.password").unwrap().as_deref(),
+            Some("pass1")
+        );
+        assert_eq!(
+            store.get("host.b.passphrase").unwrap().as_deref(),
+            Some("phrase2")
+        );
+        assert_eq!(
+            store.get("host.c.password").unwrap().as_deref(),
+            Some("密码三")
+        );
 
         // 文件不含明文秘密
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1209,12 +1289,13 @@ mod tests {
         let store = Arc::new(CredentialStore::new(path.clone()));
 
         // 先保存一些初始数据
-        store.save("host.init.password".into(), "initial".into()).unwrap();
+        store
+            .save("host.init.password".into(), "initial".into())
+            .unwrap();
 
         let store2 = store.clone();
-        let migration = thread::spawn(move || {
-            store2.set_protection_key(None, Some("protect".into()))
-        });
+        let migration =
+            thread::spawn(move || store2.set_protection_key(None, Some("protect".into())));
 
         // 主线程同时尝试保存
         let save_result = store.save("host.concurrent.password".into(), "concurrent".into());
@@ -1223,8 +1304,14 @@ mod tests {
 
         // 无论保存是否在迁移前或后完成，最终两个条目都应存在
         if save_result.is_ok() {
-            assert_eq!(store.get("host.concurrent.password").unwrap().as_deref(), Some("concurrent"));
+            assert_eq!(
+                store.get("host.concurrent.password").unwrap().as_deref(),
+                Some("concurrent")
+            );
         }
-        assert_eq!(store.get("host.init.password").unwrap().as_deref(), Some("initial"));
+        assert_eq!(
+            store.get("host.init.password").unwrap().as_deref(),
+            Some("initial")
+        );
     }
 }

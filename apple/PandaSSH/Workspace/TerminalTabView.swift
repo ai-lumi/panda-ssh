@@ -139,7 +139,7 @@ struct TerminalTabView: View {
             if failure == .missingCredential {
                 // 缺少凭据：要求用户输入密码/口令
                 session.waitForCredentialInput()
-                gate.requireCredentialInput()
+                gate.requireCredentialInput(for: host)
             } else if let key = failure.presentedHostKey,
                       gate.requireTofuConfirmation(key) {
                 // 首次连接未知主机：缓存密钥指纹，等待用户确认
@@ -299,11 +299,9 @@ struct TerminalTabView: View {
             session.markFailed()
             return
         }
-        // 检查是否需要请求凭据输入（密码/口令）
+        // 核心决定凭据是否就绪或需要关联输入请求。
         if gate.requestCredentialsIfNeeded(for: host) { return }
-        // 解析连接凭据（从凭据文件或手动输入中获取密码/口令）
-        let secrets = CredentialResolver()
-            .connectionSecrets(for: host, manualSecret: gate.manualSecret)
+        let secrets = gate.resolvedSecrets
         guard let secrets else {
             // 凭据不足：再次请求用户输入
             _ = gate.requestCredentialsIfNeeded(for: host)

@@ -60,8 +60,6 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var ungroupedTabIDs: [UUID] = []
     /// 页签显示顺序映射，独立于 Rust 侧 tabs 数组。
     private var displayOrder: [UUID] = []
-    /// 分组名称计数器，用于自动生成唯一名称。
-    private var groupCounter = 0
 
     /// 按 hostID 查询主机显示名;查不到(如主机已删除)时返回 nil,标题回退为 hostID。
     /// 同时用于在标签操作前同步主机名映射到 Rust。
@@ -211,55 +209,59 @@ final class WorkspaceStore: ObservableObject {
     /// 标签不存在时忽略;关闭活动标签后优先选择左侧相邻标签。
     func close(tabID: UUID) {
         guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
-        // Rust 生成小写 UUID 字符串,Swift UUID 的默认字符串为大写。
         let ffiTabID = tabID.uuidString.lowercased()
-        // 此处是确认后的执行入口,清除连接标记以免 Rust 再次要求确认。
-        workspaceReportConnectionStatus(tabId: ffiTabID, status: .inactive)
+        if tab.kind == .terminal {
+            reportConnectionStatus(.inactive, forTabID: tabID)
+        }
         workspaceCloseTab(tabId: ffiTabID)
-        syncFromFfi()
-        guard !tabs.contains(where: { $0.id == tabID }) else { return }
-        terminalSessions.removeValue(forKey: tabID)?.value?.close()
-        sftpSessions.removeValue(forKey: tabID)?.value?.disconnect()
-        closeSessionHandler(tab)
+        syncAndReleaseSessions(previousTabIDs: Set([tabID]))
     }
 
-    /// 请求关闭标签页:已连接终端标签页弹出二次确认(设置 pendingCloseTabID);
-    /// 连接中/失败态终端标签页与 SFTP 标签页直接关闭。
+    /// 请求关闭标签页:委托核心判断是否需要二次确认。
+    /// 核心返回 .closed 时标签已移除;返回 .pendingConfirmation 时同步待确认状态。
     func requestClose(tabID: UUID) {
-        guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
-        if tab.kind == .terminal && isTerminalConnected(tabID) {
-            pendingCloseTabID = tabID
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        let before = Set(tabs.map(\.id))
+        let result = workspaceCloseTab(tabId: tabID.uuidString.lowercased())
+        if result == .closed {
+            syncAndReleaseSessions(previousTabIDs: before)
         } else {
-            close(tabID: tabID)
+            syncFromFfi()
         }
     }
 
-    /// 确认关闭待确认的终端标签页。
+    /// 确认关闭待确认的标签页,转发到核心执行。
     func confirmClose() {
-        guard let id = pendingCloseTabID else { return }
-        pendingCloseTabID = nil
-        close(tabID: id)
+        let before = Set(tabs.map(\.id))
+        workspaceConfirmClose()
+        syncAndReleaseSessions(previousTabIDs: before)
     }
 
-    /// 取消关闭,保留待确认的终端标签页与会话。
+    /// 取消关闭,转发到核心清除待确认状态。
     func cancelClose() {
-        pendingCloseTabID = nil
-    }
-
-    /// 关闭除目标外的全部标签页;目标保留为活动标签。
-    /// 被关闭的终端标签页走与单标签关闭一致的连接释放流程。
-    func closeOthers(keeping tabID: UUID) {
-        let others = tabs.filter { $0.id != tabID }.map(\.id)
-        for id in others { close(tabID: id) }
-        if tabs.contains(where: { $0.id == tabID }) {
-            activeTabID = tabID
-        }
+        workspaceCancelClose()
+        syncFromFfi()
     }
 
     /// 关闭全部标签页。
-    func closeAll() {
-        let ids = tabs.map(\.id)
-        for id in ids { close(tabID: id) }
+    func requestCloseAll() {
+        let before = Set(tabs.map(\.id))
+        let result = workspaceCloseAllTabs()
+        if result == .closed {
+            syncAndReleaseSessions(previousTabIDs: before)
+        } else {
+            syncFromFfi()
+        }
+    }
+
+    func requestCloseOthers(keeping tabID: UUID) {
+        let before = Set(tabs.map(\.id))
+        let result = workspaceCloseOtherTabs(keepingTabId: tabID.uuidString.lowercased())
+        if result == .closed {
+            syncAndReleaseSessions(previousTabIDs: before)
+        } else {
+            syncFromFfi()
+        }
     }
 
     /// 页签操作的唯一重连入口；由各标签自己的会话状态机建立新连接代次。
@@ -273,50 +275,26 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    /// 请求「关闭其他标签页」:若范围内存在已连接终端标签 → 设置 pendingBatchClose
-    /// 等待聚合确认;否则直接执行 closeOthers。
-    func requestCloseOthers(keeping tabID: UUID) {
-        let others = tabs.filter { $0.id != tabID }
-        let connectedCount = others.filter { $0.kind == .terminal && isTerminalConnected($0.id) }.count
-        if connectedCount > 0 {
-            pendingBatchClose = PendingBatchClose(scope: .others(keeping: tabID), connectedTerminalCount: connectedCount)
-        } else {
-            closeOthers(keeping: tabID)
-        }
-    }
-
-    /// 请求「关闭全部标签页」:若范围内存在已连接终端标签 → 设置 pendingBatchClose
-    /// 等待聚合确认;否则直接执行 closeAll。
-    func requestCloseAll() {
-        let connectedCount = tabs.filter { $0.kind == .terminal && isTerminalConnected($0.id) }.count
-        if connectedCount > 0 {
-            pendingBatchClose = PendingBatchClose(scope: .all, connectedTerminalCount: connectedCount)
-        } else {
-            closeAll()
-        }
-    }
-
-    /// 确认批量关闭:按 pending 范围执行 closeOthers/closeAll,并清理 pending。
     func confirmBatchClose() {
-        guard let pending = pendingBatchClose else { return }
-        pendingBatchClose = nil
-        switch pending.scope {
-        case .others(let keep):
-            closeOthers(keeping: keep)
-        case .all:
-            closeAll()
-        }
+        let before = Set(tabs.map(\.id))
+        workspaceConfirmClose()
+        syncAndReleaseSessions(previousTabIDs: before)
     }
 
-    /// 取消批量关闭:清理 pending,保留全部标签页。
     func cancelBatchClose() {
-        pendingBatchClose = nil
+        workspaceCancelClose()
+        syncFromFfi()
     }
 
     /// 关闭某台主机的全部标签页(删除主机时级联清理)。
     /// 主机已被删除,其活跃传输任务无意义,先取消再立即断开连接。
+    /// 先报告终端为 inactive 以绕过确认,再由核心直接关闭。
     func closeTabs(forHostID hostID: String) {
         transferStore?.cancelAll(forHostID: hostID)
+        let hostTerminalIDs = tabs.filter { $0.hostID == hostID && $0.kind == .terminal }.map(\.id)
+        for id in hostTerminalIDs {
+            reportConnectionStatus(.inactive, forTabID: id)
+        }
         let removedIDs = tabs.filter { $0.hostID == hostID }.map(\.id)
         for id in removedIDs {
             close(tabID: id)
@@ -328,10 +306,9 @@ final class WorkspaceStore: ObservableObject {
     func beginApplicationShutdown() {
         guard isAcceptingNewConnections else { return }
         isAcceptingNewConnections = false
-        pendingCloseTabID = nil
-        pendingBatchClose = nil
         transferStore?.beginApplicationShutdown()
-        closeAll()
+        _ = workspaceBeginApplicationShutdown()
+        syncFromFfi()
     }
 
     // MARK: - 页签排序与分组
@@ -367,62 +344,35 @@ final class WorkspaceStore: ObservableObject {
     ///   - name: 分组名称，为 nil 时自动生成
     /// - Returns: 新创建的分组 ID
     func createGroup(forTabID tabID: UUID, name: String? = nil) -> UUID {
-        groupCounter += 1
-        let groupName = name ?? "分组 \(groupCounter)"
-        let groupID = UUID()
-        let group = TabGroup(id: groupID, name: groupName, tabIDs: [tabID])
-        groups.append(group)
-        ungroupedTabIDs.removeAll(where: { $0 == tabID })
-        return groupID
+        let groupIDStr = workspaceCreateGroup(tabId: tabID.uuidString.lowercased(), name: name)
+        syncGroupsFromFfi()
+        return UUID(uuidString: groupIDStr) ?? UUID()
     }
 
     /// 删除指定分组。
     /// 若分组非空，组内页签移至未分组状态。
     func deleteGroup(id: UUID) {
-        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
-        let group = groups[index]
-        // 将组内页签移至未分组
-        for tabID in group.tabIDs {
-            if !ungroupedTabIDs.contains(tabID) {
-                ungroupedTabIDs.append(tabID)
-            }
-        }
-        groups.remove(at: index)
+        workspaceDeleteGroup(groupId: id.uuidString.lowercased())
+        syncGroupsFromFfi()
     }
 
     /// 重命名指定分组。
     func renameGroup(id: UUID, to newName: String) {
-        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
-        groups[index].name = newName
+        workspaceRenameGroup(groupId: id.uuidString.lowercased(), newName: newName)
+        syncGroupsFromFfi()
     }
 
     /// 将页签移动到指定分组。
     /// 若页签已在其他分组，先从原分组移除。
     func moveTab(_ tabID: UUID, toGroup groupID: UUID) {
-        guard let targetIndex = groups.firstIndex(where: { $0.id == groupID }) else { return }
-
-        // 从原位置移除
-        removeTabFromAnyGroup(tabID)
-        ungroupedTabIDs.removeAll(where: { $0 == tabID })
-
-        // 添加到目标分组
-        groups[targetIndex].tabIDs.append(tabID)
+        workspaceMoveTabToGroup(tabId: tabID.uuidString.lowercased(), groupId: groupID.uuidString.lowercased())
+        syncGroupsFromFfi()
     }
 
     /// 将页签从分组中移除，变为未分组状态。
     func removeTabFromGroup(_ tabID: UUID) {
-        removeTabFromAnyGroup(tabID)
-        if !ungroupedTabIDs.contains(tabID) {
-            ungroupedTabIDs.append(tabID)
-        }
-    }
-
-    /// 从任意分组中移除指定页签（内部辅助方法）。
-    /// 页签被移出（未分组/换组）时空分组保留，仅页签关闭时由 syncFromFfi 清理空分组。
-    private func removeTabFromAnyGroup(_ tabID: UUID) {
-        for i in groups.indices {
-            groups[i].tabIDs.removeAll(where: { $0 == tabID })
-        }
+        workspaceRemoveTabFromGroup(tabId: tabID.uuidString.lowercased())
+        syncGroupsFromFfi()
     }
 
     // MARK: - 拖放事务
@@ -535,7 +485,9 @@ final class WorkspaceStore: ObservableObject {
             workspaceSetHostNames(hostNames: [HostNameMapping(hostId: hostID, name: name)])
         }
         let ffiKind: TabKindEnum = kind == .terminal ? .terminal : .sftp
-        let record = workspaceOpenTab(hostId: hostID, kind: ffiKind)
+        guard let record = workspaceOpenTab(hostId: hostID, kind: ffiKind) else {
+            return UUID()
+        }
         syncFromFfi()
         return UUID(uuidString: record.id) ?? UUID()
     }
@@ -569,17 +521,9 @@ final class WorkspaceStore: ObservableObject {
         var seen = Set<UUID>()
         displayOrder = displayOrder.filter { seen.insert($0).inserted }
 
-        // 彻底重建 ungroupedTabIDs：只保留既存在又未被分组的页签
-        let groupedTabIDs = Set(groups.flatMap(\.tabIDs))
-        ungroupedTabIDs = displayOrder.filter { newTabIDs.contains($0) && !groupedTabIDs.contains($0) }
-
-        // 清理分组中已关闭的页签
-        for i in groups.indices {
-            groups[i].tabIDs.removeAll(where: { !newTabIDs.contains($0) })
-        }
-        groups.removeAll(where: { $0.isEmpty })
-
         tabs = dedupedTabs
+        syncGroupsFromFfi()
+
         if let activeStr = workspaceActiveTabId() {
             activeTabID = UUID(uuidString: activeStr)
         } else {
@@ -589,25 +533,34 @@ final class WorkspaceStore: ObservableObject {
         syncPendingCloseFromRust()
     }
 
+    /// 从核心同步分组状态到本地 @Published 属性。
+    private func syncGroupsFromFfi() {
+        let snapshot = workspaceGroupSnapshot()
+        let newTabIDs = Set(tabs.map(\.id))
+        groups = snapshot.groups.compactMap { record -> TabGroup? in
+            guard let id = UUID(uuidString: record.id) else { return nil }
+            let tabIDs = record.tabIds.compactMap { UUID(uuidString: $0) }.filter { newTabIDs.contains($0) }
+            return TabGroup(id: id, name: record.name, tabIDs: tabIDs)
+        }
+        ungroupedTabIDs = snapshot.ungroupedTabIds.compactMap { UUID(uuidString: $0) }.filter { newTabIDs.contains($0) }
+    }
+
     /// 从 Rust 读取待关闭状态并更新 Swift 侧 @Published 属性。
-    /// 仅在 Swift 侧未自行设置 pending 状态时从 Rust 读取。
+    /// 核心是待关闭状态的唯一来源；Swift 侧仅转发呈现。
     private func syncPendingCloseFromRust() {
         guard let pending = workspacePendingClose() else {
-            // Rust 无 pending: 如果 Swift 侧也没有 pending, 无需操作
-            // 如果 Swift 侧有 pending (由 requestClose/requestCloseOthers/requestCloseAll 设置), 保留
+            pendingCloseTabID = nil
+            pendingBatchClose = nil
             return
         }
         let pendingIDs = Set(pending.tabIds.compactMap { UUID(uuidString: $0) })
         let count = Int(pending.connectedTerminalCount)
 
-        // 如果 Swift 侧已设置了 pending 状态, 保留 Swift 侧的(它有 scope 信息)
-        if pendingCloseTabID != nil || pendingBatchClose != nil { return }
-
-        // 从 Rust pending 推断 scope
-        if pendingIDs.count == 1, let id = pendingIDs.first {
+        if !pending.isBatch, pendingIDs.count == 1, let id = pendingIDs.first {
             pendingCloseTabID = id
+            pendingBatchClose = nil
         } else if !pendingIDs.isEmpty {
-            // 推断 scope: 如果只有一个标签不在 pending 中, 是 closeOthers
+            pendingCloseTabID = nil
             let allTabIDs = Set(tabs.map(\.id))
             let nonPending = allTabIDs.subtracting(pendingIDs)
             if nonPending.count == 1, let keeping = nonPending.first {
@@ -615,6 +568,22 @@ final class WorkspaceStore: ObservableObject {
             } else {
                 pendingBatchClose = PendingBatchClose(scope: .all, connectedTerminalCount: count)
             }
+        }
+    }
+
+    /// 从核心同步标签快照，检测消失的标签并释放其会话资源。
+    /// `previousTabIDs` 为操作前的标签集合；差集中不再存在的标签即被关闭。
+    private func syncAndReleaseSessions(previousTabIDs: Set<UUID>) {
+        let removedTabs = tabs.filter { previousTabIDs.contains($0.id) }
+        syncFromFfi()
+        let currentTabIDs = Set(tabs.map(\.id))
+        for removedTab in removedTabs {
+            guard !currentTabIDs.contains(removedTab.id) else { continue }
+            if let session = terminalSessions.removeValue(forKey: removedTab.id)?.value {
+                session.close()
+            }
+            sftpSessions.removeValue(forKey: removedTab.id)
+            closeSessionHandler(removedTab)
         }
     }
 

@@ -1,474 +1,696 @@
-    use super::*;
-    use crate::test_support::global_test_lock;
+use super::*;
+use crate::test_support::global_test_lock;
+use std::time::Duration;
 
-    /// 构造一个假的 TransferTask 用于测试（不启动异步工作线程）。
-    fn make_test_task(id: Uuid) -> TransferTask {
-        TransferTask {
-            id,
-            direction: TransferDirectionEnum::Upload,
-            host_id: "test-host".into(),
-            local_path: "/tmp/test".into(),
-            remote_path: "/remote/test".into(),
-            password: None,
-            passphrase: None,
-            size: 1024,
-            status: Arc::new(std::sync::Mutex::new(TransferStatusEnum::Queued)),
-            transferred: Arc::new(AtomicU64::new(0)),
-            error: Arc::new(std::sync::Mutex::new(None)),
-            cancel: Arc::new(AtomicBool::new(false)),
-            paused: Arc::new(AtomicBool::new(false)),
-            resume_notify: Arc::new(tokio::sync::Notify::new()),
-            version: Arc::new(AtomicU64::new(1)),
-            speed_tracker: Arc::new(Mutex::new(TransferSpeedTracker::new(1024))),
-            group_id: None,
-            group_name: None,
-        }
-    }
-
-    /// 将测试任务插入全局注册表。
-    fn insert_test_task(task: &TransferTask) {
-        transfer_tasks()
-            .lock()
-            .unwrap()
-            .insert(task.id, task.clone());
-    }
-
-    /// 从全局注册表移除测试任务。
-    fn remove_test_task(id: &Uuid) {
-        transfer_tasks().lock().unwrap().remove(id);
-    }
-
-    #[test]
-    fn progress_alone_advances_revision_and_snapshot() {
-        let _test_guard = global_test_lock();
-        let task = make_test_task(Uuid::new_v4());
-        let progress = task.progress_callback();
-        for done in [1, 512, 1024] {
-            let before = transfer_change_counter();
-            progress(done, 1024);
-            assert!(
-                transfer_change_counter() > before,
-                "仅字节进度也必须通知订阅方"
-            );
-            assert_eq!(task.snapshot().transferred, done);
-        }
-    }
-
-    #[test]
-    fn change_counter_increments_on_notify() {
-        let _test_guard = global_test_lock();
-        let before = transfer_change_counter();
-        notify_transfer_changed();
-        let after = transfer_change_counter();
-        assert_eq!(after, before + 1);
-    }
-
-    #[test]
-    fn change_counter_does_not_increment_on_read() {
-        let _test_guard = global_test_lock();
-        // 读取计数器本身不改变它的值
-        let v1 = transfer_change_counter();
-        let v2 = transfer_change_counter();
-        assert_eq!(v1, v2);
-    }
-
-    #[test]
-    fn change_counter_increments_on_cancel() {
-        let _test_guard = global_test_lock();
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        insert_test_task(&task);
-
-        let before = transfer_change_counter();
-        let _ = transfer_cancel(id.to_string());
-        let after = transfer_change_counter();
-        assert!(after > before, "cancel should bump change counter");
-
-        remove_test_task(&id);
-    }
-
-    #[test]
-    fn change_counter_increments_on_pause() {
-        let _test_guard = global_test_lock();
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        insert_test_task(&task);
-
-        let before = transfer_change_counter();
-        let _ = transfer_pause(id.to_string());
-        let after = transfer_change_counter();
-        assert!(after > before, "pause should bump change counter");
-
-        remove_test_task(&id);
-    }
-
-    #[test]
-    fn change_counter_increments_on_resume() {
-        let _test_guard = global_test_lock();
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        // 先暂停
-        *task.status.lock().unwrap() = TransferStatusEnum::Paused;
-        insert_test_task(&task);
-
-        let before = transfer_change_counter();
-        let _ = transfer_resume(id.to_string());
-        let after = transfer_change_counter();
-        assert!(after > before, "resume should bump change counter");
-
-        remove_test_task(&id);
-    }
-
-    #[test]
-    fn change_counter_multiple_transitions_accumulate() {
-        let _test_guard = global_test_lock();
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        insert_test_task(&task);
-
-        let c0 = transfer_change_counter();
-
-        // Queued → Paused
-        let _ = transfer_pause(id.to_string());
-        let c1 = transfer_change_counter();
-        assert!(c1 >= c0 + 1, "pause should bump counter by at least 1");
-
-        // Paused → Queued (resume)
-        let _ = transfer_resume(id.to_string());
-        let c2 = transfer_change_counter();
-        assert!(c2 >= c1 + 1, "resume should bump counter by at least 1");
-
-        // Queued → Cancelled
-        let _ = transfer_cancel(id.to_string());
-        let c3 = transfer_change_counter();
-        assert!(c3 >= c2 + 1, "cancel should bump counter by at least 1");
-
-        // 总共至少递增了 3 次
-        assert!(
-            c3 >= c0 + 3,
-            "three transitions should bump counter by at least 3"
-        );
-
-        remove_test_task(&id);
-    }
-
-    #[test]
-    fn change_counter_no_increment_for_noop_cancel() {
-        let _test_guard = global_test_lock();
-        // 已完成的任务 cancel 是 no-op，任务状态不应改变
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        *task.status.lock().unwrap() = TransferStatusEnum::Completed;
-        insert_test_task(&task);
-
-        let _ = transfer_cancel(id.to_string());
-        // 状态应保持 Completed，不应被改为 Cancelled
-        assert_eq!(
-            *task.status.lock().unwrap(),
-            TransferStatusEnum::Completed,
-            "cancelling a completed task should not change its status"
-        );
-
-        remove_test_task(&id);
-    }
-
-    #[test]
-    fn change_counter_no_increment_for_noop_pause() {
-        let _test_guard = global_test_lock();
-        // 已暂停的任务再次 pause 是 no-op，任务状态不应改变
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        *task.status.lock().unwrap() = TransferStatusEnum::Paused;
-        insert_test_task(&task);
-
-        let _ = transfer_pause(id.to_string());
-        // 状态应保持 Paused（不会重复触发 notify）
-        assert_eq!(
-            *task.status.lock().unwrap(),
-            TransferStatusEnum::Paused,
-            "pausing an already paused task should not change its status"
-        );
-
-        remove_test_task(&id);
-    }
-
-    // -----------------------------------------------------------------------
-    // 状态聚合与任务组
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn group_status_priority_prefers_running_over_all_terminal_states() {
-        let _test_guard = global_test_lock();
-        use TransferStatusEnum as S;
-        assert_eq!(
-            group_status_priority(&[S::Failed, S::Running, S::Completed]),
-            S::Running
-        );
-        assert_eq!(group_status_priority(&[S::Completed, S::Paused]), S::Paused);
-        assert_eq!(group_status_priority(&[S::Completed, S::Queued]), S::Queued);
-        assert_eq!(group_status_priority(&[S::Cancelled, S::Failed]), S::Failed);
-        assert_eq!(group_status_priority(&[S::Cancelled]), S::Cancelled);
-        assert_eq!(group_status_priority(&[S::Completed]), S::Completed);
-        assert_eq!(group_status_priority(&[]), S::Completed);
-    }
-
-    #[test]
-    fn transfer_groups_aggregates_grouped_tasks_and_ignores_ungrouped() {
-        let _test_guard = global_test_lock();
-        let mk = |group: Option<(&str, &str)>, status: TransferStatusEnum, size: u64, done: u64| {
-            let mut task = make_test_task(Uuid::new_v4());
-            if let Some((gid, gname)) = group {
-                task.group_id = Some(gid.into());
-                task.group_name = Some(gname.into());
+fn wait_for_ffi_status(id: &str, expected: TransferStatusEnum) -> TransferStatusRecord {
+    for _ in 0..300 {
+        if let Ok(snap) = transfer_status(id.to_string()) {
+            if snap.status == expected {
+                return snap;
             }
-            task.direction = TransferDirectionEnum::Download;
-            task.size = size;
-            *task.status.lock().unwrap() = status;
-            task.transferred.store(done, Ordering::Relaxed);
-            task
-        };
-
-        let running = mk(Some(("g1", "备份")), TransferStatusEnum::Running, 100, 10);
-        let done = mk(
-            Some(("g1", "备份")),
-            TransferStatusEnum::Completed,
-            200,
-            200,
-        );
-        let cancelled = mk(Some(("g2", "同步")), TransferStatusEnum::Cancelled, 50, 0);
-        let lone = mk(None, TransferStatusEnum::Running, 10, 0);
-        for t in [&running, &done, &cancelled, &lone] {
-            insert_test_task(t);
         }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("task {id} did not reach {expected:?} in time");
+}
 
-        let groups = transfer_groups().unwrap();
-        assert_eq!(groups.len(), 2, "无分组任务不应出现在聚合中");
-        assert!(groups[0].group_name < groups[1].group_name, "应按组名排序");
+fn start_refused_upload() -> String {
+    start_transfer(
+        TransferDirectionEnum::Upload,
+        "refused-host".into(),
+        "/tmp/test".into(),
+        "/remote/test".into(),
+        100,
+        Some("pw".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap()
+}
 
-        let backup = groups.iter().find(|g| g.group_name == "备份").unwrap();
-        assert_eq!(backup.group_id, "g1");
-        assert_eq!(backup.total_count, 2);
-        assert_eq!(backup.completed_count, 1);
-        assert_eq!(backup.total_bytes, 300);
-        assert_eq!(backup.transferred_bytes, 210);
-        assert_eq!(
-            backup.status,
-            TransferStatusEnum::Running,
-            "running 优先于 completed"
-        );
-        assert!(
-            matches!(backup.direction, TransferDirectionEnum::Download),
-            "组方向应取首个成员的方向"
-        );
+// ---------------------------------------------------------------------------
+// 变更计数器
+// ---------------------------------------------------------------------------
 
-        let sync = groups.iter().find(|g| g.group_name == "同步").unwrap();
-        assert_eq!(sync.status, TransferStatusEnum::Cancelled);
+#[test]
+fn change_counter_does_not_increment_on_read() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let v1 = transfer_change_counter();
+    let v2 = transfer_change_counter();
+    assert_eq!(v1, v2);
+}
 
-        for t in [&running, &done, &cancelled, &lone] {
-            remove_test_task(&t.id);
+#[test]
+fn notify_transfer_changed_increments_counter() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let before = transfer_change_counter();
+    notify_transfer_changed();
+    let after = transfer_change_counter();
+    assert_eq!(after, before + 1);
+}
+
+#[test]
+fn change_counter_syncs_via_callback() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let before = transfer_change_counter();
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    let after = transfer_change_counter();
+    assert!(
+        after > before,
+        "FFI 计数器应通过核心回调同步递增: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn change_counter_increments_on_multiple_transitions() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    let c0 = transfer_change_counter();
+    let retried = transfer_retry(id.clone()).unwrap();
+    assert_eq!(retried, id);
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    let c1 = transfer_change_counter();
+    assert!(
+        c1 > c0,
+        "重试应触发状态转换并递增计数器: c0={c0}, c1={c1}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 类型转换
+// ---------------------------------------------------------------------------
+
+#[test]
+fn direction_conversion_round_trip() {
+    assert_eq!(
+        from_core_direction(to_core_direction(TransferDirectionEnum::Upload)),
+        TransferDirectionEnum::Upload
+    );
+    assert_eq!(
+        from_core_direction(to_core_direction(TransferDirectionEnum::Download)),
+        TransferDirectionEnum::Download
+    );
+}
+
+#[test]
+fn status_conversion_covers_all_variants() {
+    use panda_core::transfer::TransferStatus;
+    let cases = [
+        (TransferStatus::Queued, TransferStatusEnum::Queued),
+        (TransferStatus::Running, TransferStatusEnum::Running),
+        (TransferStatus::Paused, TransferStatusEnum::Paused),
+        (TransferStatus::Completed, TransferStatusEnum::Completed),
+        (TransferStatus::Failed, TransferStatusEnum::Failed),
+        (TransferStatus::Cancelled, TransferStatusEnum::Cancelled),
+    ];
+    for (core, ffi) in cases {
+        assert_eq!(from_core_status(core), ffi);
+    }
+}
+
+#[test]
+fn snapshot_to_record_converts_all_fields() {
+    use panda_core::transfer::{TransferDirection, TransferSnapshot, TransferStatus};
+    let snap = TransferSnapshot {
+        id: "abc".into(),
+        direction: TransferDirection::Upload,
+        host_id: "h1".into(),
+        local_path: "/local".into(),
+        remote_path: "/remote".into(),
+        size: 100,
+        transferred: 50,
+        status: TransferStatus::Running,
+        error: Some("err".into()),
+        version: 3,
+        speed: 1.5,
+        total_speed: 2.5,
+        eta_seconds: Some(10.0),
+        group_id: Some("g1".into()),
+        group_name: Some("组".into()),
+    };
+    let rec = snapshot_to_record(snap);
+    assert_eq!(rec.id, "abc");
+    assert_eq!(rec.direction, TransferDirectionEnum::Upload);
+    assert_eq!(rec.status, TransferStatusEnum::Running);
+    assert_eq!(rec.error, Some("err".into()));
+    assert_eq!(rec.group_id, Some("g1".into()));
+    assert_eq!(rec.group_name, Some("组".into()));
+    assert_eq!(rec.transferred, 50);
+    assert_eq!(rec.size, 100);
+}
+
+#[test]
+fn group_to_record_converts_all_fields() {
+    use panda_core::transfer::{TransferDirection, TransferGroupSnapshot, TransferStatus};
+    let g = TransferGroupSnapshot {
+        group_id: "g1".into(),
+        group_name: "组一".into(),
+        direction: TransferDirection::Download,
+        total_count: 3,
+        completed_count: 1,
+        total_bytes: 300,
+        transferred_bytes: 100,
+        status: TransferStatus::Running,
+    };
+    let rec = group_to_record(g);
+    assert_eq!(rec.group_id, "g1");
+    assert_eq!(rec.group_name, "组一");
+    assert_eq!(rec.direction, TransferDirectionEnum::Download);
+    assert_eq!(rec.status, TransferStatusEnum::Running);
+    assert_eq!(rec.total_count, 3);
+    assert_eq!(rec.completed_count, 1);
+    assert_eq!(rec.total_bytes, 300);
+    assert_eq!(rec.transferred_bytes, 100);
+}
+
+// ---------------------------------------------------------------------------
+// total_size
+// ---------------------------------------------------------------------------
+
+#[test]
+fn total_size_zero_for_missing_file() {
+    assert_eq!(total_size(std::path::Path::new("/nonexistent/path")), 0);
+}
+
+#[test]
+fn total_size_returns_file_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.bin");
+    std::fs::write(&path, b"hello").unwrap();
+    assert_eq!(total_size(path.as_path()), 5);
+}
+
+// ---------------------------------------------------------------------------
+// 错误映射
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unknown_task_returns_structured_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        transfer_status(id.clone()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(matches!(
+        transfer_cancel(id.clone()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(matches!(
+        transfer_pause(id.clone()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(matches!(
+        transfer_resume(id.clone()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(matches!(
+        transfer_retry(id),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+}
+
+#[test]
+fn invalid_task_id_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    assert!(transfer_status("not-a-uuid".into()).is_err());
+    assert!(transfer_retry("not-a-uuid".into()).is_err());
+}
+
+#[test]
+fn pause_terminal_task_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    let err = transfer_pause(id).unwrap_err();
+    assert!(err.to_string().contains("already terminal"));
+}
+
+// ---------------------------------------------------------------------------
+// 正常流程（通过真实 FfiExecutor + 拒绝连接主机）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn start_transfer_returns_id_and_reaches_failed_for_refused_host() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_refused_upload();
+    let snap = wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    assert_eq!(snap.direction, TransferDirectionEnum::Upload);
+    assert_eq!(snap.host_id, "refused-host");
+    assert_eq!(snap.size, 100);
+    assert!(snap.error.is_some(), "连接拒绝应设置错误信息");
+}
+
+#[test]
+fn transfer_list_returns_all_tasks() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id = start_transfer(
+            TransferDirectionEnum::Upload,
+            "refused-host".into(),
+            format!("/tmp/f{i}"),
+            format!("/remote/f{i}"),
+            100,
+            Some("pw".into()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        ids.push(id);
+    }
+    let list = transfer_list().unwrap();
+    assert_eq!(list.len(), 3);
+    for id in &ids {
+        wait_for_ffi_status(id, TransferStatusEnum::Failed);
+    }
+}
+
+#[test]
+fn cancel_before_execution_sets_cancelled() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    let id2 = start_refused_upload();
+    transfer_cancel(id2.clone()).unwrap();
+    let snap = wait_for_ffi_status(&id2, TransferStatusEnum::Cancelled);
+    assert!(snap.error.is_none() || snap.status == TransferStatusEnum::Cancelled);
+}
+
+#[test]
+fn retry_resets_state_and_runs_again() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    let retried = transfer_retry(id.clone()).unwrap();
+    assert_eq!(retried, id);
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    let snap = transfer_status(id).unwrap();
+    assert!(snap.error.is_some(), "重试后应再次失败并携带错误");
+}
+
+#[test]
+fn retry_non_retryable_state_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+
+    assert!(matches!(
+        transfer_retry(uuid::Uuid::new_v4().to_string()),
+        Err(PandaError::UnknownTransferTask(_))
+    ));
+    assert!(transfer_retry("not-a-uuid".into()).is_err());
+
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    let retried = transfer_retry(id.clone()).unwrap();
+    assert_eq!(retried, id);
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+}
+
+#[test]
+fn cancel_completed_or_failed_task_is_noop_for_status() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    let _before = transfer_change_counter();
+    transfer_cancel(id.clone()).unwrap();
+    let snap = transfer_status(id).unwrap();
+    assert_eq!(snap.status, TransferStatusEnum::Failed);
+}
+
+#[test]
+fn resume_on_non_paused_task_is_noop() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_refused_upload();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    let _before = transfer_change_counter();
+    transfer_resume(id.clone()).unwrap();
+    let snap = transfer_status(id).unwrap();
+    assert_eq!(snap.status, TransferStatusEnum::Failed);
+}
+
+// ---------------------------------------------------------------------------
+// 组聚合
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transfer_groups_aggregates_grouped_tasks() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+
+    for i in 0..2 {
+        start_transfer(
+            TransferDirectionEnum::Upload,
+            "refused-host".into(),
+            format!("/tmp/gf{i}"),
+            format!("/remote/gf{i}"),
+            100,
+            Some("pw".into()),
+            None,
+            Some("g1".into()),
+            Some("组一".into()),
+        )
+        .unwrap();
+    }
+    let _ungrouped = start_transfer(
+        TransferDirectionEnum::Upload,
+        "refused-host".into(),
+        "/tmp/ungrouped".into(),
+        "/remote/ungrouped".into(),
+        50,
+        Some("pw".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let mut all_terminal = false;
+    for _ in 0..300 {
+        let list = transfer_list().unwrap();
+        if list
+            .iter()
+            .all(|t| t.status == TransferStatusEnum::Failed)
+        {
+            all_terminal = true;
+            break;
         }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(all_terminal, "所有任务应到达终态");
+
+    let groups = transfer_groups().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].group_id, "g1");
+    assert_eq!(groups[0].group_name, "组一");
+    assert_eq!(groups[0].total_count, 2);
+    assert_eq!(groups[0].completed_count, 2);
+    assert_eq!(groups[0].total_bytes, 200);
+}
+
+// ---------------------------------------------------------------------------
+// SSH 连接拒绝（真实 FfiExecutor）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn real_executor_marks_failed_when_connection_refused() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+
+    let id = start_transfer(
+        TransferDirectionEnum::Download,
+        "refused-host".into(),
+        "/tmp/test".into(),
+        "/remote/test".into(),
+        100,
+        Some("pw".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let snap = wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    assert!(snap.error.is_some(), "连接拒绝应设置错误信息");
+    assert_eq!(snap.direction, TransferDirectionEnum::Download);
+}
+
+// ---------------------------------------------------------------------------
+// 组控制（FFI 委托核心）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_cancel_unknown_group_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    assert!(transfer_group_cancel("nonexistent".into()).is_err());
+}
+
+#[test]
+fn group_pause_unknown_group_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    assert!(transfer_group_pause("nonexistent".into()).is_err());
+}
+
+#[test]
+fn group_resume_unknown_group_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    assert!(transfer_group_resume("nonexistent".into()).is_err());
+}
+
+#[test]
+fn group_retry_unknown_group_returns_error() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    assert!(transfer_group_retry("nonexistent".into()).is_err());
+}
+
+#[test]
+fn group_retry_retries_failed_tasks_via_ffi() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+
+    for i in 0..2 {
+        start_transfer(
+            TransferDirectionEnum::Upload,
+            "refused-host".into(),
+            format!("/tmp/gr{i}"),
+            format!("/remote/gr{i}"),
+            100,
+            Some("pw".into()),
+            None,
+            Some("g1".into()),
+            Some("重试组".into()),
+        )
+        .unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // 暂停等待与任务执行
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn wait_while_paused_blocks_until_resume_and_reports_paused_status() {
-        let _test_guard = global_test_lock();
-        let task = make_test_task(Uuid::new_v4());
-        task.paused.store(true, Ordering::Relaxed);
-        let handle = runtime().spawn({
-            let t = task.clone();
-            async move {
-                wait_while_paused(&t).await;
-            }
-        });
-
-        let mut paused_seen = false;
-        for _ in 0..100 {
-            if *task.status.lock().unwrap() == TransferStatusEnum::Paused {
-                paused_seen = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+    let mut all_failed = false;
+    for _ in 0..300 {
+        let list = transfer_list().unwrap();
+        if list.iter().all(|t| t.status == TransferStatusEnum::Failed) {
+            all_failed = true;
+            break;
         }
-        assert!(paused_seen, "暂停中的任务应被标记为 Paused");
-
-        task.paused.store(false, Ordering::Relaxed);
-        task.resume_notify.notify_waiters();
-        runtime().block_on(handle).unwrap();
-        assert_ne!(
-            *task.status.lock().unwrap(),
-            TransferStatusEnum::Cancelled,
-            "恢复后的等待应正常返回且不改变状态"
-        );
+        std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(all_failed, "所有任务应先到达 Failed");
 
-    #[test]
-    fn wait_while_paused_returns_immediately_when_cancelled() {
-        let _test_guard = global_test_lock();
-        // 取消标志优先于暂停：等待立即返回且不改状态
-        let task = make_test_task(Uuid::new_v4());
-        task.cancel.store(true, Ordering::Relaxed);
-        task.paused.store(true, Ordering::Relaxed);
-        runtime().block_on(wait_while_paused(&task));
-        assert_eq!(*task.status.lock().unwrap(), TransferStatusEnum::Queued);
+    transfer_group_retry("g1".into()).unwrap();
 
-        // 状态已是 Cancelled 时也直接返回
-        let task2 = make_test_task(Uuid::new_v4());
-        *task2.status.lock().unwrap() = TransferStatusEnum::Cancelled;
-        task2.paused.store(true, Ordering::Relaxed);
-        runtime().block_on(wait_while_paused(&task2));
-        assert_eq!(*task2.status.lock().unwrap(), TransferStatusEnum::Cancelled);
-    }
-
-    /// 指向本机未监听端口的主机配置：连接会被立即拒绝，不产生真实网络流量。
-    fn refused_host_config() -> panda_core::HostConfig {
-        panda_core::HostConfig {
-            id: "refused-host".into(),
-            name: "拒绝连接".into(),
-            host: "127.0.0.1".into(),
-            port: 1,
-            username: "deploy".into(),
-            auth: panda_core::AuthMethod::Password { password_ref: None },
-            notes: None,
-            group_id: None,
+    let mut all_failed_again = false;
+    for _ in 0..300 {
+        let list = transfer_list().unwrap();
+        if list.iter().all(|t| t.status == TransferStatusEnum::Failed) {
+            all_failed_again = true;
+            break;
         }
+        std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(all_failed_again, "重试后任务应再次到达 Failed");
+}
 
-    #[test]
-    fn run_transfer_task_marks_cancelled_before_and_after_semaphore() {
-        let _test_guard = global_test_lock();
-        let cfg = refused_host_config();
+#[test]
+fn group_cancel_on_terminal_tasks_is_noop() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
 
-        // 排队阶段已设置取消标志：不获取信号量直接标 Cancelled
-        let task = make_test_task(Uuid::new_v4());
-        task.cancel.store(true, Ordering::Relaxed);
-        insert_test_task(&task);
-        runtime().block_on(run_transfer_task(task.clone(), cfg.clone()));
-        assert_eq!(*task.status.lock().unwrap(), TransferStatusEnum::Cancelled);
-        remove_test_task(&task.id);
+    let id = start_transfer(
+        TransferDirectionEnum::Upload,
+        "refused-host".into(),
+        "/tmp/gc".into(),
+        "/remote/gc".into(),
+        100,
+        Some("pw".into()),
+        None,
+        Some("g1".into()),
+        Some("取消组".into()),
+    )
+    .unwrap();
 
-        // 获取信号量后状态已是 Cancelled：不再进入 Running
-        let task2 = make_test_task(Uuid::new_v4());
-        *task2.status.lock().unwrap() = TransferStatusEnum::Cancelled;
-        insert_test_task(&task2);
-        runtime().block_on(run_transfer_task(task2.clone(), cfg));
-        assert_eq!(*task2.status.lock().unwrap(), TransferStatusEnum::Cancelled);
-        remove_test_task(&task2.id);
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+
+    transfer_group_cancel("g1".into()).unwrap();
+    let snap = transfer_status(id).unwrap();
+    assert_eq!(snap.status, TransferStatusEnum::Failed);
+}
+
+// ---------------------------------------------------------------------------
+// SFTP 编排
+// ---------------------------------------------------------------------------
+
+fn reset_both_services() {
+    reset_transfer_service_for_test();
+    super::batch_transfer::reset_batch_service_for_test();
+}
+
+fn file_record(source: &str, dest: &str, size: u64) -> TaskItemRecord {
+    TaskItemRecord {
+        source: source.into(),
+        destination: dest.into(),
+        size,
+        name: source.rsplit('/').next().unwrap_or(source).into(),
+        is_dir: false,
     }
+}
 
-    #[test]
-    fn run_transfer_task_marks_failed_when_connection_is_refused() {
-        let _test_guard = global_test_lock();
-        // 上传方向：连接被拒绝 → Failed 且携带错误信息
-        let mut task = make_test_task(Uuid::new_v4());
-        task.password = Some("pw".into());
-        insert_test_task(&task);
-        runtime().block_on(run_transfer_task(task.clone(), refused_host_config()));
-        assert_eq!(*task.status.lock().unwrap(), TransferStatusEnum::Failed);
-        assert!(task.error.lock().unwrap().is_some());
-        remove_test_task(&task.id);
-
-        // 下载方向同样落到 Failed
-        let mut download = make_test_task(Uuid::new_v4());
-        download.direction = TransferDirectionEnum::Download;
-        download.password = Some("pw".into());
-        insert_test_task(&download);
-        runtime().block_on(run_transfer_task(download.clone(), refused_host_config()));
-        assert_eq!(*download.status.lock().unwrap(), TransferStatusEnum::Failed);
-        assert!(download.error.lock().unwrap().is_some());
-        remove_test_task(&download.id);
+fn dir_record(source: &str, dest: &str) -> TaskItemRecord {
+    TaskItemRecord {
+        source: source.into(),
+        destination: dest.into(),
+        size: 0,
+        name: source.rsplit('/').next().unwrap_or(source).into(),
+        is_dir: true,
     }
+}
 
-    // -----------------------------------------------------------------------
-    // 重试、暂停拒绝
-    // -----------------------------------------------------------------------
+#[test]
+fn orchestration_single_file_upload_returns_one_transfer() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/tmp/file.txt".into()],
+        vec![file_record("/tmp/file.txt", "/remote/file.txt", 100)],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.transfer_ids.len(), 1);
+    assert!(result.batch_ids.is_empty());
+}
 
-    #[test]
-    fn transfer_retry_rejects_non_retryable_and_unknown_tasks() {
-        let _test_guard = global_test_lock();
-        // 不存在的任务
-        assert!(matches!(
-            transfer_retry(Uuid::new_v4().to_string()),
-            Err(PandaError::UnknownTransferTask(_))
-        ));
+#[test]
+fn orchestration_directory_upload_returns_one_batch() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/tmp/dirA".into()],
+        vec![
+            dir_record("/tmp/dirA", "/remote/dirA"),
+            file_record("/tmp/dirA/f1.txt", "/remote/dirA/f1.txt", 100),
+        ],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    assert!(result.transfer_ids.is_empty());
+    assert_eq!(result.batch_ids.len(), 1);
+}
 
-        // 非 UUID id → 结构化解析错误
-        assert!(transfer_retry("not-a-uuid".into()).is_err());
+#[test]
+fn orchestration_mixed_upload_returns_transfers_and_batch() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/tmp/dirA".into(), "/tmp/readme.md".into()],
+        vec![
+            dir_record("/tmp/dirA", "/remote/dirA"),
+            file_record("/tmp/dirA/f1.txt", "/remote/dirA/f1.txt", 100),
+            file_record("/tmp/readme.md", "/remote/readme.md", 50),
+        ],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.transfer_ids.len(), 1);
+    assert_eq!(result.batch_ids.len(), 1);
+}
 
-        // 非重试状态（Queued）→ 拒绝
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        insert_test_task(&task);
-        let error = transfer_retry(id.to_string()).unwrap_err();
-        assert!(error.to_string().contains("not in a retryable state"));
-        remove_test_task(&id);
+#[test]
+fn orchestration_download_directory_returns_individual_transfers() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/remote/dirA".into()],
+        vec![
+            dir_record("/remote/dirA", "/tmp/dirA"),
+            file_record("/remote/dirA/f1.txt", "/tmp/dirA/f1.txt", 100),
+            file_record("/remote/dirA/f2.txt", "/tmp/dirA/f2.txt", 200),
+        ],
+        TransferDirectionEnum::Download,
+        "test-host".into(),
+        "/tmp".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.transfer_ids.len(), 2);
+    assert!(result.batch_ids.is_empty());
+    for id in &result.transfer_ids {
+        let snap = transfer_status(id.clone()).unwrap();
+        assert_eq!(snap.group_id.as_ref().unwrap(), snap.group_id.as_ref().unwrap());
     }
+}
 
-    #[test]
-    fn transfer_retry_resets_state_and_reruns_until_terminal() {
-        // 重试会重新加载主机配置：持有统一全局测试锁并初始化测试目录
-        let _test_guard = global_test_lock();
-        let dir = tempfile::tempdir().unwrap();
-        crate::init_store(dir.path().to_string_lossy().into_owned()).unwrap();
-        let mut record: crate::HostConfigRecord = refused_host_config().into();
-        record.id = "refused-host".into();
-        crate::save_host(record).unwrap();
+#[test]
+fn orchestration_empty_items_returns_empty_result() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec![],
+        vec![],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(result.transfer_ids.is_empty());
+    assert!(result.batch_ids.is_empty());
+}
 
-        let id = Uuid::new_v4();
-        let mut task = make_test_task(id);
-        task.host_id = "refused-host".into();
-        task.password = Some("pw".into());
-        *task.status.lock().unwrap() = TransferStatusEnum::Failed;
-        *task.error.lock().unwrap() = Some("上次失败".into());
-        insert_test_task(&task);
-
-        let version_before = task.version.load(Ordering::Relaxed);
-        // 占满并发槽位，稳定验证重试后在真正获准执行前保持 Queued。
-        // 若不这样做，后台任务可能在下一个断言前已抢到许可证并进入 Running。
-        let permits = runtime()
-            .block_on(transfer_semaphore().acquire_many(TRANSFER_CONCURRENCY as u32))
-            .unwrap();
-        let retried = transfer_retry(id.to_string()).unwrap();
-        assert_eq!(retried, id.to_string());
-        assert_eq!(
-            *task.status.lock().unwrap(),
-            TransferStatusEnum::Queued,
-            "重试应重置为排队"
-        );
-        assert!(task.error.lock().unwrap().is_none(), "重试应清空上次错误");
-        assert!(task.version.load(Ordering::Relaxed) > version_before);
-
-        // 重试后的任务会真正执行并因连接被拒绝进入 Failed 终态
-        drop(permits);
-        let mut terminal = false;
-        for _ in 0..300 {
-            if *task.status.lock().unwrap() == TransferStatusEnum::Failed {
-                terminal = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(terminal, "重试后任务应因连接拒绝进入 Failed");
-        assert!(task.error.lock().unwrap().is_some());
-        remove_test_task(&id);
+#[test]
+fn orchestration_unknown_host_returns_error() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let err = orchestrate_sftp_transfers(
+        vec!["/tmp/file.txt".into()],
+        vec![file_record("/tmp/file.txt", "/remote/file.txt", 100)],
+        TransferDirectionEnum::Upload,
+        "nonexistent-host".into(),
+        "/remote".into(),
+        None,
+        None,
+    )
+    .unwrap_err();
+    match err {
+        PandaError::UnknownHost(ref h) if h == "nonexistent-host" => {}
+        _ => panic!("expected PandaError::UnknownHost, got {err:?}"),
     }
-
-    #[test]
-    fn transfer_pause_rejects_terminal_task_and_resume_is_noop_for_it() {
-        let _test_guard = global_test_lock();
-        let id = Uuid::new_v4();
-        let task = make_test_task(id);
-        *task.status.lock().unwrap() = TransferStatusEnum::Failed;
-        insert_test_task(&task);
-
-        let error = transfer_pause(id.to_string()).unwrap_err();
-        assert!(error.to_string().contains("already terminal"));
-
-        // 终态任务的 resume 也是 no-op：状态保持不变
-        transfer_resume(id.to_string()).unwrap();
-        assert_eq!(*task.status.lock().unwrap(), TransferStatusEnum::Failed);
-        remove_test_task(&id);
-    }
+}

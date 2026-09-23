@@ -12,7 +12,6 @@ final class PandaCoreBackend: AppBackend {
     init() {
         do {
             try PandaCoreBridge.shared.start()
-            try PandaCoreBridge.shared.initializeSnippets(at: AppPaths.snippetsDirectoryURL)
             Logger.shared.info("FFI 初始化成功", module: LogModule.ffi)
         } catch {
             startupError = error.localizedDescription
@@ -40,46 +39,29 @@ final class PandaCoreBackend: AppBackend {
 
     @discardableResult
     func saveHost(_ host: HostEntry, password: String?, passphrase: String?) -> Bool {
-        // 密钥材料先写本地凭据仓库，失败则中止保存——否则 ref 会落进 hosts.toml。
-        // 保存配置后才清理废弃引用，避免配置保存失败时形成悬空引用。
-        let oldPasswordRef = existingPasswordRef(for: host.id)
-        let oldPassphraseRef = existingPassphraseRef(for: host.id)
-        var passwordSaved = false
-        var passphraseSaved = false
-        switch host.auth {
-        case .password where host.passwordSaved:
-            if let password, !password.isEmpty {
-                guard (try? PandaCoreBridge.shared.storeCredential(reference: "host.\(host.id).password", secret: password)) != nil else { return false }
-                passwordSaved = true
-            } else if oldPasswordRef != nil {
-                // 编辑场景:未输入新密码且开关保持打开 → 保留已有 ref
-                passwordSaved = true
-            }
-        case .password: break
-        case .publicKey where host.passphraseSaved:
-            if let passphrase, !passphrase.isEmpty {
-                guard (try? PandaCoreBridge.shared.storeCredential(reference: "host.\(host.id).passphrase", secret: passphrase)) != nil else { return false }
-                passphraseSaved = true
-            } else if oldPassphraseRef != nil {
-                passphraseSaved = true
-            }
-        case .publicKey: break
-        }
-        var entry = host
-        entry.passwordSaved = passwordSaved
-        entry.passphraseSaved = passphraseSaved
         do {
-            try PandaCoreBridge.shared.save(host: entry.toConfigRecord())
-            let retainedRefs = Set([entry.passwordSaved ? "host.\(entry.id).password" : nil,
-                                    entry.passphraseSaved ? "host.\(entry.id).passphrase" : nil].compactMap { $0 })
-            for reference in [oldPasswordRef, oldPassphraseRef].compactMap({ $0 }) where !retainedRefs.contains(reference) {
-                try PandaCoreBridge.shared.removeCredential(reference: reference)
-            }
+            _ = try PandaCoreBridge.shared.saveHostComplete(
+                host: host.toConfigRecord(),
+                password: credentialIntent(
+                    enabled: host.auth == .password && host.passwordSaved,
+                    secret: password
+                ),
+                passphrase: credentialIntent(
+                    enabled: host.auth == .publicKey && host.passphraseSaved,
+                    secret: passphrase
+                )
+            )
             return true
         } catch {
             startupError = error.localizedDescription
             return false
         }
+    }
+
+    private func credentialIntent(enabled: Bool, secret: String?) -> CredentialIntentEnum {
+        guard enabled else { return .remove }
+        guard let secret, !secret.isEmpty else { return .preserve }
+        return .set(secret: secret)
     }
 
     func deleteHost(id: String) {

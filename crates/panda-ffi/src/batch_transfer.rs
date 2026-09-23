@@ -1,19 +1,19 @@
-//! 批量 SFTP 传输的 FFI 暴露。
+//! 批量 SFTP 传输的 FFI 薄桥。
 //!
-//! 与单文件传输独立：使用单独的注册表，避免改动现有 TransferTask 结构。
+//! 业务逻辑已全部迁入 `panda_core::batch::BatchTransferService`；
+//! 本模块仅负责类型转换、全局服务生命周期和实际 SSH/SFTP 执行。
 
-use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use panda_core::{
     execute_batch_download, execute_batch_upload, scan_local_sources, scan_remote_sources,
-    BatchTransferOptions, ConflictResolution, Credentials, KnownHosts, SftpClient, SshSession,
-    UnknownHostKeyPolicy,
+    BatchConflictInfo, BatchContext, BatchDirection, BatchExecutor, BatchOutcome, BatchServiceParams,
+    BatchStatus, BatchTaskSnapshot, BatchTransferOptions, BatchTransferService,
+    FileConflictInfo, KnownHosts, SftpClient, SshSession, UnknownHostKeyPolicy,
 };
-use uuid::Uuid;
 
 use super::notify_transfer_changed;
 use crate::ffi_runtime::runtime;
@@ -25,7 +25,7 @@ use crate::PandaError;
 // ---------------------------------------------------------------------------
 
 /// 批量传输方向。
-#[derive(Debug, Clone, Copy, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum BatchTransferDirectionEnum {
     Upload,
     Download,
@@ -36,7 +36,6 @@ pub enum BatchTransferDirectionEnum {
 pub enum BatchTransferStatusEnum {
     Queued,
     Running,
-    /// 单个目标文件已存在，暂停等待 UI 覆盖确认。
     WaitingForConflict,
     Completed,
     Failed,
@@ -44,7 +43,6 @@ pub enum BatchTransferStatusEnum {
 }
 
 /// 批量传输中单个文件的覆盖确认信息。
-/// 与单文件传输的 `RemoteFileConflictRecord` 同构，额外携带源/目标路径。
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct BatchConflictRecord {
     pub item_source: String,
@@ -67,7 +65,6 @@ pub struct BatchTransferStatusRecord {
     pub transferred: u64,
     pub status: BatchTransferStatusEnum,
     pub error: Option<String>,
-    /// 等待覆盖确认时的冲突信息；其余状态为 None。
     pub pending_conflict: Option<BatchConflictRecord>,
 }
 
@@ -81,57 +78,257 @@ pub struct BatchItemRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Internal task record
+// Type conversions
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct BatchTransferTask {
-    id: Uuid,
-    direction: BatchTransferDirectionEnum,
-    host_id: String,
-    dest_dir: String,
-    sources: Vec<String>,
-    password: Option<String>,
-    passphrase: Option<String>,
-    total_size: Arc<AtomicU64>,
-    transferred: Arc<AtomicU64>,
-    status: Arc<Mutex<BatchTransferStatusEnum>>,
-    error: Arc<Mutex<Option<String>>>,
-    cancel: Arc<AtomicBool>,
-    /// 等待覆盖确认时对外暴露的冲突信息。
-    pending_conflict: Arc<Mutex<Option<BatchConflictRecord>>>,
-    /// 冲突决策回传通道：Swift 调用 `batch_transfer_resolve_conflict` 时经此发送。
-    conflict_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<ConflictResolution>>>>,
-}
-
-impl BatchTransferTask {
-    fn snapshot(&self) -> BatchTransferStatusRecord {
-        BatchTransferStatusRecord {
-            id: self.id.to_string(),
-            direction: self.direction,
-            host_id: self.host_id.clone(),
-            dest_dir: self.dest_dir.clone(),
-            sources: self.sources.clone(),
-            total_size: self.total_size.load(Ordering::Relaxed),
-            transferred: self.transferred.load(Ordering::Relaxed),
-            status: *self.status.lock().unwrap(),
-            error: self.error.lock().unwrap().clone(),
-            pending_conflict: self.pending_conflict.lock().unwrap().clone(),
-        }
+#[cfg(test)]
+fn to_core_direction(d: BatchTransferDirectionEnum) -> BatchDirection {
+    match d {
+        BatchTransferDirectionEnum::Upload => BatchDirection::Upload,
+        BatchTransferDirectionEnum::Download => BatchDirection::Download,
     }
 }
 
-static BATCH_TRANSFER_TASKS: OnceLock<Mutex<HashMap<Uuid, BatchTransferTask>>> = OnceLock::new();
+fn from_core_direction(d: BatchDirection) -> BatchTransferDirectionEnum {
+    match d {
+        BatchDirection::Upload => BatchTransferDirectionEnum::Upload,
+        BatchDirection::Download => BatchTransferDirectionEnum::Download,
+    }
+}
 
-fn batch_transfer_tasks() -> &'static Mutex<HashMap<Uuid, BatchTransferTask>> {
-    BATCH_TRANSFER_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
+fn from_core_status(s: BatchStatus) -> BatchTransferStatusEnum {
+    match s {
+        BatchStatus::Queued => BatchTransferStatusEnum::Queued,
+        BatchStatus::Running => BatchTransferStatusEnum::Running,
+        BatchStatus::WaitingForConflict => BatchTransferStatusEnum::WaitingForConflict,
+        BatchStatus::Completed => BatchTransferStatusEnum::Completed,
+        BatchStatus::Failed => BatchTransferStatusEnum::Failed,
+        BatchStatus::Cancelled => BatchTransferStatusEnum::Cancelled,
+    }
+}
+
+fn from_core_conflict(info: BatchConflictInfo) -> BatchConflictRecord {
+    BatchConflictRecord {
+        item_source: info.item_source,
+        item_destination: info.item_destination,
+        source_size: info.source_size,
+        source_mtime: info.source_mtime,
+        target_size: info.target_size,
+        target_mtime: info.target_mtime,
+    }
+}
+
+fn snapshot_to_record(s: BatchTaskSnapshot) -> BatchTransferStatusRecord {
+    BatchTransferStatusRecord {
+        id: s.id,
+        direction: from_core_direction(s.direction),
+        host_id: s.host_id,
+        dest_dir: s.dest_dir,
+        sources: s.sources,
+        total_size: s.total_size,
+        transferred: s.transferred,
+        status: from_core_status(s.status),
+        error: s.error,
+        pending_conflict: s.pending_conflict.map(from_core_conflict),
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Public FFI API
+// FFI executor — 实际 SSH/SFTP 连接 + 扫描 + 传输
 // ---------------------------------------------------------------------------
 
-/// Start a batch upload task. `sources` are local paths; `dest_dir` is the remote target directory.
+struct FfiBatchExecutor;
+
+impl BatchExecutor for FfiBatchExecutor {
+    fn execute(&self, ctx: &BatchContext) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>> {
+        let host_id = ctx.host_id.clone();
+        let sources = ctx.sources.clone();
+        let dest_dir = ctx.dest_dir.clone();
+        let password = ctx.password.clone();
+        let passphrase = ctx.passphrase.clone();
+        let direction = ctx.direction;
+        let progress = ctx.progress.clone();
+        let cancel = ctx.cancel.clone();
+        let conflict_resolver = ctx.conflict.clone();
+
+        Box::pin(async move {
+            let cfg = match load_host(&host_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    return BatchOutcome {
+                        completed: vec![],
+                        skipped: vec![],
+                        errors: vec![e.to_string()],
+                        cancelled: false,
+                    }
+                }
+            };
+            let creds = match store_credentials_for(&cfg, password, passphrase) {
+                Ok(c) => c,
+                Err(e) => {
+                    return BatchOutcome {
+                        completed: vec![],
+                        skipped: vec![],
+                        errors: vec![e.to_string()],
+                        cancelled: false,
+                    }
+                }
+            };
+            let store_path = match stores() {
+                Ok(s) => s.core.known_hosts_store().path().to_path_buf(),
+                Err(e) => {
+                    return BatchOutcome {
+                        completed: vec![],
+                        skipped: vec![],
+                        errors: vec![e.to_string()],
+                        cancelled: false,
+                    }
+                }
+            };
+            let mut known_hosts = KnownHosts::new(store_path);
+            let session = match SshSession::connect_shared(
+                &cfg,
+                creds,
+                &mut known_hosts,
+                UnknownHostKeyPolicy::Reject,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    return BatchOutcome {
+                        completed: vec![],
+                        skipped: vec![],
+                        errors: vec![e.to_string()],
+                        cancelled: false,
+                    }
+                }
+            };
+            session.set_owner("批量传输", host_id.clone());
+            let sftp = match SftpClient::new(&session).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return BatchOutcome {
+                        completed: vec![],
+                        skipped: vec![],
+                        errors: vec![e.to_string()],
+                        cancelled: false,
+                    }
+                }
+            };
+
+            let resolver = conflict_resolver.clone();
+            let conflict_cb: panda_core::BatchConflictCallback = Arc::new(
+                move |item: &panda_core::BatchItem, info: &FileConflictInfo| {
+                    resolver.set_pending(BatchConflictInfo {
+                        item_source: item.source.clone(),
+                        item_destination: item.destination.clone(),
+                        source_size: info.source_size,
+                        source_mtime: info.source_mtime,
+                        target_size: info.target_size,
+                        target_mtime: info.target_mtime,
+                    });
+                    let resolution = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(resolver.resolve())
+                    });
+                    resolver.clear_pending();
+                    resolution
+                },
+            );
+
+            let scan_result = match direction {
+                BatchDirection::Upload => {
+                    let paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+                    scan_local_sources(&paths, &dest_dir, &Default::default()).await
+                }
+                BatchDirection::Download => {
+                    scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await
+                }
+            };
+
+            let plan = match scan_result {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = sftp.close().await;
+                    return BatchOutcome {
+                        completed: vec![],
+                        skipped: vec![],
+                        errors: vec![e.to_string()],
+                        cancelled: false,
+                    };
+                }
+            };
+
+            progress(0, plan.total_size);
+
+            let options = BatchTransferOptions::default();
+            let outcome = match direction {
+                BatchDirection::Upload => {
+                    execute_batch_upload(
+                        &sftp,
+                        &plan,
+                        &options,
+                        Some(conflict_cb),
+                        Some(progress),
+                        Some(cancel),
+                    )
+                    .await
+                }
+                BatchDirection::Download => {
+                    execute_batch_download(
+                        &sftp,
+                        &plan,
+                        &options,
+                        Some(conflict_cb),
+                        Some(progress),
+                        Some(cancel),
+                    )
+                    .await
+                }
+            };
+
+            let _ = sftp.close().await;
+            match outcome {
+                Ok(o) => o,
+                Err(e) => BatchOutcome {
+                    completed: vec![],
+                    skipped: vec![],
+                    errors: vec![e.to_string()],
+                    cancelled: false,
+                },
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global service state
+// ---------------------------------------------------------------------------
+
+static BATCH_SERVICE: Mutex<Option<BatchTransferService>> = Mutex::new(None);
+
+pub(super) fn batch_service() -> BatchTransferService {
+    let mut guard = BATCH_SERVICE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(ref svc) = *guard {
+        return svc.clone();
+    }
+    let params = BatchServiceParams {
+        conflict_timeout: std::time::Duration::from_secs(300),
+        on_change: Some(Arc::new(|| {
+            notify_transfer_changed();
+        })),
+    };
+    let svc = BatchTransferService::with_params(Box::new(FfiBatchExecutor), params);
+    *guard = Some(svc.clone());
+    svc
+}
+
+// ---------------------------------------------------------------------------
+// FFI exports — 薄代理至核心 BatchTransferService
+// ---------------------------------------------------------------------------
+
 #[uniffi::export]
 pub fn start_batch_upload(
     host_id: String,
@@ -140,17 +337,13 @@ pub fn start_batch_upload(
     password: Option<String>,
     passphrase: Option<String>,
 ) -> Result<String, PandaError> {
-    start_batch_transfer(
-        BatchTransferDirectionEnum::Upload,
-        host_id,
-        sources,
-        dest_dir,
-        password,
-        passphrase,
-    )
+    let _cfg = load_host(&host_id)?;
+    let svc = batch_service();
+    runtime()
+        .block_on(async { svc.start_upload(host_id, sources, dest_dir, password, passphrase) })
+        .map_err(|e| PandaError::Core(e.to_string()))
 }
 
-/// Start a batch download task. `sources` are remote paths; `dest_dir` is the local target directory.
 #[uniffi::export]
 pub fn start_batch_download(
     host_id: String,
@@ -159,18 +352,13 @@ pub fn start_batch_download(
     password: Option<String>,
     passphrase: Option<String>,
 ) -> Result<String, PandaError> {
-    start_batch_transfer(
-        BatchTransferDirectionEnum::Download,
-        host_id,
-        sources,
-        dest_dir,
-        password,
-        passphrase,
-    )
+    let _cfg = load_host(&host_id)?;
+    let svc = batch_service();
+    runtime()
+        .block_on(async { svc.start_download(host_id, sources, dest_dir, password, passphrase) })
+        .map_err(|e| PandaError::Core(e.to_string()))
 }
 
-/// Scan local sources and return the flattened list of items (files and directories)
-/// with their destination paths under `dest_dir`.
 #[uniffi::export]
 pub fn scan_local_batch(
     sources: Vec<String>,
@@ -195,14 +383,10 @@ pub fn scan_local_batch(
         .await;
         let _ = tx.send(result);
     });
-    // FFI 线程仅等待 oneshot 结果；实际 I/O 在 spawn 的 tokio 任务中执行，
-    // 不占住调用线程对应的 worker slot。
     rx.blocking_recv()
         .map_err(|_| PandaError::Core("scan_local_batch: task dropped".into()))?
 }
 
-/// Scan remote sources and return the flattened list of items (files and directories)
-/// with their destination paths under `dest_dir`.
 #[uniffi::export]
 pub fn scan_remote_batch(
     host_id: String,
@@ -215,20 +399,20 @@ pub fn scan_remote_batch(
     let (tx, rx) = tokio::sync::oneshot::channel();
     runtime().spawn(async move {
         let result = async {
-            let creds = credentials_for(&cfg, password.clone(), passphrase.clone())
-                .map_err(|e| PandaError::Core(e))?;
-            let store_path = stores()?.known_hosts.path().to_path_buf();
+            let creds = store_credentials_for(&cfg, password.clone(), passphrase.clone())?;
+            let store_path = stores()?.core.known_hosts_store().path().to_path_buf();
             let mut known_hosts = KnownHosts::new(store_path);
             let session = SshSession::connect_shared(
                 &cfg,
                 creds,
                 &mut known_hosts,
-                UnknownHostKeyPolicy::AcceptAndStore,
+                UnknownHostKeyPolicy::Reject,
             )
             .await?;
             session.set_owner("批量扫描", host_id.clone());
             let sftp = SftpClient::new(&session).await?;
-            let plan = scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
+            let plan =
+                scan_remote_sources(&sftp, &sources, &dest_dir, &Default::default()).await?;
             let _ = sftp.close().await;
             Ok(plan
                 .items
@@ -248,325 +432,67 @@ pub fn scan_remote_batch(
         .map_err(|_| PandaError::Core("scan_remote_batch: task dropped".into()))?
 }
 
-fn start_batch_transfer(
-    direction: BatchTransferDirectionEnum,
-    host_id: String,
-    sources: Vec<String>,
-    dest_dir: String,
-    password: Option<String>,
-    passphrase: Option<String>,
-) -> Result<String, PandaError> {
-    let cfg = load_host(&host_id)?;
-    let id = Uuid::new_v4();
-    let task = BatchTransferTask {
-        id,
-        direction,
-        host_id,
-        dest_dir,
-        sources,
-        password,
-        passphrase,
-        total_size: Arc::new(AtomicU64::new(0)),
-        transferred: Arc::new(AtomicU64::new(0)),
-        status: Arc::new(Mutex::new(BatchTransferStatusEnum::Queued)),
-        error: Arc::new(Mutex::new(None)),
-        cancel: Arc::new(AtomicBool::new(false)),
-        pending_conflict: Arc::new(Mutex::new(None)),
-        conflict_tx: Arc::new(Mutex::new(None)),
-    };
-    batch_transfer_tasks()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, task.clone());
-    notify_transfer_changed();
-
-    runtime().spawn(async move {
-        run_batch_transfer_task(task, cfg).await;
-    });
-    Ok(id.to_string())
-}
-
-async fn run_batch_transfer_task(task: BatchTransferTask, cfg: panda_core::HostConfig) {
-    {
-        let mut status = task.status.lock().unwrap();
-        if *status == BatchTransferStatusEnum::Cancelled {
-            return;
-        }
-        *status = BatchTransferStatusEnum::Running;
-    }
-    notify_transfer_changed();
-
-    let creds = match credentials_for(&cfg, task.password.clone(), task.passphrase.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-            *task.error.lock().unwrap() = Some(e);
-            notify_transfer_changed();
-            return;
-        }
-    };
-
-    let store_path = match stores() {
-        Ok(s) => s.known_hosts.path().to_path_buf(),
-        Err(e) => {
-            *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-            *task.error.lock().unwrap() = Some(e.to_string());
-            notify_transfer_changed();
-            return;
-        }
-    };
-    let mut known_hosts = KnownHosts::new(store_path);
-    let session = match SshSession::connect_shared(
-        &cfg,
-        creds,
-        &mut known_hosts,
-        UnknownHostKeyPolicy::AcceptAndStore,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-            *task.error.lock().unwrap() = Some(e.to_string());
-            notify_transfer_changed();
-            return;
-        }
-    };
-    session.set_owner("批量传输", task.id.to_string());
-    let sftp = match SftpClient::new(&session).await {
-        Ok(s) => s,
-        Err(e) => {
-            *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-            *task.error.lock().unwrap() = Some(e.to_string());
-            notify_transfer_changed();
-            return;
-        }
-    };
-
-    let options = BatchTransferOptions::default();
-    // 目标已存在时暂停该文件，向 Swift 暴露冲突信息并等待决策；
-    // Swift 调用 batch_transfer_resolve_conflict 回传覆盖/跳过。
-    let pending_conflict = task.pending_conflict.clone();
-    let conflict_tx = task.conflict_tx.clone();
-    let task_status = task.status.clone();
-    let conflict_cb = Arc::new(
-        move |item: &panda_core::BatchItem, info: &panda_core::FileConflictInfo| {
-            // 记录冲突信息并进入等待状态，供 Swift 轮询呈现。
-            *pending_conflict.lock().unwrap() = Some(BatchConflictRecord {
-                item_source: item.source.clone(),
-                item_destination: item.destination.clone(),
-                source_size: info.source_size,
-                source_mtime: info.source_mtime,
-                target_size: info.target_size,
-                target_mtime: info.target_mtime,
-            });
-            *task_status.lock().unwrap() = BatchTransferStatusEnum::WaitingForConflict;
-
-            // 创建一次性决策通道；batch_transfer_resolve_conflict / cancel 经此回传。
-            let rx = {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                *conflict_tx.lock().unwrap() = Some(tx);
-                rx
-            };
-            notify_transfer_changed();
-            // 使用 block_in_place 将当前 worker 线程标记为阻塞线程，
-            // tokio 会补充新的 worker，避免线程饥饿。
-            // 异步等待决策；取消由 cancel 发 Skip 唤醒，超时兜底按跳过处理。
-            let resolution =
-                tokio::task::block_in_place(|| {
-                    match tokio::runtime::Handle::current()
-                        .block_on(tokio::time::timeout(Duration::from_secs(300), rx))
-                    {
-                        Ok(Ok(ConflictResolution::Overwrite)) => ConflictResolution::Overwrite,
-                        Ok(Ok(ConflictResolution::Skip)) | Ok(Err(_)) | Err(_) => {
-                            ConflictResolution::Skip
-                        }
-                    }
-                });
-            // 超时或取消也清除待决策快照；由执行循环决定最终状态。
-            *pending_conflict.lock().unwrap() = None;
-            *task_status.lock().unwrap() = BatchTransferStatusEnum::Running;
-            notify_transfer_changed();
-            resolution
-        },
-    );
-
-    let scan_result = match task.direction {
-        BatchTransferDirectionEnum::Upload => {
-            let paths: Vec<PathBuf> = task.sources.iter().map(PathBuf::from).collect();
-            scan_local_sources(&paths, &task.dest_dir, &Default::default()).await
-        }
-        BatchTransferDirectionEnum::Download => {
-            scan_remote_sources(&sftp, &task.sources, &task.dest_dir, &Default::default()).await
-        }
-    };
-
-    let plan = match scan_result {
-        Ok(plan) => {
-            task.total_size.store(plan.total_size, Ordering::Relaxed);
-            notify_transfer_changed();
-            plan
-        }
-        Err(e) => {
-            *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-            *task.error.lock().unwrap() = Some(e.to_string());
-            notify_transfer_changed();
-            let _ = sftp.close().await;
-            return;
-        }
-    };
-
-    let transferred = task.transferred.clone();
-    let progress = Arc::new(move |done: u64, _total: u64| {
-        transferred.store(done, Ordering::Relaxed);
-        notify_transfer_changed();
-    });
-
-    let outcome = match task.direction {
-        BatchTransferDirectionEnum::Upload => {
-            execute_batch_upload(
-                &sftp,
-                &plan,
-                &options,
-                Some(conflict_cb),
-                Some(progress),
-                Some(task.cancel.clone()),
-            )
-            .await
-        }
-        BatchTransferDirectionEnum::Download => {
-            execute_batch_download(
-                &sftp,
-                &plan,
-                &options,
-                Some(conflict_cb),
-                Some(progress),
-                Some(task.cancel.clone()),
-            )
-            .await
-        }
-    };
-
-    let _ = sftp.close().await;
-
-    match outcome {
-        Ok(outcome) => {
-            // 等待覆盖确认期间被取消：即使最后一项刚被跳过，也以取消收尾。
-            if outcome.cancelled || task.cancel.load(Ordering::Relaxed) {
-                *task.status.lock().unwrap() = BatchTransferStatusEnum::Cancelled;
-            } else if !outcome.errors.is_empty() {
-                *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-                *task.error.lock().unwrap() = Some(outcome.errors.join("; "));
-            } else {
-                *task.status.lock().unwrap() = BatchTransferStatusEnum::Completed;
-                task.transferred
-                    .store(task.total_size.load(Ordering::Relaxed), Ordering::Relaxed);
-            }
-        }
-        Err(e) => {
-            if task.cancel.load(Ordering::Relaxed) {
-                *task.status.lock().unwrap() = BatchTransferStatusEnum::Cancelled;
-            } else {
-                *task.status.lock().unwrap() = BatchTransferStatusEnum::Failed;
-                *task.error.lock().unwrap() = Some(e.to_string());
-                notify_transfer_changed();
-            }
-        }
-    }
-    *task.pending_conflict.lock().unwrap() = None;
-    notify_transfer_changed();
-}
-
-fn credentials_for(
-    cfg: &panda_core::HostConfig,
-    password: Option<String>,
-    passphrase: Option<String>,
-) -> Result<Credentials, String> {
-    store_credentials_for(cfg, password, passphrase).map_err(|e| e.to_string())
-}
-
-/// Get a single batch task's current status.
 #[uniffi::export]
-pub fn batch_transfer_status(task_id: String) -> Result<BatchTransferStatusRecord, PandaError> {
-    let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
-    let tasks = batch_transfer_tasks().lock().unwrap();
-    let task = tasks
-        .get(&id)
-        .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
-    Ok(task.snapshot())
+pub fn batch_transfer_status(
+    task_id: String,
+) -> Result<BatchTransferStatusRecord, PandaError> {
+    let snap = batch_service()
+        .status(&task_id)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("未知任务") || msg.contains("无效任务") {
+                PandaError::UnknownTransferTask(task_id.clone())
+            } else {
+                PandaError::Core(msg)
+            }
+        })?;
+    Ok(snapshot_to_record(snap))
 }
 
-/// List all batch tasks ordered by id.
 #[uniffi::export]
 pub fn batch_transfer_list() -> Result<Vec<BatchTransferStatusRecord>, PandaError> {
-    let tasks = batch_transfer_tasks().lock().unwrap();
-    let mut records: Vec<_> = tasks.values().map(|t| t.snapshot()).collect();
-    records.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(records)
+    let list = batch_service().list();
+    Ok(list.into_iter().map(snapshot_to_record).collect())
 }
 
-/// Cancel a queued, running or conflict-waiting batch task.
-/// 若任务正等待覆盖确认，唤醒等待者（按跳过处理）后由取消标志终止。
 #[uniffi::export]
 pub fn batch_transfer_cancel(task_id: String) -> Result<(), PandaError> {
-    let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
-    let mut tasks = batch_transfer_tasks().lock().unwrap();
-    let task = tasks
-        .get_mut(&id)
-        .ok_or_else(|| PandaError::UnknownTransferTask(task_id))?;
-    task.cancel.store(true, Ordering::Relaxed);
-    // 正在等待覆盖确认：唤醒等待者（发送 Skip），执行循环将在下一轮检测取消。
-    if let Some(tx) = task.conflict_tx.lock().unwrap().take() {
-        let _ = tx.send(ConflictResolution::Skip);
-    }
-    let status = *task.status.lock().unwrap();
-    if status == BatchTransferStatusEnum::Queued {
-        *task.status.lock().unwrap() = BatchTransferStatusEnum::Cancelled;
-    }
-    notify_transfer_changed();
-    Ok(())
+    batch_service()
+        .cancel(&task_id)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("未知任务") || msg.contains("无效任务") {
+                PandaError::UnknownTransferTask(task_id.clone())
+            } else {
+                PandaError::Core(msg)
+            }
+        })
 }
 
-/// 回传批量任务中单个冲突文件的覆盖决策。
-/// `overwrite=true` 覆盖写入；`false` 跳过该项目。任务随后继续处理后续项目。
-/// 仅对处于 `WaitingForConflict` 状态的任务有效。
 #[uniffi::export]
-pub fn batch_transfer_resolve_conflict(task_id: String, overwrite: bool) -> Result<(), PandaError> {
-    let id = Uuid::parse_str(&task_id).map_err(|e| PandaError::Core(e.to_string()))?;
-    let task = {
-        let tasks = batch_transfer_tasks().lock().unwrap();
-        tasks
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| PandaError::UnknownTransferTask(task_id.clone()))?
-    };
-    {
-        let status = *task.status.lock().unwrap();
-        if !matches!(status, BatchTransferStatusEnum::WaitingForConflict) {
-            return Err(PandaError::Core(
-                "batch task is not waiting for a conflict decision".to_string(),
-            ));
-        }
-    }
-    // 取出一次性决策通道并回传决策；失败说明等待者已消失（如被取消）。
-    let tx = task
-        .conflict_tx
+pub fn batch_transfer_resolve_conflict(
+    task_id: String,
+    overwrite: bool,
+) -> Result<(), PandaError> {
+    batch_service()
+        .resolve_conflict(&task_id, overwrite)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("未知任务") || msg.contains("无效任务") {
+                PandaError::UnknownTransferTask(task_id.clone())
+            } else {
+                PandaError::Core(msg)
+            }
+        })
+}
+
+/// 测试用：重置全局批量服务。
+#[cfg(test)]
+pub(crate) fn reset_batch_service_for_test() {
+    let mut guard = BATCH_SERVICE
         .lock()
-        .unwrap()
-        .take()
-        .ok_or_else(|| PandaError::Core("no pending conflict decision channel".to_string()))?;
-    let decision = if overwrite {
-        ConflictResolution::Overwrite
-    } else {
-        ConflictResolution::Skip
-    };
-    // 唤醒执行者前更新快照，避免覆盖执行者刚写入的下一个冲突或终态。
-    *task.pending_conflict.lock().unwrap() = None;
-    *task.status.lock().unwrap() = BatchTransferStatusEnum::Running;
-    notify_transfer_changed();
-    tx.send(decision)
-        .map_err(|_| PandaError::Core("conflict decision channel closed".to_string()))?;
-    Ok(())
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = None;
 }
 
 #[cfg(test)]

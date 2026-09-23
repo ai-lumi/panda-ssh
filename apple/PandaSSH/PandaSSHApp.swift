@@ -273,33 +273,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - TOFU 确认并发串行化
 
-    /// hostID → 等待该主机确认结果的续体列表。首个请求对应 nil,由它负责弹框;
-    /// 后续请求挂入列表,在首个确认结束后收到广播结果。
-    private var pendingTofu: [String: [CheckedContinuation<Bool, Never>]] = [:]
-
-    /// 请求加入某主机的 TOFU 确认队列。
-    /// - 返回 `nil`:调用者是首个确认者,应弹出确认框。
-    /// - 返回 `Bool`:已有确认完成(或正在等待),返回最终用户选择(true=信任)。
-    func awaitTofuConfirmation(for hostID: String) async -> Bool? {
-        if pendingTofu[hostID] == nil {
-            pendingTofu[hostID] = []
-            return nil
-        }
-        return await withCheckedContinuation { continuation in
-            pendingTofu[hostID, default: []].append(continuation)
-        }
-    }
-
-    /// 完成某主机的 TOFU 确认,广播结果给所有等待者,并清理队列。
-    /// 调用方应在用户点击「信任」或「取消」时调用。
-    func resolveTofuConfirmation(for hostID: String, trusted: Bool) {
-        if trusted { trustHost(id: hostID) }
-        let waiters = pendingTofu.removeValue(forKey: hostID) ?? []
-        for continuation in waiters {
-            continuation.resume(returning: trusted)
-        }
-    }
-
     /// 连接前检查(与原型 preConnect 一致):未知主机 → TOFU;
     /// 密钥不匹配 → 告警阻断;密码未存 → 逐标签页手动输入;否则直接连。
     nonisolated static func preconnectAction(for host: HostEntry) -> PreconnectAction {

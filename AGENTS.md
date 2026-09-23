@@ -41,8 +41,8 @@ xcodebuild -project apple/PandaSSH.xcodeproj -scheme PandaSSH-macOS build
 
 ## 代码结构
 
-- `crates/panda-core` — 业务逻辑全部在此：主机配置（TOML）、分组（groups.toml，树形 + 删除级联）、known_hosts、SSH（russh）、SFTP（russh-sftp）。
-- `crates/panda-ffi` — uniffi 绑定，暴露给 Swift。所有导出函数是同步的，异步跑在懒初始化的全局 tokio runtime（`block_on`），不要另起 runtime。`init_store(config_dir)` 把 store 根在 App 注入的配置目录路径（macOS 为 `~/.panda-ssh/`，iPadOS 为 App Group 容器），首次调用生效、之后 no-op；密钥材料不经过 FFI 落盘，密码/口令由 Swift 侧从钥匙串取出后作为 `password`/`passphrase` 参数传入（`test_connection`/`sftp_*`）。
+- `crates/panda-core` — 业务逻辑全部在此：主机配置（TOML）、分组（groups.toml，树形 + 删除级联）、known_hosts、SSH（russh）、SFTP（russh-sftp）、单文件传输调度（`transfer::TransferService`）、批量传输（`batch::BatchTransferService`）、TOFU 协调（`tofu::TofuCoordinator`）、工作区状态与关闭确认（`workspace::WorkspaceService`）、删除服务（`delete_service::DeleteService`）、任务聚合（`task_aggregation`）。核心不依赖 FFI、UniFFI 或任何 Apple API，可跨平台编译。
+- `crates/panda-ffi` — 薄桥接层，uniffi 绑定暴露给 Swift。所有导出函数是同步的，异步跑在懒初始化的全局 tokio runtime（`block_on`），不要另起 runtime。FFI 只负责 DTO 类型转换、同步/异步桥接和 executor trait 实现（`TransferExecutor`/`BatchTransferExecutor` 供核心回调），不含业务逻辑。`init_store(config_dir)` 把 store 根在 App 注入的配置目录路径（macOS 为 `~/.panda-ssh/`，iPadOS 为 App Group 容器），首次调用生效、之后 no-op；密钥材料不经过 FFI 落盘，密码/口令由 Swift 侧从钥匙串取出后作为 `password`/`passphrase` 参数传入（`test_connection`/`sftp_*`）。
 - `apple/PandaSSH` — SwiftUI 多平台源码（macOS/iPadOS 双 target 共享）；`apple/project.yml` 为 XcodeGen 工程定义，改工程结构改它而不是 .xcodeproj。
 - `apple/PandaSSH/Mock` — 后端抽象（`AppBackend` 协议）与内存实现（`MockBackend`，原型演示数据）。View 只依赖协议与 `HostEntry`/`HostGroup`/`Snippet` 模型；`AppConfig.useMockBackend` 默认 `false`（UI 运行走真实后端），只有 Preview 与单元测试显式使用 Mock。
 - `openspec/` — OpenSpec 规格与变更提案。
@@ -59,7 +59,7 @@ Swift 双端共享源码中，平台条件编译只允许用于**界面与平台
 新增/修改代码时按此清单评审，任何一条不满足即退回：
 
 1. **分层边界**：新增业务能力（配置、主机密钥、SSH、SFTP、传输、片段等）的实现是否只落在 `crates/panda-core`？Swift 侧是否仅经 FFI/`AppBackend` 调用，没有重复实现业务逻辑？
-2. **FFI 契约**：新增 `#[uniffi::export]` 是否保持同步导出（异步在全局 tokio runtime 上 `block_on`，不另起 runtime）？导出类型是否只用简单值类型（Record/Enum/Optional/String/整数等），不含平台特有类型？密钥材料是否仍只作参数传入、不经 FFI 落盘？
+2. **FFI 契约**：`panda-ffi` 是薄桥接层，只做 DTO 类型转换、同步/异步桥接和 executor trait 实现，不含业务逻辑。新增 `#[uniffi::export]` 是否保持同步导出（异步在全局 tokio runtime 上 `block_on`，不另起 runtime）？导出类型是否只用简单值类型（Record/Enum/Optional/String/整数等），不含平台特有类型？密钥材料是否仍只作参数传入、不经 FFI 落盘？
 3. **依赖平台无关**：`crates/panda-core` 新增依赖是否跨平台可编译（Linux/Windows 可用、无 Apple 专属 crate）？是否 Apache-2.0 兼容？验证方式：`cargo check --target x86_64-unknown-linux-gnu`。
 4. **平台分支合规**：新增 `#if os()` 是否只属于上节允许清单（UI/平台服务）？
 5. **构建门禁**：`cargo test` 全绿；改动涉及 FFI 或工程结构时，`build-rust.sh` → `xcodegen` → macOS/iOS 双端 `xcodebuild` 通过。

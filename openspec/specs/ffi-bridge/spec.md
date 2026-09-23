@@ -6,38 +6,42 @@
 ## Requirements
 ### Requirement: FFI 模块边界与覆盖率责任
 
-FFI 实现 SHALL 将无状态纯值适配器与拥有业务状态、资源生命周期、持久化副作用或错误策略的实现分离。只有纯值适配器模块 MAY 被覆盖率文件级排除；会话、传输、TOFU、凭据、日志、遥测、工作区和终端状态机 MUST 继续计入 Rust 包级 lines 覆盖率门禁。`lib.rs`、`ffi_runtime.rs`、`ffi_sessions.rs`、`ffi_store.rs`、`ffi_telemetry.rs`、`ffi_transfers.rs`、`ffi_workspace.rs`、`batch_transfer.rs` 与 `task_aggregation.rs` SHALL 分别在覆盖率产物中出现，且每个生产业务文件的 lines MUST 不低于 95%。每个业务模块的导出 API MUST 具有成功、可观察错误和边界结果的契约测试。模块私有的 `cfg(test)` 测试 SHALL 位于独立测试源文件；测试源与 `test_support.rs` 不属于逐文件业务 FFI 阈值，且 MUST NOT 混入业务实现文件的 region 统计。LLVM raw regions（包级或逐文件）仅可作为补测诊断线索，不得作为门禁。单文件传输、批量传输和任务聚合 SHALL 由同一内部传输模块树拥有；FFI 根模块 SHALL 只装配公共导出和共享 FFI 类型，不得中转领域模块的私有 helper。模块拆分 MUST NOT 改变既有 UniFFI 导出名称、参数、返回类型或同步调用外观。
+FFI SHALL 作为 `panda-core` 的薄桥，仅执行跨语言值/错误转换、核心入口转发和必要的调用/资源适配。业务规则、任务调度、持久化策略与补偿、凭据解析、TOFU 协调和工作区/终端状态机 MUST 由 `panda-core` 实现。单文件传输、批量传输及任务聚合的业务实现 SHALL 属于核心传输领域，FFI 根模块 SHALL 只装配公共导出和共享 FFI 类型，不得中转领域私有 helper。仅拆分 FFI 文件 MUST NOT 视为业务下沉完成。
+
+FFI SHALL 将无状态纯值适配器与必要的运行时/资源适配分离。只有无状态、无副作用、无策略的纯值适配器可被覆盖率文件级排除；迁移中的业务模块与迁移后保留的运行时/资源适配 MUST 继续计入 FFI 包级及逐文件 lines 门禁，阈值均为 95%。迁入核心的代码 MUST 计入核心 lines/regions 门禁，阈值均为 95%。门禁清单 SHALL 跟随真实模块归属更新，不能要求为旧文件名保留空壳，也不能使代码在迁移期间从两侧统计同时消失。现有 `lib.rs`、`ffi_runtime.rs`、`ffi_sessions.rs`、`ffi_store.rs`、`ffi_telemetry.rs`、`ffi_transfers.rs`、`ffi_workspace.rs`、`batch_transfer.rs` 和 `task_aggregation.rs` 在迁移前仍承担原有覆盖率责任。
+
+每个对外领域的 FFI API MUST 保留成功、可观察错误和边界结果的契约测试；业务单元测试 SHALL 跟随所有权迁移至核心，不能仅替换为映射测试。私有 `cfg(test)` 测试 SHALL 位于独立源文件，且不得混入生产实现 region 统计。FFI raw regions 继续作为诊断线索，不增加逐文件 raw regions 门禁。迁移 MUST 保持既有 UniFFI 导出名称、参数、返回类型和同步外观；可增加简单值类型接口以承载完整用例。
 
 #### Scenario: 传输域依赖闭合
 
-- **WHEN** 检查 FFI 内部模块依赖
-- **THEN** 单文件传输、批量传输和任务聚合属于同一传输模块树，批量传输可直接使用域内通知能力，根模块不暴露私有中转别名
+- **WHEN** 检查单文件、批量传输及任务聚合的依赖
+- **THEN** 业务流程和状态由核心同一领域组织，FFI 只调用其公共入口，根模块不暴露私有中转别名
 
 #### Scenario: 纯适配器可独立审查
 
 - **WHEN** 覆盖率配置排除 FFI 纯适配器模块
-- **THEN** 被排除模块仅包含无状态值转换或 core 函数转发，且不访问 runtime、store、会话/任务注册表、网络或文件系统
+- **THEN** 被排除模块只做无状态转换或无副作用的纯核心函数转发，不访问运行时、业务注册表、网络或文件系统
 
 #### Scenario: 业务 FFI 仍受逐文件门禁约束
 
-- **WHEN** 运行 Rust 覆盖率门禁
-- **THEN** `lib.rs`、`ffi_runtime.rs`、`ffi_sessions.rs`、`ffi_store.rs`、`ffi_telemetry.rs`、`ffi_transfers.rs`、`ffi_workspace.rs`、`batch_transfer.rs` 与 `task_aggregation.rs` 均出现在覆盖率产物中，且每个文件及 FFI 包级的 lines MUST 不低于 95%；`cfg(test)` 测试辅助源文件不计入该逐文件阈值；raw regions 不得单独阻断门禁
+- **WHEN** 某个 FFI 模块尚持有业务状态，或迁移后仍包含必要资源适配
+- **THEN** 它仍出现在报告中并满足逐文件 95% lines，迁移后的对应核心实现也进入核心报告
 
 #### Scenario: 测试源码不稀释生产文件指标
 
-- **WHEN** FFI 模块的私有单元测试被编译并运行
-- **THEN** 测试源码的 assertion、格式化及 panic 防御 region 不会计入列明生产业务文件的逐文件覆盖率；测试执行的生产函数仍计入该生产文件的覆盖率
+- **WHEN** 执行模块私有测试
+- **THEN** 测试辅助代码不计入生产文件统计，实际执行的生产函数仍正常计入
 
 #### Scenario: 契约测试不能被汇总值掩盖
 
-- **GIVEN** FFI 包的汇总 lines 已达到 95%
-- **WHEN** 任一列明业务模块缺少成功、可观察错误或边界结果的契约测试
-- **THEN** 覆盖率门禁 MUST 失败并指出该模块及缺少的场景；raw regions（包级或逐文件）仅作为补测线索，不得单独阻断门禁
+- **GIVEN** FFI 包级覆盖率已达标
+- **WHEN** 任一对外领域缺少成功、可观察错误或边界结果的契约测试
+- **THEN** 门禁失败并指出缺失场景；不得用核心单元测试或映射覆盖率替代该边界测试
 
 #### Scenario: 拆分保持 Swift 契约
 
-- **WHEN** FFI 内部模块被拆分后生成 Swift 绑定
-- **THEN** 既有 Swift 调用可继续以相同导出名称、参数和返回类型构建及运行
+- **WHEN** 业务迁入核心并重新生成绑定
+- **THEN** 既有 Swift 调用仍能按原名称、参数和返回类型构建，新增完整用例入口可逐切片接入
 
 ### Requirement: 导出接口
 
@@ -219,20 +223,38 @@ FFI SHALL 提供终端和 SFTP 会话的幂等精确关闭接口，并 SHALL NOT
 
 ### Requirement: 可重复的 Rust 覆盖率门禁
 
-仓库 SHALL 提供单一脚本作为 Rust 覆盖率门禁入口。脚本 MUST 清理旧 LLVM profile，MUST 生成可检查的覆盖率报告，并 MUST 在判定 `panda-core` 的 lines 与 regions 均不低于 95%、以及 FFI 包级和列明生产业务文件的 lines 均不低于 95% 前确认所有必需业务 FFI 模块都出现在报告中。脚本 MUST 验证每个列明 FFI 业务模块均有成功、可观察错误和边界结果的契约测试。LLVM raw regions（包级或逐文件）仅作为 FFI 补测诊断线索，不得作为 FFI 门禁。脚本 MAY 排除无状态的 `ffi_adapter` 和测试专用源码，MUST NOT 排除任何业务 FFI 模块。
+仓库 SHALL 提供单一脚本生成来自本次执行的 Rust 覆盖率报告，保留核心 lines/regions 均不低于 95%、FFI 包级及保留的运行时/资源适配文件 lines 均不低于 95% 的分层判定，并验证各对外领域契约测试矩阵。FFI raw regions 仅用于补测诊断。迁移清单 SHALL 记录旧路径、新核心路径、保留适配器及对应测试；删除或更名原必需文件时 MUST 同时证明其业务实现和验证责任已转移。纯值适配器与测试专用源码可排除，业务代码和必要资源适配 MUST NOT 因迁移或更名而被排除。
 
 #### Scenario: 全新 profile 下执行门禁
 
-- **WHEN** 开发者在仓库根目录运行覆盖率门禁脚本
-- **THEN** 旧 profile 不影响结果，报告来自本次测试执行，`panda-core` 按 95% lines/regions 阈值返回状态，FFI 按包级和逐文件 95% lines 阈值及契约测试矩阵返回状态
+- **WHEN** 运行覆盖率门禁
+- **THEN** 旧 profile 不影响结果，核心按 lines/regions 95% 判定，FFI 按包级与适配器逐文件 lines 95% 及契约测试矩阵判定
 
 #### Scenario: 业务 FFI 保持在统计中
 
-- **WHEN** 脚本配置文件级排除
-- **THEN** 仅无状态 `ffi_adapter` 与测试专用源码可被排除；会话、传输、TOFU、持久化、日志、遥测、工作区和终端状态机继续计入 FFI lines 统计
+- **WHEN** 调整文件级排除规则
+- **THEN** 只有已证明为纯值转换的模块及测试专用源码可被排除，业务或资源所有权代码仍计入其所属包
 
 #### Scenario: 汇总值不能掩盖缺失模块
 
-- **GIVEN** FFI 覆盖率报告缺少任一必需业务源文件
-- **WHEN** 即使 FFI 包级 lines 已达到 95%
-- **THEN** 门禁仍 MUST 失败并指出缺失文件
+- **WHEN** 迁移清单中的新核心实现或必要 FFI 适配文件未出现在报告
+- **THEN** 即使汇总覆盖率达标，门禁仍失败并指出缺失归属
+
+### Requirement: 薄桥允许职责与必要例外
+
+FFI SHALL 只承担 Record/Enum/错误及表示形式转换、同步导出到共享运行时的适配、核心实例装配、必要的跨语言资源句柄和交互结果投递。实例引用与句柄索引可由桥持有，业务状态 MUST 由其指向的核心对象持有。桥可产生表示非法、未初始化或跨语言句柄不存在等边界错误，MUST NOT 选择凭据优先级、信任默认值、重试策略、并发上限、冲突超时结果或持久化补偿。非纯转换/转发的实现 MUST 符合 `core-application` 的例外登记要求。
+
+#### Scenario: 同步包装异步核心调用
+
+- **WHEN** 外语调用方调用阻塞型同步导出
+- **THEN** 桥在既有共享运行时适配核心异步调用，调用方在非 UI 主线程等待，核心不为每个调用新建运行时
+
+#### Scenario: 桥不决定冲突超时后的业务结果
+
+- **WHEN** 交互等待超时或跨语言响应通道关闭
+- **THEN** 桥把事实传给核心，由核心执行既定超时/取消策略，桥不自行选择覆盖、跳过或信任
+
+#### Scenario: 底层兼容接口保持安全校验
+
+- **WHEN** 旧调用方通过现有连接、传输或存储接口执行操作
+- **THEN** 桥转发到核心相应契约并保留已声明的参数语义，不通过旧入口绕过核心安全校验

@@ -1,46 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-LIB="$ROOT/crates/panda-ffi/src/lib.rs"
-TRANSFERS="$ROOT/crates/panda-ffi/src/ffi_transfers.rs"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CHECKS="$SCRIPT_DIR/../_ffi_module_boundaries_checks.sh"
 
-require_text() {
-  local needle="$1"
-  local file="$2"
-  grep -Fq -- "$needle" "$file" || {
-    echo "缺少 FFI 模块边界契约：$file: $needle" >&2
-    exit 1
-  }
-}
-
-reject_text() {
-  local needle="$1"
-  local file="$2"
-  if grep -Fq -- "$needle" "$file"; then
-    echo "FFI 根模块仍包含内部依赖中转：$file: $needle" >&2
-    exit 1
-  fi
-}
-
-[[ -f "$ROOT/crates/panda-ffi/src/ffi_runtime.rs" ]] || {
-  echo "缺少独立 runtime 模块" >&2
+[[ -f "$CHECKS" ]] || {
+  echo "缺少边界检查文件：$CHECKS" >&2
   exit 1
 }
 
-require_text '#[path = "batch_transfer.rs"]' "$TRANSFERS"
-require_text 'mod batch_transfer;' "$TRANSFERS"
-require_text '#[path = "task_aggregation.rs"]' "$TRANSFERS"
-require_text 'mod task_aggregation;' "$TRANSFERS"
-require_text 'pub use batch_transfer::' "$TRANSFERS"
-require_text 'pub use task_aggregation::' "$TRANSFERS"
+bash "$CHECKS"
 
-reject_text 'mod batch_transfer;' "$LIB"
-reject_text 'mod task_aggregation;' "$LIB"
-reject_text 'pub(crate) use ffi_store::' "$LIB"
-reject_text 'pub(crate) use ffi_transfers::notify_transfer_changed' "$LIB"
-reject_text 'static RUNTIME:' "$LIB"
+TEST_TMP="$(mktemp -d)"
+trap 'rm -rf -- "$TEST_TMP"' EXIT
 
-for file in ffi_store.rs ffi_transfers.rs ffi_telemetry.rs ffi_workspace.rs; do
-  require_text 'test_support::global_test_lock' "$ROOT/crates/panda-ffi/src/$file"
+# --- 意外：核心反向依赖 FFI（Cargo.toml 声明 panda-ffi 依赖） ---
+mkdir -p "$TEST_TMP/t1/crates/panda-ffi/src" "$TEST_TMP/t1/crates/panda-core/src"
+touch "$TEST_TMP/t1/crates/panda-ffi/src/ffi_runtime.rs"
+printf 'panda-ffi = { path = "../panda-ffi" }\n' > "$TEST_TMP/t1/crates/panda-core/Cargo.toml"
+if FFI_BOUNDARIES_ROOT="$TEST_TMP/t1" bash "$CHECKS" 2>/dev/null; then
+  echo "核心 Cargo.toml 声明 panda-ffi 依赖时边界检查仍通过" >&2
+  exit 1
+fi
+
+# --- 意外：核心源码反向引用 FFI ---
+mkdir -p "$TEST_TMP/t2/crates/panda-ffi/src" "$TEST_TMP/t2/crates/panda-core/src"
+touch "$TEST_TMP/t2/crates/panda-ffi/src/ffi_runtime.rs"
+printf '[dependencies]\n' > "$TEST_TMP/t2/crates/panda-core/Cargo.toml"
+printf 'use panda_ffi::PandaError;\n' > "$TEST_TMP/t2/crates/panda-core/src/lib.rs"
+if FFI_BOUNDARIES_ROOT="$TEST_TMP/t2" bash "$CHECKS" 2>/dev/null; then
+  echo "核心源码引用 panda_ffi 时边界检查仍通过" >&2
+  exit 1
+fi
+
+# --- 边界：必需 FFI 文件缺失 ---
+mkdir -p "$TEST_TMP/t3/crates/panda-ffi/src/tests" \
+  "$TEST_TMP/t3/crates/panda-core/src"
+touch "$TEST_TMP/t3/crates/panda-ffi/src/ffi_runtime.rs"
+printf '[dependencies]\n' > "$TEST_TMP/t3/crates/panda-core/Cargo.toml"
+printf 'mod batch_transfer;\npub use batch_transfer::start;\n' \
+  > "$TEST_TMP/t3/crates/panda-ffi/src/ffi_transfers.rs"
+printf '#[path = "batch_transfer.rs"]\nmod batch_transfer;\npub use batch_transfer::start;\n' \
+  > "$TEST_TMP/t3/crates/panda-ffi/src/ffi_transfers.rs"
+printf '#[path = "task_aggregation.rs"]\nmod task_aggregation;\npub use task_aggregation::aggregate;\n' \
+  >> "$TEST_TMP/t3/crates/panda-ffi/src/ffi_transfers.rs"
+touch "$TEST_TMP/t3/crates/panda-ffi/src/lib.rs"
+touch "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_sessions_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_store_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_transfers_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_telemetry_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_workspace_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/batch_transfer_tests.rs"
+for f in \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_sessions_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_store_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_transfers_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_telemetry_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/ffi_workspace_tests.rs" \
+  "$TEST_TMP/t3/crates/panda-ffi/src/tests/batch_transfer_tests.rs"; do
+  printf 'test_support::global_test_lock\n' > "$f"
 done
+if FFI_BOUNDARIES_ROOT="$TEST_TMP/t3" bash "$CHECKS" 2>/dev/null; then
+  echo "缺少 ffi_delete.rs 时边界检查仍通过" >&2
+  exit 1
+fi
+
+# --- 边界：runtime 模块缺失 ---
+mkdir -p "$TEST_TMP/t4/crates/panda-ffi/src" "$TEST_TMP/t4/crates/panda-core/src"
+touch "$TEST_TMP/t4/crates/panda-ffi/src/lib.rs"
+printf '[dependencies]\n' > "$TEST_TMP/t4/crates/panda-core/Cargo.toml"
+if FFI_BOUNDARIES_ROOT="$TEST_TMP/t4" bash "$CHECKS" 2>/dev/null; then
+  echo "缺少 ffi_runtime.rs 时边界检查仍通过" >&2
+  exit 1
+fi

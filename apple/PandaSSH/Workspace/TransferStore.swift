@@ -877,7 +877,7 @@ final class TransferStore: ObservableObject {
         [source.changeRevision(), batchSource?.changeRevision()]
     }
 
-    private func refresh() {
+    func refresh() {
         lastRevisions = readRevisions()
         var records = source.listTransfers()
         if let batchSource = batchSource {

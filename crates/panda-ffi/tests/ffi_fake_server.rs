@@ -1682,6 +1682,7 @@ fn ffi_transfer_upload_and_poll_completes() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-upload");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let local = dir.join("upload.bin");
@@ -1768,6 +1769,7 @@ fn ffi_transfer_cancel_running_task() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-cancel");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let local = dir.join("big.bin");
@@ -1814,6 +1816,7 @@ fn ffi_transfer_cancel_queued_task() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-queue");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1862,6 +1865,7 @@ fn ffi_transfer_retry_failed_task() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-retry");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let local = dir.join("retry.bin");
@@ -1922,6 +1926,7 @@ fn ffi_transfer_retry_non_terminal_task_fails() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-retry-non-terminal");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let local = dir.join("retry.bin");
@@ -1956,6 +1961,7 @@ fn ffi_transfer_pause_and_resume_running_task() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-pause");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let local = dir.join("pause.bin");
@@ -2048,6 +2054,7 @@ fn ffi_transfer_list_includes_tasks() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "transfer-list");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-transfer-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let local = dir.join("list.bin");
@@ -2345,6 +2352,8 @@ fn ffi_batch_upload_creates_missing_remote_parent() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-missing-parent");
+    // 先通过 test_connection 接受主机密钥，使批量上传能通过 known_hosts 检查。
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!(
         "panda-ffi-batch-upload-missing-parent-{}",
         Uuid::new_v4()
@@ -3019,8 +3028,8 @@ fn ffi_scan_remote_batch_missing_password_fails() {
     let host = save_test_host(port, "scan-remote-no-pw");
 
     let result = scan_remote_batch(host.id, vec!["/".into()], "/local".into(), None, None);
-    // scan_remote_batch 将 credentials_for 的错误信息包装为 PandaError::Core。
-    assert!(matches!(result, Err(PandaError::Core(_))));
+    // scan_remote_batch 在缺少密码时返回结构化的 MissingPassword 错误。
+    assert!(matches!(result, Err(PandaError::MissingPassword(_))));
 
     cleanup_store();
 }
@@ -3049,6 +3058,9 @@ fn ffi_scan_remote_batch_subsystem_rejected_fails() {
     ensure_store_and_clear_hosts();
     let port = start_server_rejecting_sftp();
     let host = save_test_host(port, "scan-remote-no-sftp");
+
+    // 先通过 test_connection 接受主机密钥，使 scan_remote_batch 能通过 known_hosts 检查。
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
 
     let result = scan_remote_batch(
         host.id,
@@ -3200,38 +3212,38 @@ fn ffi_batch_upload_cancel_before_running_covers_queued_branch() {
 }
 
 #[test]
-fn ffi_invalid_task_id_returns_core_error() {
+fn ffi_invalid_task_id_returns_unknown_transfer_task_error() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
 
     let invalid = "not-a-uuid".to_string();
     assert!(matches!(
         transfer_status(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
     assert!(matches!(
         transfer_cancel(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
     assert!(matches!(
         transfer_pause(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
     assert!(matches!(
         transfer_resume(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
     assert!(matches!(
         transfer_retry(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
     assert!(matches!(
         batch_transfer_status(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
     assert!(matches!(
         batch_transfer_cancel(invalid.clone()),
-        Err(PandaError::Core(_))
+        Err(PandaError::UnknownTransferTask(_))
     ));
 
     cleanup_store();
@@ -3243,6 +3255,7 @@ fn ffi_transfer_pause_terminal_task_returns_error() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "pause-terminal");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-pause-terminal-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("tiny.txt");
@@ -3273,6 +3286,7 @@ fn ffi_transfer_resume_non_paused_task_is_noop() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "resume-non-paused");
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
     let dir = std::env::temp_dir().join(format!("panda-ffi-resume-non-paused-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("q.txt");
@@ -3694,6 +3708,8 @@ fn ffi_scan_local_batch_does_not_starve_runtime() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "scan-starve");
+    // 先通过 test_connection 接受主机密钥，使批量上传能通过 known_hosts 检查。
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
 
     let dir = std::env::temp_dir().join(format!("panda-ffi-scan-starve-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

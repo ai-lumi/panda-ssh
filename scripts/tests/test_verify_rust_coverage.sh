@@ -33,6 +33,7 @@ require_text 'ffi_store.rs'
 require_text 'ffi_telemetry.rs'
 require_text 'ffi_transfers.rs'
 require_text 'ffi_workspace.rs'
+require_text 'ffi_delete.rs'
 require_text 'batch_transfer.rs'
 require_text 'task_aggregation.rs'
 require_text 'ffi-contract-matrix.txt'
@@ -79,6 +80,7 @@ required_ffi_files=(
   ffi_telemetry.rs
   ffi_transfers.rs
   ffi_workspace.rs
+  ffi_delete.rs
   batch_transfer.rs
   task_aggregation.rs
 )
@@ -237,5 +239,58 @@ if PANDA_COVERAGE_REPORT_DIR="$TEST_TMP/missing-contract-matrix" \
 fi
 grep -Fq 'FFI 契约测试矩阵' "$TEST_TMP/missing-contract-matrix.out" || {
   echo "覆盖率门禁未指出缺失的 FFI 契约测试矩阵" >&2
+  exit 1
+}
+
+# --- 边界：空 JSON 报告 ---
+EMPTY_REPORT="$TEST_TMP/empty.json"
+printf '{"data":[{"files":[]}]}\n' >"$EMPTY_REPORT"
+if PANDA_COVERAGE_REPORT_DIR="$TEST_TMP/empty" \
+  MOCK_FFI_REPORT="$EMPTY_REPORT" bash "$SCRIPT" >"$TEST_TMP/empty.out" 2>&1; then
+  echo "空 FFI 报告时覆盖率门禁仍然通过" >&2
+  exit 1
+fi
+
+# --- 边界：核心报告缺少 panda-core 源文件 ---
+CORE_EMPTY_REPORT="$TEST_TMP/core-empty.json"
+write_report "$CORE_EMPTY_REPORT" "/repo/crates/other/src/lib.rs"
+if PANDA_COVERAGE_REPORT_DIR="$TEST_TMP/core-empty" \
+  MOCK_CORE_REPORT="$CORE_EMPTY_REPORT" bash "$SCRIPT" >"$TEST_TMP/core-empty.out" 2>&1; then
+  echo "核心报告缺少 panda-core 源文件时门禁仍然通过" >&2
+  exit 1
+fi
+
+# --- 边界：源码更名（报告中的文件名与实际不匹配） ---
+RENAMED_REPORT="$TEST_TMP/renamed.json"
+renamed_paths=()
+for filename in "${required_ffi_files[@]}"; do
+  if [[ "$filename" == "ffi_delete.rs" ]]; then
+    renamed_paths+=("/repo/crates/panda-ffi/src/ffi_removed.rs")
+  else
+    renamed_paths+=("/repo/crates/panda-ffi/src/$filename")
+  fi
+done
+write_report "$RENAMED_REPORT" "${renamed_paths[@]}"
+if PANDA_COVERAGE_REPORT_DIR="$TEST_TMP/renamed" \
+  MOCK_FFI_REPORT="$RENAMED_REPORT" bash "$SCRIPT" >"$TEST_TMP/renamed.out" 2>&1; then
+  echo "源码更名后覆盖率门禁仍然通过" >&2
+  exit 1
+fi
+grep -Fq 'ffi_delete.rs' "$TEST_TMP/renamed.out" || {
+  echo "覆盖率门禁未指出更名后缺失的文件" >&2
+  exit 1
+}
+
+# --- 意外：契约矩阵引用不存在的测试符号 ---
+STALE_MATRIX="$TEST_TMP/stale-matrix.txt"
+cp "$ROOT/scripts/ffi-contract-matrix.txt" "$STALE_MATRIX"
+printf 'ffi_delete|成功|nonexistent_test_symbol_that_does_not_exist\n' >>"$STALE_MATRIX"
+if PANDA_COVERAGE_REPORT_DIR="$TEST_TMP/stale-matrix" \
+  PANDA_FFI_CONTRACT_MATRIX="$STALE_MATRIX" bash "$SCRIPT" >"$TEST_TMP/stale-matrix.out" 2>&1; then
+  echo "契约矩阵引用不存在的测试符号时门禁仍然通过" >&2
+  exit 1
+fi
+grep -Fq 'nonexistent_test_symbol_that_does_not_exist' "$TEST_TMP/stale-matrix.out" || {
+  echo "覆盖率门禁未指出缺失的契约测试符号" >&2
   exit 1
 }

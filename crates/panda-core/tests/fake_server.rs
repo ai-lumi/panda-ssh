@@ -13,8 +13,8 @@ use panda_core::config::AuthMethod;
 use panda_core::telemetry::{global_registry, ChannelKind, ChannelState, HealthState};
 use panda_core::{
     execute_batch_download, execute_batch_upload, scan_remote_sources, BatchTransferOptions,
-    ConflictResolution, Credentials, Error, HostConfig, KnownHostStatus, KnownHosts, ScanOptions,
-    SftpClient, ShellSession, SshSession, UnknownHostKeyPolicy,
+    ConflictResolution, Credentials, Error, HostConfig, KnownHostStatus, KnownHosts, PandaCore,
+    ScanOptions, SftpClient, ShellSession, SshSession, UnknownHostKeyPolicy,
 };
 use russh::keys::{ssh_key::LineEnding, Algorithm, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Server as _, Session};
@@ -1446,6 +1446,49 @@ async fn shell_close_twice_is_idempotent() {
 }
 
 #[tokio::test]
+async fn core_session_service_keeps_same_host_shell_and_sftp_independent_and_closes_idempotently() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    core.save_host(host_cfg(port)).unwrap();
+
+    let shell = core
+        .open_shell_session("test", Some(PASSWORD), true, None, None)
+        .await
+        .unwrap();
+    let sftp = core
+        .open_sftp_session("test", Some(PASSWORD), true, None, None)
+        .await
+        .unwrap();
+    assert!(!core.sftp_session_home_dir(sftp).await.unwrap().is_empty());
+    core.shell_write(shell, b"hello\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        String::from_utf8_lossy(&core.shell_read(shell, 1024).unwrap()).contains("echo: hello")
+    );
+
+    core.close_shell_session(shell).await.unwrap();
+    core.close_shell_session(shell).await.unwrap();
+    core.close_sftp_session(sftp).await.unwrap();
+    core.close_sftp_session(sftp).await.unwrap();
+}
+
+#[tokio::test]
+async fn core_session_service_rejects_invalid_handles_and_failed_authentication() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    assert!(core.shell_read(999, 1).is_err());
+    assert!(core.sftp_session_home_dir(999).await.is_err());
+
+    let port = start_server().await;
+    core.save_host(host_cfg(port)).unwrap();
+    assert!(core
+        .open_shell_session("test", Some("wrong"), true, None, None)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn shell_session_read_write_after_close_returns_error() {
     let port = start_server().await;
     let dir = tempfile::tempdir().unwrap();
@@ -2584,4 +2627,146 @@ async fn health_check_uses_existing_connection_is_throttled_and_never_reconnects
             .unwrap(),
         HealthState::Unavailable
     );
+}
+
+// ---------------------------------------------------------------------------
+// 15.1 端到端对照测试
+// ---------------------------------------------------------------------------
+
+/// 正常：核心宿主保存 → 连接 → SFTP 上传 → 下载 → 验证 → 关闭，全链路通过 PandaCore。
+#[tokio::test]
+async fn e2e_save_connect_transfer_close() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+
+    let mut host = host_cfg(port);
+    host.auth = AuthMethod::Password { password_ref: None };
+    core.save_host(host).unwrap();
+    assert_eq!(core.list_hosts().unwrap().len(), 1);
+
+    let sftp = core
+        .open_sftp_session("test", Some(PASSWORD), true, None, None)
+        .await
+        .unwrap();
+
+    let local_upload = dir.path().join("e2e_upload.txt");
+    std::fs::write(&local_upload, b"e2e payload").unwrap();
+    core.sftp_session_upload(sftp, &local_upload, "/e2e_upload.txt")
+        .await
+        .unwrap();
+
+    let entries = core.sftp_session_list(sftp, "/").await.unwrap();
+    assert!(entries.iter().any(|f| f.name == "e2e_upload.txt"));
+
+    let local_download = dir.path().join("e2e_download.txt");
+    core.sftp_session_download(sftp, "/e2e_upload.txt", &local_download)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&local_download).unwrap(), b"e2e payload");
+
+    core.close_sftp_session(sftp).await.unwrap();
+    core.close_sftp_session(sftp).await.unwrap();
+}
+
+/// 意外：拒绝信任时未知主机返回结构化 UnknownHostKey 错误。
+#[tokio::test]
+async fn e2e_reject_trust_returns_unknown_host_key() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    core.save_host(host_cfg(port)).unwrap();
+
+    let err = core
+        .test_connection("test", Some(PASSWORD), false)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::UnknownHostKey { .. }));
+}
+
+/// 意外：错误凭据返回结构化认证失败。
+#[tokio::test]
+async fn e2e_wrong_credentials_report_structured_error() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    core.save_host(host_cfg(port)).unwrap();
+
+    let err = core
+        .open_shell_session("test", Some("wrong_password"), true, None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::AuthFailed));
+}
+
+/// 意外：SFTP 被服务端拒绝时返回结构化错误。
+#[tokio::test]
+async fn e2e_sftp_rejected_reports_structured_error() {
+    let port = start_server_rejecting_sftp().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    core.save_host(host_cfg(port)).unwrap();
+
+    let err = core
+        .open_sftp_session("test", Some(PASSWORD), true, None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Sftp(_)));
+}
+
+/// 边界：两个独立 PandaCore 上下文使用相同主机 id 时状态隔离。
+#[tokio::test]
+async fn e2e_dual_contexts_same_host_id_are_isolated() {
+    let port = start_server().await;
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let core_a = PandaCore::new(dir_a.path()).unwrap();
+    let core_b = PandaCore::new(dir_b.path()).unwrap();
+
+    core_a.save_host(host_cfg(port)).unwrap();
+    assert_eq!(core_a.list_hosts().unwrap().len(), 1);
+    assert_eq!(core_b.list_hosts().unwrap().len(), 0);
+
+    let shell = core_a
+        .open_shell_session("test", Some(PASSWORD), true, None, None)
+        .await
+        .unwrap();
+    assert!(core_b.shell_read(shell, 1).is_err());
+    core_a.close_shell_session(shell).await.unwrap();
+}
+
+/// 边界：空核心列表与搜索返回空结果，不报错。
+#[tokio::test]
+async fn e2e_empty_host_list_and_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    assert!(core.list_hosts().unwrap().is_empty());
+    assert!(core.search_hosts("anything").unwrap().is_empty());
+    assert!(core.snippet_list().unwrap().is_empty());
+}
+
+/// 边界：取消会话后句柄失效，重试使用新一代次。
+#[tokio::test]
+async fn e2e_cancel_session_then_retry_with_new_generation() {
+    let port = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = PandaCore::new(dir.path()).unwrap();
+    core.save_host(host_cfg(port)).unwrap();
+
+    let shell = core
+        .open_shell_session("test", Some(PASSWORD), true, Some("test"), Some(0))
+        .await
+        .unwrap();
+    assert!(core.has_active_session("test", 0));
+
+    core.cancel_session("test");
+    assert!(!core.has_active_session("test", 0));
+    assert!(core.shell_read(shell, 1).is_err());
+
+    let new_shell = core
+        .open_shell_session("test", Some(PASSWORD), true, Some("test"), Some(1))
+        .await
+        .unwrap();
+    assert!(core.has_active_session("test", 1));
+    core.close_shell_session(new_shell).await.unwrap();
 }

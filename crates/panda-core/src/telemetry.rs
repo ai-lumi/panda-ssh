@@ -1,6 +1,12 @@
 //! 跨平台 SSH 连接遥测。
 //!
 //! 这里只保存状态、时间与计数，不保存凭据、命令、终端输出或文件内容。
+//!
+//! ## 作用域
+//!
+//! [`TelemetryRegistry`] 与 [`global_registry`] 是**进程级**单例：所有 `PandaCore`
+//! 实例共享同一注册表。读取快照（[`snapshot`](TelemetryRegistry::snapshot)）只
+//! 汇总已登记连接的状态，不会发起新连接或触发网络 I/O。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -807,5 +813,64 @@ mod tests {
         assert!(registry
             .recent_health(999, Duration::from_secs(1))
             .is_none());
+    }
+
+    // --- 13.3 三类测试：遥测 ---
+
+    /// 边界：快照的 Debug 输出不包含任何敏感字段名。
+    #[test]
+    fn snapshot_debug_output_contains_no_sensitive_fields() {
+        let registry = TelemetryRegistry::default();
+        let id = registry.register_connection("h".into(), "example.test:22".into());
+        registry.set_owner(id, "终端", "tab-1");
+        registry.fail(id, "AuthFailed: invalid token".into());
+        let snapshots = registry.snapshot();
+        let debug = format!("{snapshots:?}").to_lowercase();
+        for forbidden in [
+            "password",
+            "passphrase",
+            "credential",
+            "private_key",
+            "secret_key",
+        ] {
+            assert!(
+                !debug.contains(forbidden),
+                "快照调试输出包含敏感字段 {forbidden}"
+            );
+        }
+    }
+
+    /// 边界：drain 两次第二次返回空。
+    #[test]
+    fn drain_twice_returns_empty_on_second_call() {
+        let registry = TelemetryRegistry::default();
+        let id = registry.register_connection("h".into(), "x:22".into());
+        registry.record_event(id, LifecycleKind::Connected);
+        let first = registry.drain_events();
+        assert!(!first.is_empty());
+        let second = registry.drain_events();
+        assert!(second.is_empty());
+    }
+
+    /// 边界：释放后快照不包含该连接。
+    #[test]
+    fn snapshot_after_unregister_excludes_released_connection() {
+        let registry = TelemetryRegistry::default();
+        let id = registry.register_connection("h".into(), "x:22".into());
+        registry.set_authenticated(id);
+        assert_eq!(registry.snapshot().len(), 1);
+        registry.unregister_connection(id);
+        assert!(registry.snapshot().is_empty());
+    }
+
+    /// 正常：错误信息被截断到 256 字符。
+    #[test]
+    fn error_message_in_snapshot_is_bounded_to_256_chars() {
+        let registry = TelemetryRegistry::default();
+        let id = registry.register_connection("h".into(), "x:22".into());
+        registry.fail(id, "A".repeat(500));
+        let snapshots = registry.snapshot();
+        let error = snapshots[0].last_error.as_ref().unwrap();
+        assert_eq!(error.chars().count(), 256);
     }
 }

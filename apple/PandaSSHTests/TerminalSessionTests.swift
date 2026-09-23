@@ -29,7 +29,7 @@ final class TerminalSessionTests: XCTestCase {
     func testRepeatedConnectInSameAttemptOpensOnlyOnce() async throws {
         let store = TerminalSessionStore(host: makeHost())
         let opened = LockedCounter()
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             opened.increment()
             Thread.sleep(forTimeInterval: 0.1)
             return 123
@@ -44,7 +44,7 @@ final class TerminalSessionTests: XCTestCase {
 
     func testCloseDuringHandshakeCannotResurrectSession() async throws {
         let store = TerminalSessionStore(host: makeHost())
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             Thread.sleep(forTimeInterval: 0.1)
             return 123
         }
@@ -59,7 +59,7 @@ final class TerminalSessionTests: XCTestCase {
         let store = TerminalSessionStore(host: makeHost())
         let started = expectation(description: "旧握手已开始")
         let release = DispatchSemaphore(value: 0)
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             started.fulfill()
             _ = release.wait(timeout: .now() + 2)
             throw NSError(domain: "旧握手失败", code: 1)
@@ -67,7 +67,7 @@ final class TerminalSessionTests: XCTestCase {
         store.connect(record: record, password: nil, passphrase: nil)
         await fulfillment(of: [started], timeout: 2)
         store.retry()
-        store.connectionOpener = { _, _, _, _ in 124 }
+        store.connectionOpener = { _, _, _, _, _, _ in 124 }
         store.connect(record: record, password: nil, passphrase: nil)
         try await Task.sleep(for: .milliseconds(100))
         release.signal()
@@ -82,7 +82,7 @@ final class TerminalSessionTests: XCTestCase {
         let started = expectation(description: "旧握手已开始")
         let released = expectation(description: "迟到的句柄已释放")
         let gate = DispatchSemaphore(value: 0)
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             started.fulfill()
             _ = gate.wait(timeout: .now() + 2)
             return 123
@@ -95,7 +95,7 @@ final class TerminalSessionTests: XCTestCase {
         await fulfillment(of: [started], timeout: 2)
         store.retry()
         store.retry()
-        store.connectionOpener = { _, _, _, _ in 124 }
+        store.connectionOpener = { _, _, _, _, _, _ in 124 }
         store.connect(record: record, password: nil, passphrase: nil)
         gate.signal()
         await fulfillment(of: [released], timeout: 2)
@@ -130,7 +130,7 @@ final class TerminalSessionTests: XCTestCase {
     func testConnectFailureDoesNotLogRawErrorContents() async throws {
         let store = TerminalSessionStore(host: makeHost())
         let privateDetail = "fixture-private-key-path-should-not-be-logged"
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             throw NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: privateDetail])
         }
         store.connect(record: record, password: nil, passphrase: nil)
@@ -187,7 +187,7 @@ final class TerminalSessionTests: XCTestCase {
     func testRetryOnlyAdvancesAttemptAndDoesNotOpenConnectionDirectly() async throws {
         let store = TerminalSessionStore(host: makeHost())
         let opened = LockedCounter()
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             opened.increment()
             return 123
         }
@@ -306,7 +306,7 @@ final class TerminalSessionTests: XCTestCase {
     func testConnectDoesNotBlockMainThreadAndPhaseUpdatesAsync() async throws {
         let store = TerminalSessionStore(host: makeHost())
         var openerThreadIsMain: Bool?
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             openerThreadIsMain = Thread.isMainThread
             Thread.sleep(forTimeInterval: 0.5)
             return 123
@@ -340,7 +340,7 @@ final class TerminalSessionTests: XCTestCase {
     /// 连接失败时 phase 进入 failed，错误回主线程呈现。
     func testConnectFailureUpdatesPhaseAfterBackgroundOpenerThrows() async throws {
         let store = TerminalSessionStore(host: makeHost())
-        store.connectionOpener = { _, _, _, _ in
+        store.connectionOpener = { _, _, _, _, _, _ in
             throw NSError(domain: "test", code: 1)
         }
         let record = HostConfigRecord(
@@ -363,7 +363,7 @@ final class TerminalSessionTests: XCTestCase {
     func testTwoConnectionsRunInParallel() async throws {
         func makeStore() -> TerminalSessionStore {
             let store = TerminalSessionStore(host: makeHost())
-            store.connectionOpener = { _, _, _, _ in
+            store.connectionOpener = { _, _, _, _, _, _ in
                 Thread.sleep(forTimeInterval: 1.0)
                 // hashValue 可为负数，直接转 UInt64 会触发运行时陷阱并让整个
                 // XCTest 进程崩溃；保留位模式即可生成互不相关的测试句柄。
