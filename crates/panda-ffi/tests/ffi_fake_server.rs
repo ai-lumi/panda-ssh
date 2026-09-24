@@ -1613,6 +1613,254 @@ fn ffi_same_host_sftp_handles_are_isolated_and_close_is_idempotent() {
 }
 
 #[test]
+fn ffi_tracked_shell_cancel_rejects_old_generation_and_allows_retry() {
+    use panda_ffi::{session_cancel, session_has_active, session_is_stale, shell_open_tracked};
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_store_and_clear_hosts();
+    let host = save_test_host(start_server(), "tracked-shell");
+    let session_id = Uuid::new_v4().to_string();
+    assert!(!session_is_stale(session_id.clone(), 0));
+    assert!(!session_has_active(session_id.clone(), 0));
+    assert!(session_is_stale(session_id.clone(), 1));
+
+    let handle = shell_open_tracked(
+        host.id.clone(), Some(PASSWORD.into()), None, true, session_id.clone(), 0,
+    )
+    .unwrap();
+    assert!(!session_is_stale(session_id.clone(), 0));
+    assert!(session_has_active(session_id.clone(), 0));
+    assert!(!session_has_active(session_id.clone(), 1));
+    let connection = connection_telemetry_list()
+        .into_iter()
+        .find(|record| record.owner_kind == "终端标签" && record.owner_id == handle.to_string())
+        .expect("tracked Shell 应返回关联真实 Transport 的句柄");
+    assert_eq!(connection.transport_state, ConnectionStateEnum::Active);
+    assert_eq!(connection.ssh_state, SshConnectionStateEnum::Authenticated);
+
+    session_cancel(session_id.clone());
+    assert!(session_is_stale(session_id.clone(), 0));
+    assert!(!session_has_active(session_id.clone(), 0));
+    assert!(!session_is_stale(session_id.clone(), 1));
+    assert!(!session_has_active(session_id.clone(), 1));
+    assert!(matches!(shell_read(handle, 1024), Err(PandaError::UnknownShellHandle(h)) if h == handle));
+    assert!(matches!(
+        shell_open_tracked(
+            host.id.clone(), Some(PASSWORD.into()), None, false, session_id.clone(), 0,
+        ),
+        Err(PandaError::Cancelled)
+    ));
+    assert!(!session_has_active(session_id.clone(), 1));
+
+    let retry = shell_open_tracked(
+        host.id, Some(PASSWORD.into()), None, false, session_id.clone(), 1,
+    )
+    .unwrap();
+    assert_ne!(retry, handle);
+    assert!(session_has_active(session_id.clone(), 1));
+    shell_write(retry, b"tracked-retry\n".to_vec()).unwrap();
+    let mut output = Vec::new();
+    for _ in 0..200 {
+        output.extend(shell_read(retry, 4096).unwrap());
+        if String::from_utf8_lossy(&output).contains("echo: tracked-retry") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(String::from_utf8_lossy(&output).contains("echo: tracked-retry"));
+    shell_close(handle).unwrap();
+    shell_close(retry).unwrap();
+    assert!(!session_has_active(session_id.clone(), 1));
+    assert!(!session_is_stale(session_id.clone(), 1));
+    session_cancel(session_id);
+    cleanup_store();
+}
+
+#[test]
+fn ffi_tracked_sftp_cancel_rejects_old_generation_and_allows_retry() {
+    use panda_ffi::{session_cancel, session_has_active, session_is_stale, sftp_session_open_tracked};
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_store_and_clear_hosts();
+    let host = save_test_host(start_server(), "tracked-sftp");
+    let session_id = Uuid::new_v4().to_string();
+    assert!(!session_is_stale(session_id.clone(), 0));
+    assert!(!session_has_active(session_id.clone(), 0));
+
+    let first = sftp_session_open_tracked(
+        host.id.clone(), Some(PASSWORD.into()), None, true, session_id.clone(), 0,
+    )
+    .unwrap();
+    assert!(first.handle > 0);
+    assert!(first.connection_id > 0);
+    // MemFs 的 realpath 原样返回请求路径，真实 FFI 应保留该返回值。
+    assert_eq!(first.home_dir, ".");
+    let connection = connection_telemetry_list()
+        .into_iter()
+        .find(|record| record.id == first.connection_id)
+        .expect("tracked SFTP 应携带真实连接元数据");
+    assert_eq!(connection.owner_kind, "SFTP 标签");
+    assert_eq!(connection.owner_id, first.handle.to_string());
+    assert_eq!(connection.transport_state, ConnectionStateEnum::Active);
+    assert_eq!(connection.ssh_state, SshConnectionStateEnum::Authenticated);
+    assert!(sftp_session_list(first.handle, "/".into()).unwrap().is_empty());
+    assert!(!session_is_stale(session_id.clone(), 0));
+    assert!(session_has_active(session_id.clone(), 0));
+    assert!(!session_has_active(session_id.clone(), 1));
+
+    session_cancel(session_id.clone());
+    assert!(session_is_stale(session_id.clone(), 0));
+    assert!(!session_has_active(session_id.clone(), 0));
+    assert!(!session_is_stale(session_id.clone(), 1));
+    assert!(!session_has_active(session_id.clone(), 1));
+    assert!(matches!(
+        sftp_session_list(first.handle, "/".into()),
+        Err(PandaError::UnknownSftpHandle(h)) if h == first.handle
+    ));
+    assert!(matches!(
+        sftp_session_open_tracked(
+            host.id.clone(), Some(PASSWORD.into()), None, false, session_id.clone(), 0,
+        ),
+        Err(PandaError::Cancelled)
+    ));
+    assert!(!session_has_active(session_id.clone(), 1));
+
+    let retry = sftp_session_open_tracked(
+        host.id, Some(PASSWORD.into()), None, false, session_id.clone(), 1,
+    )
+    .unwrap();
+    assert_ne!(retry.handle, first.handle);
+    assert_ne!(retry.connection_id, first.connection_id);
+    assert_eq!(retry.home_dir, first.home_dir);
+    assert!(session_has_active(session_id.clone(), 1));
+    assert!(sftp_session_list(retry.handle, "/".into()).unwrap().is_empty());
+    sftp_session_close(first.handle).unwrap();
+    sftp_session_close(retry.handle).unwrap();
+    assert!(!session_has_active(session_id.clone(), 1));
+    assert!(!session_is_stale(session_id.clone(), 1));
+    session_cancel(session_id);
+    cleanup_store();
+}
+
+fn wait_for_delete_terminal(task_id: &str) -> panda_ffi::DeleteTaskSnapshotRecord {
+    use panda_ffi::{delete_task_status, DeleteStatusEnum};
+
+    for _ in 0..200 {
+        let snapshot = delete_task_status(task_id.into()).unwrap();
+        if matches!(
+            snapshot.status,
+            DeleteStatusEnum::Completed | DeleteStatusEnum::Failed | DeleteStatusEnum::Cancelled
+        ) {
+            return snapshot;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("远端删除任务未到达终态：{task_id}");
+}
+
+#[test]
+fn ffi_remote_delete_files_and_directories_reports_remote_snapshot() {
+    use panda_ffi::{delete_task_list, start_remote_delete, DeleteKindEnum, DeleteStatusEnum};
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_store_and_clear_hosts();
+    let fs = MemFs::default();
+    for path in ["/delete-file", "/delete-tree/sub/a", "/keep"] {
+        fs.files.blocking_lock().insert(path.into(), b"data".to_vec());
+    }
+    for path in ["/delete-tree", "/delete-tree/empty", "/delete-tree/sub"] {
+        fs.dirs.blocking_lock().insert(path.into());
+    }
+    let host = save_test_host(
+        start_server_with(TestServer { fs: fs.clone(), ..Default::default() }),
+        "remote-delete",
+    );
+    let session = sftp_session_open(host.id, Some(PASSWORD.into()), None, true).unwrap();
+    let task_id = start_remote_delete(
+        session.handle, vec!["/delete-tree".into(), "/delete-file".into()],
+    )
+    .unwrap();
+    let snapshot = wait_for_delete_terminal(&task_id);
+    assert_eq!(snapshot.task_id, task_id);
+    assert_eq!(snapshot.kind, DeleteKindEnum::Remote);
+    assert_eq!(snapshot.status, DeleteStatusEnum::Completed);
+    assert_eq!(snapshot.source, "/delete-file\n/delete-tree");
+    assert_eq!(snapshot.total, Some(5));
+    assert_eq!(snapshot.discovered, 5);
+    assert_eq!(snapshot.processed, 5);
+    assert_eq!(snapshot.succeeded, 5);
+    assert!(snapshot.errors.is_empty());
+    assert!(delete_task_list().iter().any(|task| task.task_id == task_id
+        && task.kind == DeleteKindEnum::Remote && task.status == DeleteStatusEnum::Completed));
+    let remaining = sftp_session_list(session.handle, "/".into()).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].name, "keep");
+    assert_eq!(fs.files.blocking_lock().len(), 1);
+    assert_eq!(fs.files.blocking_lock().get("/keep").unwrap(), b"data");
+    assert!(fs.dirs.blocking_lock().is_empty());
+    sftp_session_close(session.handle).unwrap();
+    cleanup_store();
+}
+
+#[test]
+fn ffi_remote_delete_missing_target_reports_path_and_error() {
+    use panda_ffi::{start_remote_delete, DeleteKindEnum, DeleteStatusEnum};
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_store_and_clear_hosts();
+    let host = save_test_host(start_server(), "remote-delete-missing");
+    let session = sftp_session_open(host.id, Some(PASSWORD.into()), None, true).unwrap();
+    let task_id = start_remote_delete(session.handle, vec!["/missing".into()]).unwrap();
+    let snapshot = wait_for_delete_terminal(&task_id);
+    assert_eq!(snapshot.kind, DeleteKindEnum::Remote);
+    assert_eq!(snapshot.status, DeleteStatusEnum::Failed);
+    assert_eq!(snapshot.source, "/missing");
+    assert_eq!(snapshot.discovered, 0);
+    assert_eq!(snapshot.processed, 0);
+    assert_eq!(snapshot.succeeded, 0);
+    assert_eq!(snapshot.errors.len(), 1);
+    assert_eq!(snapshot.errors[0].path, "/missing");
+    assert_eq!(snapshot.errors[0].message, "sftp error: No such file: No such file");
+    assert!(sftp_session_list(session.handle, "/".into()).unwrap().is_empty());
+    sftp_session_close(session.handle).unwrap();
+    cleanup_store();
+}
+
+#[test]
+fn ffi_remote_delete_rejects_empty_targets_and_invalid_or_closed_handles() {
+    use panda_ffi::{delete_task_list, start_remote_delete};
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_store_and_clear_hosts();
+    let host = save_test_host(start_server(), "remote-delete-invalid");
+    let session = sftp_session_open(host.id, Some(PASSWORD.into()), None, true).unwrap();
+    let before = delete_task_list().len();
+    assert!(matches!(
+        start_remote_delete(session.handle, vec![]),
+        Err(PandaError::Core(message)) if message == "删除目标不能为空"
+    ));
+    for target in ["", "/", "relative", "/parent/../escape"] {
+        assert!(matches!(
+            start_remote_delete(session.handle, vec![target.into()]),
+            Err(PandaError::Core(message)) if message == "拒绝空目标、根目录、相对路径或越界路径"
+        ));
+    }
+    for handle in [0, u64::MAX] {
+        assert!(matches!(
+            start_remote_delete(handle, vec!["/unused".into()]),
+            Err(PandaError::UnknownSftpHandle(h)) if h == handle
+        ));
+    }
+    sftp_session_close(session.handle).unwrap();
+    assert!(matches!(
+        start_remote_delete(session.handle, vec!["/unused".into()]),
+        Err(PandaError::UnknownSftpHandle(h)) if h == session.handle
+    ));
+    assert_eq!(delete_task_list().len(), before, "入口拒绝不得注册删除任务");
+    cleanup_store();
+}
+
+#[test]
 fn ffi_sftp_new_fails_when_subsystem_rejected() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_store_and_clear_hosts();
@@ -2720,10 +2968,16 @@ fn ffi_batch_upload_nonexistent_source_fails() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-upload-missing");
+    // 批量入口使用 Reject，先信任此回环服务才能验证扫描错误。
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let missing = local.path().join("missing");
+    let source = missing.to_string_lossy().into_owned();
+    let expected_error = format!("{source}: {}", std::fs::symlink_metadata(&missing).unwrap_err());
 
     let task_id = start_batch_upload(
         host.id,
-        vec!["/no/such/path".into()],
+        vec![source],
         "/remote".into(),
         Some(PASSWORD.into()),
         None,
@@ -2734,7 +2988,11 @@ fn ffi_batch_upload_nonexistent_source_fails() {
         std::thread::sleep(Duration::from_millis(50));
         let record = batch_transfer_status(task_id.clone()).unwrap();
         if matches!(record.status, BatchTransferStatusEnum::Failed) {
-            assert!(!record.error.as_deref().unwrap_or("").is_empty());
+            let error = record.error.as_deref().expect("扫描失败应携带错误");
+            assert_eq!(
+                error, expected_error,
+                "应到达本地源扫描，而非提前因主机密钥或认证失败"
+            );
             cleanup_store();
             return;
         }
@@ -2748,13 +3006,14 @@ fn ffi_batch_download_nonexistent_source_fails() {
     ensure_store_and_clear_hosts();
     let port = start_server();
     let host = save_test_host(port, "batch-download-missing");
-    let dir = std::env::temp_dir().join(format!("panda-ffi-batch-dl-missing-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // 批量入口使用 Reject，先信任此回环服务才能验证扫描错误。
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     let task_id = start_batch_download(
         host.id,
         vec!["/no/such/path".into()],
-        dir.to_string_lossy().into_owned(),
+        dir.path().to_string_lossy().into_owned(),
         Some(PASSWORD.into()),
         None,
     )
@@ -2764,7 +3023,12 @@ fn ffi_batch_download_nonexistent_source_fails() {
         std::thread::sleep(Duration::from_millis(50));
         let record = batch_transfer_status(task_id.clone()).unwrap();
         if matches!(record.status, BatchTransferStatusEnum::Failed) {
-            assert!(!record.error.as_deref().unwrap_or("").is_empty());
+            let error = record.error.as_deref().expect("扫描失败应携带错误");
+            assert_eq!(
+                error,
+                "/no/such/path: sftp error: No such file: No such file",
+                "应报告远程源路径及 NoSuchFile，而非提前因主机密钥或认证失败"
+            );
             cleanup_store();
             return;
         }
@@ -3637,10 +3901,10 @@ fn ffi_batch_upload_subsystem_rejected_fails() {
     ensure_store_and_clear_hosts();
     let port = start_server_rejecting_sftp();
     let host = save_test_host(port, "batch-upload-no-sftp");
-    let dir =
-        std::env::temp_dir().join(format!("panda-ffi-batch-upload-no-sftp-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("a.txt");
+    // 认证和主机密钥检查成功后，才会尝试创建被拒绝的 SFTP 子系统。
+    test_connection(host.id.clone(), Some(PASSWORD.into()), None, true).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
     std::fs::write(&file, b"x").unwrap();
 
     let task_id = start_batch_upload(
@@ -3656,6 +3920,11 @@ fn ffi_batch_upload_subsystem_rejected_fails() {
         std::thread::sleep(Duration::from_millis(50));
         let record = batch_transfer_status(task_id.clone()).unwrap();
         if matches!(record.status, BatchTransferStatusEnum::Failed) {
+            let error = record.error.as_deref().expect("SFTP 创建失败应携带错误");
+            assert!(
+                error.starts_with("sftp error: "),
+                "应到达 SFTP 子系统创建，而非提前因主机密钥或认证失败：{error}"
+            );
             cleanup_store();
             return;
         }

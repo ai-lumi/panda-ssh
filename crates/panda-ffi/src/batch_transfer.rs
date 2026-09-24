@@ -137,6 +137,15 @@ fn snapshot_to_record(s: BatchTaskSnapshot) -> BatchTransferStatusRecord {
 // FFI executor — 实际 SSH/SFTP 连接 + 扫描 + 传输
 // ---------------------------------------------------------------------------
 
+fn failed_batch_outcome(error: String) -> BatchOutcome {
+    BatchOutcome {
+        completed: vec![],
+        skipped: vec![],
+        errors: vec![error],
+        cancelled: false,
+    }
+}
+
 struct FfiBatchExecutor;
 
 impl BatchExecutor for FfiBatchExecutor {
@@ -154,36 +163,15 @@ impl BatchExecutor for FfiBatchExecutor {
         Box::pin(async move {
             let cfg = match load_host(&host_id) {
                 Ok(c) => c,
-                Err(e) => {
-                    return BatchOutcome {
-                        completed: vec![],
-                        skipped: vec![],
-                        errors: vec![e.to_string()],
-                        cancelled: false,
-                    }
-                }
+                Err(e) => return failed_batch_outcome(e.to_string()),
             };
             let creds = match store_credentials_for(&cfg, password, passphrase) {
                 Ok(c) => c,
-                Err(e) => {
-                    return BatchOutcome {
-                        completed: vec![],
-                        skipped: vec![],
-                        errors: vec![e.to_string()],
-                        cancelled: false,
-                    }
-                }
+                Err(e) => return failed_batch_outcome(e.to_string()),
             };
             let store_path = match stores() {
                 Ok(s) => s.core.known_hosts_store().path().to_path_buf(),
-                Err(e) => {
-                    return BatchOutcome {
-                        completed: vec![],
-                        skipped: vec![],
-                        errors: vec![e.to_string()],
-                        cancelled: false,
-                    }
-                }
+                Err(e) => return failed_batch_outcome(e.to_string()),
             };
             let mut known_hosts = KnownHosts::new(store_path);
             let session = match SshSession::connect_shared(
@@ -195,26 +183,12 @@ impl BatchExecutor for FfiBatchExecutor {
             .await
             {
                 Ok(s) => s,
-                Err(e) => {
-                    return BatchOutcome {
-                        completed: vec![],
-                        skipped: vec![],
-                        errors: vec![e.to_string()],
-                        cancelled: false,
-                    }
-                }
+                Err(e) => return failed_batch_outcome(e.to_string()),
             };
             session.set_owner("批量传输", host_id.clone());
             let sftp = match SftpClient::new(&session).await {
                 Ok(s) => s,
-                Err(e) => {
-                    return BatchOutcome {
-                        completed: vec![],
-                        skipped: vec![],
-                        errors: vec![e.to_string()],
-                        cancelled: false,
-                    }
-                }
+                Err(e) => return failed_batch_outcome(e.to_string()),
             };
 
             let resolver = conflict_resolver.clone();
@@ -250,12 +224,7 @@ impl BatchExecutor for FfiBatchExecutor {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = sftp.close().await;
-                    return BatchOutcome {
-                        completed: vec![],
-                        skipped: vec![],
-                        errors: vec![e.to_string()],
-                        cancelled: false,
-                    };
+                    return failed_batch_outcome(e.to_string());
                 }
             };
 
@@ -290,12 +259,7 @@ impl BatchExecutor for FfiBatchExecutor {
             let _ = sftp.close().await;
             match outcome {
                 Ok(o) => o,
-                Err(e) => BatchOutcome {
-                    completed: vec![],
-                    skipped: vec![],
-                    errors: vec![e.to_string()],
-                    cancelled: false,
-                },
+                Err(e) => failed_batch_outcome(e.to_string()),
             }
         })
     }

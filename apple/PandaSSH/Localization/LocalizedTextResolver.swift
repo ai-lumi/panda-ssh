@@ -188,6 +188,7 @@ final class LocalizedTextResolver {
             }
         }
         switch arguments.count {
+        case 0: return template
         case 1: return String.localizedStringWithFormat(template, arguments[0])
         case 2: return String.localizedStringWithFormat(template, arguments[0], arguments[1])
         case 3: return String.localizedStringWithFormat(template, arguments[0], arguments[1], arguments[2])
@@ -248,7 +249,7 @@ final class LocalizedTextResolver {
     // MARK: - descriptor 校验
 
     private static func areValid(_ parameters: [MessageParameter]) -> Bool {
-        for i in 1..<parameters.count where parameters[i - 1].name >= parameters[i].name {
+        for i in parameters.indices.dropFirst() where parameters[i - 1].name >= parameters[i].name {
             return false
         }
         return parameters.allSatisfy(\.isConsistent)

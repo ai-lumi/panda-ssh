@@ -187,6 +187,7 @@ final class GlobalTransferNavigationTests: XCTestCase {
         model.showTransfers()
         XCTAssertEqual(model.workspacePresentation, .empty)
         model.selectHost("h-webprod")
+        drainMainQueue()
         XCTAssertEqual(model.sidebarPage, .hosts)
     }
 

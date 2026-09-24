@@ -36,10 +36,12 @@ pub use ffi_workspace::{
 mod ffi_telemetry;
 pub use ffi_telemetry::{
     connection_failure_classify, connection_health_check, connection_lifecycle_drain,
-    connection_telemetry_list, log_clear, log_entries, log_write, ChannelKindEnum,
-    ChannelStateEnum, ChannelTelemetryRecord, ConnectionFailureFFIRecord,
-    ConnectionLifecycleRecord, ConnectionStateEnum, ConnectionTelemetryRecord, FailureCategoryEnum,
-    HealthStateEnum, LogEntryRecord, LogLevelEnum, SshConnectionStateEnum,
+    connection_telemetry_list, connection_telemetry_snapshot, connection_telemetry_subscribe,
+    log_clear, log_entries, log_write, ChannelKindEnum, ChannelStateEnum, ChannelTelemetryRecord,
+    ConnectionFailureFFIRecord, ConnectionLifecycleRecord, ConnectionStateEnum,
+    ConnectionTelemetryObserver, ConnectionTelemetryRecord, ConnectionTelemetrySnapshotRecord,
+    ConnectionTelemetrySubscription, FailureCategoryEnum, HealthStateEnum, LogEntryRecord,
+    LogLevelEnum, SshConnectionStateEnum,
 };
 
 mod ffi_transfers;

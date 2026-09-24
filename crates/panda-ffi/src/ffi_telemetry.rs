@@ -2,6 +2,69 @@
 
 use crate::ffi_runtime::runtime;
 use crate::PandaError;
+use std::sync::Arc;
+
+/// 回调只负责投递快照；调用方应切换到自己的 UI 执行器。
+#[uniffi::export(callback_interface)]
+pub trait ConnectionTelemetryObserver: Send + Sync {
+    fn on_snapshot(&self, snapshot: ConnectionTelemetrySnapshotRecord);
+}
+
+#[derive(uniffi::Record)]
+pub struct ConnectionTelemetrySnapshotRecord {
+    pub revision: u64,
+    pub records: Vec<ConnectionTelemetryRecord>,
+}
+
+impl From<panda_core::telemetry::TelemetrySnapshot> for ConnectionTelemetrySnapshotRecord {
+    fn from(snapshot: panda_core::telemetry::TelemetrySnapshot) -> Self {
+        Self {
+            revision: snapshot.revision,
+            records: snapshot.records.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[uniffi::export]
+pub fn connection_telemetry_snapshot() -> ConnectionTelemetrySnapshotRecord {
+    panda_core::telemetry::global_registry()
+        .versioned_snapshot()
+        .into()
+}
+
+/// 句柄不被任务持有，释放最后一个句柄会结束等待并释放观察者。
+#[derive(uniffi::Object)]
+pub struct ConnectionTelemetrySubscription {
+    task: tokio::task::AbortHandle,
+}
+
+#[uniffi::export]
+impl ConnectionTelemetrySubscription {
+    pub fn cancel(&self) {
+        self.task.abort();
+    }
+}
+
+impl Drop for ConnectionTelemetrySubscription {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[uniffi::export]
+pub fn connection_telemetry_subscribe(
+    observer: Box<dyn ConnectionTelemetryObserver>,
+) -> Arc<ConnectionTelemetrySubscription> {
+    let mut subscription = panda_core::telemetry::global_registry().subscribe();
+    let task = runtime().spawn(async move {
+        loop {
+            observer.on_snapshot(subscription.next_snapshot().await.into());
+        }
+    });
+    Arc::new(ConnectionTelemetrySubscription {
+        task: task.abort_handle(),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Connection telemetry types

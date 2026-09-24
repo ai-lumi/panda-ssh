@@ -29,6 +29,58 @@ final class MainWindowChromeLifecycleTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
+    private final class AlternateContentView: NSView {
+        override var intrinsicContentSize: NSSize { NSSize(width: 123, height: 45) }
+    }
+
+    func test不同内容类型保持宿主类型且替换内容后仍禁用隐式拖窗() {
+        let window = window()
+        defer { window.close() }
+        let coordinator = MainWindowChrome.Coordinator(metrics: MacOSWorkspaceChromeMetrics())
+        let plain = NSView()
+        window.contentView = plain
+        let originalPlainClass = object_getClass(plain)!
+        window.isMovableByWindowBackground = true
+        coordinator.attach(to: window)
+        XCTAssertTrue(object_getClass(plain) === originalPlainClass, "适配不能替换宿主运行时类型")
+        XCTAssertFalse(window.isMovableByWindowBackground)
+
+        let alternate = AlternateContentView()
+        window.contentView = alternate
+        let originalAlternateClass = object_getClass(alternate)!
+        window.isMovableByWindowBackground = true
+        coordinator.attach(to: window)
+        XCTAssertTrue(object_getClass(alternate) === originalAlternateClass)
+        XCTAssertFalse(window.isMovableByWindowBackground)
+        XCTAssertEqual(alternate.intrinsicContentSize, NSSize(width: 123, height: 45))
+        let adaptedClass = object_getClass(alternate)!
+        coordinator.attach(to: window)
+        XCTAssertTrue(object_getClass(alternate) === adaptedClass, "重复挂载不能修改宿主运行时类型")
+        coordinator.attach(to: nil)
+        window.contentView = nil
+    }
+
+    func test不同SwiftUI内容类型在同一窗口中可更新和布局() {
+        let window = window()
+        defer { window.close() }
+        let coordinator = MainWindowChrome.Coordinator(metrics: MacOSWorkspaceChromeMetrics())
+        let text = NSHostingView(rootView: Text("第一种内容"))
+        let erased = NSHostingView(rootView: AnyView(Text("第二种内容")))
+        for content in [text as NSView, erased as NSView] {
+            window.contentView = content
+            let originalClass = object_getClass(content)!
+            window.isMovableByWindowBackground = true
+            coordinator.attach(to: window)
+            XCTAssertTrue(object_getClass(content) === originalClass)
+            XCTAssertFalse(window.isMovableByWindowBackground)
+            content.layoutSubtreeIfNeeded()
+        }
+        erased.rootView = AnyView(Text("更新内容"))
+        erased.layoutSubtreeIfNeeded()
+        coordinator.attach(to: nil)
+        window.contentView = nil
+    }
+
     func test重复挂载与焦点尺寸通知不重写已正确的窗口属性() {
         let window = window()
         defer { window.close() }
@@ -102,11 +154,19 @@ final class MainWindowChromeLifecycleTests: XCTestCase {
         XCTAssertFalse(window.titlebarAppearsTransparent)
     }
 
-    func testSwiftUI宿主更新拆卸及无原生按钮窗口() {
+    private func waitForTransparentTitlebar(_ window: NSWindow) async {
+        // 等待实际挂载状态，避免固定 50ms 在全量运行时早于 SwiftUI 布局完成。
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "titlebarAppearsTransparent == YES"), object: window
+        )
+        await fulfillment(of: [ready], timeout: 2)
+    }
+
+    func testSwiftUI宿主更新拆卸及无原生按钮窗口() async {
         let window = window()
         defer { window.close() }
         let metrics = MacOSWorkspaceChromeMetrics()
-        XCTAssertTrue(WindowDragView.DragView().mouseDownCanMoveWindow)
+        XCTAssertFalse(WindowDragView.DragView().mouseDownCanMoveWindow, "空白区域通过 performDrag 显式拖窗")
         func root(_ visible: Bool) -> AnyView {
             AnyView(
                 MacOSUnifiedSplitHost(
@@ -120,9 +180,10 @@ final class MainWindowChromeLifecycleTests: XCTestCase {
         let hosting = NSHostingView(rootView: root(true))
         window.contentView = hosting
         window.orderFrontRegardless()
-        pump()
+        await waitForTransparentTitlebar(window)
         hosting.rootView = root(false)
         pump()
+        await waitForTransparentTitlebar(window)
         XCTAssertTrue(window.titlebarAppearsTransparent)
         hosting.rootView = AnyView(EmptyView())
         pump()

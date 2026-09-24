@@ -11,10 +11,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
+use tokio::time::Instant;
 
 const RATE_WINDOW: Duration = Duration::from_millis(250);
 const IDLE_AFTER_MS: u64 = 5_000;
+
+#[cfg(test)]
+mod subscription_tests;
 
 /// 固定原因枚举，不允许把远端内容或原始错误串写入生命周期日志。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +149,12 @@ pub struct ConnectionSnapshot {
     pub channels: Vec<ChannelSnapshot>,
 }
 
+/// 顺序号在读取状态的同一把锁内分配，用于拒绝跨执行器迟到的旧快照。
+pub struct TelemetrySnapshot {
+    pub revision: u64,
+    pub records: Vec<ConnectionSnapshot>,
+}
+
 struct ConnectionRecord {
     host_id: String,
     address: String,
@@ -160,6 +171,7 @@ struct ConnectionRecord {
     receive_bytes_per_second: u64,
     send_bytes_per_second: u64,
     rate_window_started: Instant,
+    last_activity: Instant,
     rate_window_received: u64,
     rate_window_sent: u64,
     explicit_close_requested: bool,
@@ -186,6 +198,7 @@ impl ConnectionRecord {
             receive_bytes_per_second: 0,
             send_bytes_per_second: 0,
             rate_window_started: Instant::now(),
+            last_activity: Instant::now(),
             rate_window_received: 0,
             rate_window_sent: 0,
             explicit_close_requested: false,
@@ -206,20 +219,88 @@ impl ConnectionRecord {
         self.rate_window_sent = 0;
         self.rate_window_started = Instant::now();
     }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        let rate = (self.rate_window_received > 0
+            || self.rate_window_sent > 0
+            || self.receive_bytes_per_second > 0
+            || self.send_bytes_per_second > 0)
+            .then_some(self.rate_window_started + RATE_WINDOW);
+        let idle = (self.transport_state == TransportState::Active)
+            .then_some(self.last_activity + Duration::from_millis(IDLE_AFTER_MS));
+        rate.into_iter().chain(idle).min()
+    }
 }
 
-#[derive(Default)]
 pub struct TelemetryRegistry {
     next_id: AtomicU64,
+    next_snapshot_revision: AtomicU64,
     connections: Mutex<HashMap<u64, ConnectionRecord>>,
     events: Mutex<VecDeque<LifecycleEvent>>,
+    changed: watch::Sender<()>,
+}
+
+impl Default for TelemetryRegistry {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::default(),
+            next_snapshot_revision: AtomicU64::default(),
+            connections: Mutex::default(),
+            events: Mutex::default(),
+            changed: watch::channel(()).0,
+        }
+    }
+}
+
+/// 独立的最新快照订阅。取消等待或丢弃订阅不会消费其他订阅的通知。
+pub struct TelemetrySubscription {
+    registry: Arc<TelemetryRegistry>,
+    changed: watch::Receiver<()>,
+    last_snapshot: Option<Vec<ConnectionSnapshot>>,
+    deadline: Option<Instant>,
+}
+
+impl TelemetrySubscription {
+    pub async fn next_snapshot(&mut self) -> TelemetrySnapshot {
+        loop {
+            if self.last_snapshot.is_some() {
+                if let Some(deadline) = self.deadline {
+                    tokio::select! {
+                        _ = self.changed.changed() => {},
+                        _ = tokio::time::sleep_until(deadline) => {},
+                    }
+                } else {
+                    // registry 的强引用保证发送端在订阅存活期间不会关闭。
+                    let _ = self.changed.changed().await;
+                }
+            }
+            // 必须先标记通知，再读取快照；读取期间的变更留给下一次等待。
+            self.changed.borrow_and_update();
+            let (snapshot, deadline) = self.registry.snapshot_with_deadline();
+            self.deadline = deadline;
+            if self.last_snapshot.as_ref() != Some(&snapshot.records) {
+                self.last_snapshot = Some(snapshot.records.clone());
+                return snapshot;
+            }
+        }
+    }
 }
 
 impl TelemetryRegistry {
+    pub fn subscribe(self: &Arc<Self>) -> TelemetrySubscription {
+        TelemetrySubscription {
+            registry: Arc::clone(self),
+            changed: self.changed.subscribe(),
+            last_snapshot: None,
+            deadline: None,
+        }
+    }
+
     pub fn register_connection(&self, host_id: String, address: String) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.lock()
             .insert(id, ConnectionRecord::new(host_id, address));
+        self.changed.send_replace(());
         id
     }
 
@@ -229,6 +310,7 @@ impl TelemetryRegistry {
             record.ssh_state = SshState::Authenticated;
             record.health_state = HealthState::Healthy;
             record.last_error = None;
+            self.changed.send_replace(());
         }
     }
 
@@ -236,6 +318,7 @@ impl TelemetryRegistry {
         if let Some(record) = self.lock().get_mut(&id) {
             record.owner_kind = sanitize_owner(owner_kind.into());
             record.owner_id = sanitize_owner(owner_id.into());
+            self.changed.send_replace(());
         }
         self.record_event(id, LifecycleKind::Connected);
     }
@@ -294,6 +377,15 @@ impl TelemetryRegistry {
 
     pub fn record_io(&self, id: u64, received: u64, sent: u64) {
         if let Some(record) = self.lock().get_mut(&id) {
+            // 稳定空闲时没有周期采样；恢复 I/O 必须从活动时刻开启新窗口。
+            if (received > 0 || sent > 0)
+                && record.rate_window_received == 0
+                && record.rate_window_sent == 0
+                && record.receive_bytes_per_second == 0
+                && record.send_bytes_per_second == 0
+            {
+                record.rate_window_started = Instant::now();
+            }
             record.received_bytes = record.received_bytes.saturating_add(received);
             record.sent_bytes = record.sent_bytes.saturating_add(sent);
             // SSH disconnect 帧及 Socket 清理可能在关闭标记之后才完成底层 I/O。
@@ -306,9 +398,11 @@ impl TelemetryRegistry {
             record.rate_window_sent = record.rate_window_sent.saturating_add(sent);
             if !is_terminal && (received > 0 || sent > 0) {
                 record.last_activity_at_ms = now_ms();
+                record.last_activity = Instant::now();
                 record.transport_state = TransportState::Active;
             }
             record.update_rates();
+            self.changed.send_replace(());
         }
     }
 
@@ -316,6 +410,7 @@ impl TelemetryRegistry {
         if let Some(record) = self.lock().get_mut(&id) {
             if record.transport_state == TransportState::Active {
                 record.transport_state = TransportState::Idle;
+                self.changed.send_replace(());
             }
         }
     }
@@ -331,6 +426,7 @@ impl TelemetryRegistry {
             if record.last_error.is_none() {
                 record.last_error = Some(sanitize_error(error));
             }
+            self.changed.send_replace(());
         }
     }
 
@@ -360,13 +456,18 @@ impl TelemetryRegistry {
                     channel.state = ChannelState::Closed;
                 }
             }
+            self.changed.send_replace(());
         }
     }
 
     /// 最后一个会话所有者释放后移除记录，避免监控注册表随重连无限增长。
     pub fn unregister_connection(&self, id: u64) -> bool {
         self.record_event(id, LifecycleKind::Released);
-        self.lock().remove(&id).is_some()
+        let removed = self.lock().remove(&id).is_some();
+        if removed {
+            self.changed.send_replace(());
+        }
+        removed
     }
 
     pub fn set_health(&self, id: u64, state: HealthState, error: Option<String>) -> bool {
@@ -380,6 +481,7 @@ impl TelemetryRegistry {
         if state == HealthState::Unavailable {
             record.ssh_state = SshState::Failed;
         }
+        self.changed.send_replace(());
         true
     }
 
@@ -402,6 +504,7 @@ impl TelemetryRegistry {
                 sent_bytes: 0,
             },
         );
+        self.changed.send_replace(());
         channel_id
     }
 
@@ -431,6 +534,7 @@ impl TelemetryRegistry {
                 channel.state = state;
             }
         }
+        self.changed.send_replace(());
         true
     }
 
@@ -450,13 +554,21 @@ impl TelemetryRegistry {
     }
 
     pub fn snapshot(&self) -> Vec<ConnectionSnapshot> {
+        self.versioned_snapshot().records
+    }
+
+    pub fn versioned_snapshot(&self) -> TelemetrySnapshot {
+        self.snapshot_with_deadline().0
+    }
+
+    fn snapshot_with_deadline(&self) -> (TelemetrySnapshot, Option<Instant>) {
         let mut connections = self.lock();
         let mut result: Vec<_> = connections
             .iter_mut()
             .map(|(&id, record)| {
                 record.update_rates();
                 if record.transport_state == TransportState::Active
-                    && now_ms().saturating_sub(record.last_activity_at_ms) >= IDLE_AFTER_MS
+                    && record.last_activity.elapsed() >= Duration::from_millis(IDLE_AFTER_MS)
                 {
                     record.transport_state = TransportState::Idle;
                 }
@@ -484,7 +596,18 @@ impl TelemetryRegistry {
             })
             .collect();
         result.sort_by_key(|record| record.id);
-        result
+        let deadline = connections
+            .values()
+            .filter_map(ConnectionRecord::next_deadline)
+            .min();
+        let revision = self.next_snapshot_revision.fetch_add(1, Ordering::Relaxed) + 1;
+        (
+            TelemetrySnapshot {
+                revision,
+                records: result,
+            },
+            deadline,
+        )
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, ConnectionRecord>> {

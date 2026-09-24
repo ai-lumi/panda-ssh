@@ -1015,6 +1015,10 @@ final class WorkspaceConnectionStatusObservationTests: XCTestCase {
         XCTAssertEqual(terminalSession.phase, .failed)
         XCTAssertNil(terminalSession.connection)
         XCTAssertFalse(closed.contains(rejected))
+
+        store.beginApplicationShutdown()
+        XCTAssertEqual(closed.count, 2, "重复停机不得重复通知或释放会话")
+        XCTAssertEqual(Set(closed), Set([terminal, sftp]))
     }
 }
 

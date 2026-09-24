@@ -9,139 +9,131 @@
 // 3. ConnectionMonitorView —— SwiftUI 视图层，以卡片列表形式展示连接状态
 //
 // 连接监控只读取 Rust 快照并触发既有连接的按需探测，不持有凭据或会话内容。
-// 视图每秒自动刷新一次数据，同时支持手动刷新和单连接健康探测。
+// 视图订阅底层遥测变化，同时支持手动刷新和单连接健康探测。
 // =============================================================================
 
 import SwiftUI
 // 导入 SwiftUI 框架，提供声明式 UI 构建能力
 
-/// 连接监控只读数据仓库。
-/// 只读取 Rust 快照并触发既有连接的按需探测，不持有凭据或会话内容。
-/// @MainActor 确保所有属性和方法都在主线程执行（因为要更新 UI 绑定的 @Published 属性）。
-/// ObservableObject 协议使这个类可以被 SwiftUI 的 @StateObject/@ObservedObject 观察，
-/// 当 @Published 属性变化时自动触发视图刷新。
+/// Rust 工作线程上的回调只投递值，不直接访问 MainActor。
+private final class MonitorSnapshotObserver: ConnectionTelemetryObserver {
+    private let receive: @Sendable (ConnectionTelemetrySnapshotRecord) -> Void
+
+    init(receive: @escaping @Sendable (ConnectionTelemetrySnapshotRecord) -> Void) {
+        self.receive = receive
+    }
+
+    func onSnapshot(snapshot: ConnectionTelemetrySnapshotRecord) {
+        receive(snapshot)
+    }
+}
+
+/// 连接监控只呈现核心快照；自动更新由页面生命周期内的订阅驱动。
 @MainActor
 final class ConnectionMonitorStore: ObservableObject {
-    /// 快照加载闭包类型：从 Rust 后端获取连接遥测记录列表
-    /// @Sendable 表示这个闭包可以安全地跨线程传递
-    typealias SnapshotLoader = @Sendable () throws -> [ConnectionTelemetryRecord]
-    /// 健康检查闭包类型：根据连接 ID 检查连接健康状态
+    typealias SnapshotLoader = @Sendable () throws -> ConnectionTelemetrySnapshotRecord
     typealias HealthChecker = @Sendable (UInt64) throws -> HealthStateEnum
+    typealias SnapshotSubscriber = @Sendable (
+        @escaping @Sendable (ConnectionTelemetrySnapshotRecord) -> Void
+    ) -> (@Sendable () -> Void)
 
-    /// 当前所有连接的遥测记录列表
-    /// @Published 使属性变化时自动通知 SwiftUI 刷新视图
-    /// private(set) 表示外部只能读取、不能直接修改（必须通过 refresh() 方法更新）
     @Published private(set) var records: [ConnectionTelemetryRecord] = []
-    /// 是否正在刷新数据（用于显示加载指示器和禁用刷新按钮）
+    @Published private(set) var hasLoadedSnapshot = false
     @Published private(set) var isRefreshing = false
-    /// 正在进行健康检查的连接 ID 集合（用于显示对应卡片上的加载指示器）
     @Published private(set) var checkingConnectionIDs: Set<UInt64> = []
-    /// 错误信息（nil 表示无错误，非 nil 时触发 alert 弹窗）
     @Published var errorMessage: String?
 
-    /// 快照加载闭包（从 Rust 后端读取连接状态）
     private let snapshotLoader: SnapshotLoader
-    /// 健康检查闭包（对单个连接执行探测）
     private let healthChecker: HealthChecker
+    private let snapshotSubscriber: SnapshotSubscriber
+    private var observationID: UUID?
+    private var snapshotRevision: UInt64 = 0
 
-    /// 初始化数据仓库
-    /// - Parameters:
-    ///   - snapshotLoader: 快照加载函数，默认调用 connectionTelemetryList()（Rust FFI）
-    ///   - healthChecker: 健康检查函数，默认调用 connectionHealthCheck(connectionId:)（Rust FFI）
-    /// 测试时可以注入自定义闭包来模拟后端行为
     init(
-        snapshotLoader: @escaping SnapshotLoader = { connectionTelemetryList() },
-        healthChecker: @escaping HealthChecker = { try connectionHealthCheck(connectionId: $0) }
+        snapshotLoader: @escaping SnapshotLoader = { connectionTelemetrySnapshot() },
+        healthChecker: @escaping HealthChecker = { try connectionHealthCheck(connectionId: $0) },
+        snapshotSubscriber: @escaping SnapshotSubscriber = { receive in
+            let subscription = connectionTelemetrySubscribe(
+                observer: MonitorSnapshotObserver(receive: receive)
+            )
+            return { subscription.cancel() }
+        }
     ) {
         self.snapshotLoader = snapshotLoader
         self.healthChecker = healthChecker
+        self.snapshotSubscriber = snapshotSubscriber
     }
 
-    /// 刷新所有连接的遥测数据。
-    /// 从 Rust 后端加载最新快照，合并到现有记录中。
-    /// 使用 guard !isRefreshing 防止重复刷新（避免并发请求）。
+    /// 没有事件时挂起；取消等待会结束流并释放 Rust 订阅。
+    func observe() async {
+        guard !Task.isCancelled else { return }
+        let id = UUID()
+        observationID = id
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: ConnectionTelemetrySnapshotRecord.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let cancel = snapshotSubscriber { continuation.yield($0) }
+        continuation.onTermination = { _ in cancel() }
+        defer {
+            continuation.finish()
+            if observationID == id { observationID = nil }
+        }
+        for await snapshot in stream {
+            guard !Task.isCancelled, observationID == id else { break }
+            apply(snapshot)
+        }
+    }
+
+    /// 手动读取只在没有更新的订阅快照时应用，避免慢读取回退页面状态。
     func refresh() async {
         guard !isRefreshing else { return }
-        // 如果已经在刷新中，直接返回，避免重复请求
+        let revision = snapshotRevision
         isRefreshing = true
-        // 标记为刷新中（UI 会据此显示加载指示器）
         defer { isRefreshing = false }
-        // defer 确保无论成功还是失败，刷新结束后都会将标记重置为 false
         do {
             let snapshot = try await FFIBackground.run(snapshotLoader)
-            // 在后台线程执行 FFI 调用，避免阻塞主线程
-            // FFIBackground.run 会将闭包调度到后台线程执行并返回结果
-            let merged = mergedRecords(from: snapshot)
-            // 将新快照与现有记录合并（保持引用稳定性，减少不必要的视图刷新）
-            if merged != records {
-                records = merged
-                // 只有数据真正变化时才更新 @Published 属性，触发视图刷新
-            }
-            errorMessage = nil
-            // 刷新成功，清除之前的错误信息
+            apply(snapshot)
         } catch {
+            guard revision == snapshotRevision else { return }
             errorMessage = Self.errorSummary(error)
-            // 刷新失败，记录错误摘要（会触发 alert 弹窗）
         }
     }
 
-    /// 以连接 ID 固定排序；未变化的值沿用既有快照，避免无意义地发布整个列表。
-    /// 这个优化可以减少 SwiftUI 的 diff 计算量，提升列表渲染性能。
-    /// - Parameter snapshot: 从后端获取的最新快照
-    /// - Returns: 合并后的记录列表（按 ID 排序，未变化的记录沿用旧引用）
-    private func mergedRecords(from snapshot: [ConnectionTelemetryRecord]) -> [ConnectionTelemetryRecord] {
-        let existingRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
-        // 将现有记录转为字典，key 是连接 ID，value 是记录对象
-        // 这样可以用 O(1) 时间查找某个 ID 对应的旧记录
-        return snapshot
-            .sorted { $0.id < $1.id }
-            // 按连接 ID 升序排列，确保列表顺序稳定
-            .map { record in existingRecords[record.id] == record ? existingRecords[record.id]! : record }
-            // 对于每条新记录：如果旧数据中有相同 ID 且内容相同的记录，沿用旧引用
-            // 否则使用新记录。这样可以避免 @Published 触发不必要的视图刷新
+    private func apply(_ snapshot: ConnectionTelemetrySnapshotRecord) {
+        guard snapshot.revision >= snapshotRevision else { return }
+        snapshotRevision = snapshot.revision
+        let existing = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        let merged = snapshot.records.sorted { $0.id < $1.id }.map {
+            existing[$0.id] == $0 ? existing[$0.id]! : $0
+        }
+        if merged != records { records = merged }
+        if !hasLoadedSnapshot { hasLoadedSnapshot = true }
+        if errorMessage != nil { errorMessage = nil }
     }
 
-    /// 对指定连接执行健康探测。
-    /// 健康探测会向远程服务器发送一个轻量级请求，确认连接是否仍然可用。
-    /// - Parameter connectionID: 要检查的连接 ID
     func checkHealth(connectionID: UInt64) async {
         guard !checkingConnectionIDs.contains(connectionID) else { return }
-        // 如果该连接正在检查中，不重复发起
         checkingConnectionIDs.insert(connectionID)
-        // 将连接 ID 加入"正在检查"集合（UI 会据此显示加载指示器）
         defer { checkingConnectionIDs.remove(connectionID) }
-        // 检查完成后从集合中移除
         do {
-            let state = try await FFIBackground.run { [healthChecker] in
-                try healthChecker(connectionID)
+            let snapshot = try await FFIBackground.run { [healthChecker, snapshotLoader] in
+                _ = try healthChecker(connectionID)
+                // 核心可能已收到比探测结果更新的事件，统一读取带序号的完整状态。
+                return try snapshotLoader()
             }
-            // 在后台线程执行健康检查 FFI 调用
-            if let index = records.firstIndex(where: { $0.id == connectionID }) {
-                records[index].healthState = state
-                // 找到对应连接，更新其健康状态
-                // 这会触发 @Published 通知，刷新对应卡片的健康状态徽标
-            }
-            errorMessage = nil
-            // 成功，清除错误信息
+            apply(snapshot)
         } catch {
             errorMessage = Self.errorSummary(error)
-            // 失败，记录错误信息
         }
     }
 
-    /// 将错误转换为简短的中文摘要文本。
-    /// 对于"连接不存在"这种常见错误，给出友好的中文提示；
-    /// 其他错误使用系统提供的 localizedDescription。
-    /// - Parameter error: 捕获到的错误
-    /// - Returns: 用户可读的错误描述字符串
     private static func errorSummary(_ error: Error) -> String {
         if let pandaError = error as? PandaError,
            case let PandaError.UnknownConnection(id) = pandaError {
-            // 如果是"未知连接"错误（连接 ID 不存在或已结束）
             return "连接 #\(id) 不存在或已结束"
         }
         return error.localizedDescription
-        // 其他错误使用系统默认的错误描述
     }
 }
 
@@ -279,7 +271,7 @@ enum ConnectionMonitorFormatter {
 /// - 数据传输量（接收/发送字节数和速率）
 /// - 通道信息和错误消息
 ///
-/// 视图每秒自动刷新一次数据（通过 .task 中的循环实现）。
+/// 视图通过 .task 订阅遥测快照，消失时自动取消订阅。
 @MainActor
 struct ConnectionMonitorView: View {
     /// 数据仓库对象，管理连接遥测数据
@@ -303,8 +295,8 @@ struct ConnectionMonitorView: View {
     var body: some View {
         Group {
             // Group 用于将多个视图组合在一起，以便应用共同的修饰符
-            if store.records.isEmpty, !store.isRefreshing {
-                // 如果没有连接记录且不在刷新中 -> 显示空态
+            if store.records.isEmpty, store.hasLoadedSnapshot {
+                // 首次快照到达后，空态不再受手动刷新标志影响。
                 ContentUnavailableView(
                     // ContentUnavailableView 是 SwiftUI 内置的空态视图
                     // 显示一个大图标 + 标题 + 描述文字，居中展示
@@ -316,7 +308,7 @@ struct ConnectionMonitorView: View {
                     // 描述文字：告诉用户如何产生连接数据
                 )
             } else {
-                // 有连接记录或正在刷新 -> 显示滚动列表
+                // 有连接记录或尚未收到首次快照时显示列表容器。
                 ScrollView {
                     // 可垂直滚动的容器
                     LazyVStack(spacing: 12) {
@@ -356,23 +348,9 @@ struct ConnectionMonitorView: View {
             }
         }
         .overlay {
-            // .overlay 在视图上方叠加一层内容
-            if store.isRefreshing, store.records.isEmpty { ProgressView("读取连接状态…") }
-            // 仅在刷新中且无数据时显示加载指示器（首次加载时）
-            // ProgressView 是一个旋转的加载圆圈 + 提示文字
+            if !store.hasLoadedSnapshot { ProgressView("读取连接状态…") }
         }
-        .task {
-            // .task 在视图出现时启动一个异步任务，视图消失时自动取消
-            while !Task.isCancelled {
-                // 循环执行，直到任务被取消（视图消失时）
-                await store.refresh()
-                // 刷新数据
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                // 等待 1 秒（10^9 纳秒 = 1 秒）
-                // try? 忽略取消抛出的异常
-                // 这样就实现了每秒自动刷新一次的效果
-            }
-        }
+        .task { await store.observe() }
         .alert(
             // .alert 显示系统警告弹窗
             "连接监控",

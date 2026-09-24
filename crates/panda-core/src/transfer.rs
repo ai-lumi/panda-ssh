@@ -1946,8 +1946,8 @@ mod tests {
     #[tokio::test]
     async fn group_progress_aggregates_member_bytes() {
         let service = TransferService::new(Box::new(FakeExecutor::success()));
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 200);
 
         let _id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -1975,8 +1975,8 @@ mod tests {
             None,
             1,
         );
-        let mut p1 = make_grouped_params("g1", "跳过组", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "跳过组", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "跳过组", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "跳过组", "/local/f2", "/remote/f2", 200);
 
         let _id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -2033,8 +2033,8 @@ mod tests {
         });
 
         let service = TransferService::new(Box::new(executor));
-        let mut p1 = make_grouped_params("g1", "混合组", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "混合组", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "混合组", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "混合组", "/local/f2", "/remote/f2", 200);
 
         let id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -2053,8 +2053,8 @@ mod tests {
     #[tokio::test]
     async fn all_zero_byte_group_shows_zero_transferred() {
         let service = TransferService::new(Box::new(FakeExecutor::success()));
-        let mut p1 = make_grouped_params("g1", "零字节组", "/local/f1", "/remote/f1", 0);
-        let mut p2 = make_grouped_params("g1", "零字节组", "/local/f2", "/remote/f2", 0);
+        let p1 = make_grouped_params("g1", "零字节组", "/local/f1", "/remote/f1", 0);
+        let p2 = make_grouped_params("g1", "零字节组", "/local/f2", "/remote/f2", 0);
 
         let _id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -2081,8 +2081,8 @@ mod tests {
             None,
             1,
         );
-        let mut p1 = make_grouped_params("g1", "全跳过组", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "全跳过组", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "全跳过组", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "全跳过组", "/local/f2", "/remote/f2", 200);
 
         let _id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -2114,9 +2114,9 @@ mod tests {
         });
 
         let service = TransferService::new(Box::new(executor));
-        let mut p1 = make_grouped_params("g1", "混合组", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "混合组", "/local/f2", "/remote/f2", 200);
-        let mut p3 = make_grouped_params("g1", "混合组", "/local/f3", "/remote/f3", 300);
+        let p1 = make_grouped_params("g1", "混合组", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "混合组", "/local/f2", "/remote/f2", 200);
+        let p3 = make_grouped_params("g1", "混合组", "/local/f3", "/remote/f3", 300);
 
         let _id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -2139,8 +2139,8 @@ mod tests {
     async fn single_file_failure_preserves_group_total_count() {
         let executor = FakeExecutor::failure("always fail");
         let service = TransferService::new(Box::new(executor));
-        let mut p1 = make_grouped_params("g1", "失败组", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "失败组", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "失败组", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "失败组", "/local/f2", "/remote/f2", 200);
 
         let _id1 = service.start_transfer(p1).unwrap();
         let _id2 = service.start_transfer(p2).unwrap();
@@ -2217,8 +2217,8 @@ mod tests {
             None,
             1,
         );
-        let mut p1 = make_grouped_params("g1", "重试跳过组", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "重试跳过组", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "重试跳过组", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "重试跳过组", "/local/f2", "/remote/f2", 200);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();
@@ -2243,9 +2243,9 @@ mod tests {
     #[tokio::test]
     async fn single_task_cancel_in_group_does_not_affect_others() {
         let service = TransferService::with_concurrency(Box::new(FakeExecutor::slow(100, 10, 20)), 4, None);
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
-        let mut p3 = make_grouped_params("g1", "组一", "/local/f3", "/remote/f3", 100);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
+        let p3 = make_grouped_params("g1", "组一", "/local/f3", "/remote/f3", 100);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();
@@ -2266,8 +2266,8 @@ mod tests {
     #[tokio::test]
     async fn single_task_pause_in_group_does_not_affect_others() {
         let service = TransferService::with_concurrency(Box::new(FakeExecutor::slow(100, 10, 20)), 4, None);
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();
@@ -2285,8 +2285,8 @@ mod tests {
     #[tokio::test]
     async fn single_task_cancel_does_not_affect_other_groups() {
         let service = TransferService::with_concurrency(Box::new(FakeExecutor::slow(100, 10, 20)), 4, None);
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g2", "组二", "/local/f2", "/remote/f2", 100);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g2", "组二", "/local/f2", "/remote/f2", 100);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();
@@ -2317,8 +2317,8 @@ mod tests {
         });
 
         let service = TransferService::new(Box::new(executor));
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 200);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 200);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();
@@ -2359,8 +2359,8 @@ mod tests {
         });
 
         let service = TransferService::with_concurrency(Box::new(executor), 1, None);
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();
@@ -2403,9 +2403,9 @@ mod tests {
         });
 
         let service = TransferService::with_concurrency(Box::new(executor), 1, None);
-        let mut p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
-        let mut p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
-        let mut p3 = make_grouped_params("g1", "组一", "/local/f3", "/remote/f3", 100);
+        let p1 = make_grouped_params("g1", "组一", "/local/f1", "/remote/f1", 100);
+        let p2 = make_grouped_params("g1", "组一", "/local/f2", "/remote/f2", 100);
+        let p3 = make_grouped_params("g1", "组一", "/local/f3", "/remote/f3", 100);
 
         let id1 = service.start_transfer(p1).unwrap();
         let id2 = service.start_transfer(p2).unwrap();

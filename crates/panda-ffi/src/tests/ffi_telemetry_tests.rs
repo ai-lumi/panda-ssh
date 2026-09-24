@@ -1,6 +1,85 @@
 use super::*;
 use crate::test_support::global_test_lock;
 
+struct MonitorObserver {
+    snapshots: std::sync::mpsc::Sender<Vec<ConnectionTelemetryRecord>>,
+    dropped: std::sync::mpsc::Sender<()>,
+}
+
+impl ConnectionTelemetryObserver for MonitorObserver {
+    fn on_snapshot(&self, snapshot: ConnectionTelemetrySnapshotRecord) {
+        // 回调能重新查询核心，证明投递时没有持有核心状态锁。
+        let _ = connection_telemetry_list();
+        let newer = connection_telemetry_snapshot();
+        assert!(newer.revision > snapshot.revision);
+        let _ = self.snapshots.send(snapshot.records);
+    }
+}
+
+impl Drop for MonitorObserver {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(());
+    }
+}
+
+#[test]
+fn monitor_subscription_pushes_initial_and_changed_snapshot_and_cancels() {
+    let _test_guard = global_test_lock();
+    let (snapshots, received) = std::sync::mpsc::channel();
+    let (dropped, released) = std::sync::mpsc::channel();
+    let subscription =
+        connection_telemetry_subscribe(Box::new(MonitorObserver { snapshots, dropped }));
+    let deadline = std::time::Duration::from_secs(2);
+    received.recv_timeout(deadline).unwrap();
+    let registry = panda_core::telemetry::global_registry();
+    let id = registry.register_connection("ffi-monitor".into(), "example.test:22".into());
+    assert!(received
+        .recv_timeout(deadline)
+        .unwrap()
+        .iter()
+        .any(|record| record.id == id));
+    registry.set_authenticated(id);
+    let snapshot = received.recv_timeout(deadline).unwrap();
+    let record = snapshot.iter().find(|record| record.id == id).unwrap();
+    assert_eq!(record.ssh_state, SshConnectionStateEnum::Authenticated);
+    subscription.cancel();
+    subscription.cancel();
+    released.recv_timeout(deadline).unwrap();
+    registry.unregister_connection(id);
+    assert!(received.recv_timeout(deadline).is_err());
+}
+
+#[test]
+fn dropping_one_monitor_subscription_releases_observer_and_preserves_another() {
+    let _test_guard = global_test_lock();
+    let (snapshots, received) = std::sync::mpsc::channel();
+    let (dropped, released) = std::sync::mpsc::channel();
+    let first = connection_telemetry_subscribe(Box::new(MonitorObserver { snapshots, dropped }));
+    let (snapshots, other_received) = std::sync::mpsc::channel();
+    let (dropped, other_released) = std::sync::mpsc::channel();
+    let second = connection_telemetry_subscribe(Box::new(MonitorObserver { snapshots, dropped }));
+    let deadline = std::time::Duration::from_secs(2);
+    received.recv_timeout(deadline).unwrap();
+    other_received.recv_timeout(deadline).unwrap();
+    drop(first);
+    released.recv_timeout(deadline).unwrap();
+    let registry = panda_core::telemetry::global_registry();
+    let id = registry.register_connection("ffi-monitor".into(), "example.test:22".into());
+    assert!(other_received
+        .recv_timeout(deadline)
+        .unwrap()
+        .iter()
+        .any(|record| record.id == id));
+    registry.unregister_connection(id);
+    assert!(other_received
+        .recv_timeout(deadline)
+        .unwrap()
+        .iter()
+        .all(|record| record.id != id));
+    drop(second);
+    other_released.recv_timeout(deadline).unwrap();
+}
+
 #[test]
 fn lifecycle_record_has_only_safe_identifiers_and_fixed_reason() {
     let _test_guard = global_test_lock();

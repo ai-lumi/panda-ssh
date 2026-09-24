@@ -131,6 +131,12 @@ final class Logger: ObservableObject {
 
     /// 从 Rust 侧拉取最新日志条目并更新 @Published。
     private func refreshEntries() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshEntries()
+            }
+            return
+        }
         let ffiEntries = logEntries(limit: UInt32(Self.maxBufferEntries))
         let mapped = ffiEntries.reversed().compactMap { ffiEntry -> LogEntry? in
             let level: LogLevel

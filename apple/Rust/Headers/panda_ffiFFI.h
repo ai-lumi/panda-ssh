@@ -243,6 +243,42 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CONNECTION_TELEMETRY_OBSERVER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CONNECTION_TELEMETRY_OBSERVER_METHOD0
+typedef void (*UniffiCallbackInterfaceConnectionTelemetryObserverMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CONNECTION_TELEMETRY_OBSERVER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CONNECTION_TELEMETRY_OBSERVER
+typedef struct UniffiVTableCallbackInterfaceConnectionTelemetryObserver {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceConnectionTelemetryObserverMethod0 _Nonnull onSnapshot;
+} UniffiVTableCallbackInterfaceConnectionTelemetryObserver;
+
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_CLONE_CONNECTIONTELEMETRYSUBSCRIPTION
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_CLONE_CONNECTIONTELEMETRYSUBSCRIPTION
+uint64_t uniffi_panda_ffi_fn_clone_connectiontelemetrysubscription(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FREE_CONNECTIONTELEMETRYSUBSCRIPTION
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FREE_CONNECTIONTELEMETRYSUBSCRIPTION
+void uniffi_panda_ffi_fn_free_connectiontelemetrysubscription(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_METHOD_CONNECTIONTELEMETRYSUBSCRIPTION_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_METHOD_CONNECTIONTELEMETRYSUBSCRIPTION_CANCEL
+void uniffi_panda_ffi_fn_method_connectiontelemetrysubscription_cancel(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_INIT_CALLBACK_VTABLE_CONNECTIONTELEMETRYOBSERVER
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_INIT_CALLBACK_VTABLE_CONNECTIONTELEMETRYOBSERVER
+void uniffi_panda_ffi_fn_init_callback_vtable_connectiontelemetryobserver(const UniffiVTableCallbackInterfaceConnectionTelemetryObserver* _Nonnull vtable
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHILD_PATH
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_SFTP_CHILD_PATH
 RustBuffer uniffi_panda_ffi_fn_func_sftp_child_path(RustBuffer directory, RustBuffer name, RustCallStatus *_Nonnull out_status
@@ -627,6 +663,17 @@ RustBuffer uniffi_panda_ffi_fn_func_connection_lifecycle_drain(RustCallStatus *_
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_LIST
 RustBuffer uniffi_panda_ffi_fn_func_connection_telemetry_list(RustCallStatus *_Nonnull out_status
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_SNAPSHOT
+RustBuffer uniffi_panda_ffi_fn_func_connection_telemetry_snapshot(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_SUBSCRIBE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_CONNECTION_TELEMETRY_SUBSCRIBE
+uint64_t uniffi_panda_ffi_fn_func_connection_telemetry_subscribe(uint64_t observer, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_LOG_CLEAR
@@ -1671,6 +1718,18 @@ uint16_t uniffi_panda_ffi_checksum_func_connection_telemetry_list(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_TELEMETRY_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_TELEMETRY_SNAPSHOT
+uint16_t uniffi_panda_ffi_checksum_func_connection_telemetry_snapshot(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_TELEMETRY_SUBSCRIBE
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_CONNECTION_TELEMETRY_SUBSCRIBE
+uint16_t uniffi_panda_ffi_checksum_func_connection_telemetry_subscribe(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_CLEAR
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_LOG_CLEAR
 uint16_t uniffi_panda_ffi_checksum_func_log_clear(void
@@ -2046,6 +2105,18 @@ uint16_t uniffi_panda_ffi_checksum_func_workspace_set_host_names(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_TAB_LIST
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_TAB_LIST
 uint16_t uniffi_panda_ffi_checksum_func_workspace_tab_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_METHOD_CONNECTIONTELEMETRYSUBSCRIPTION_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_METHOD_CONNECTIONTELEMETRYSUBSCRIPTION_CANCEL
+uint16_t uniffi_panda_ffi_checksum_method_connectiontelemetrysubscription_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_METHOD_CONNECTIONTELEMETRYOBSERVER_ON_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_METHOD_CONNECTIONTELEMETRYOBSERVER_ON_SNAPSHOT
+uint16_t uniffi_panda_ffi_checksum_method_connectiontelemetryobserver_on_snapshot(void
     
 );
 #endif

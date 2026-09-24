@@ -1198,12 +1198,12 @@ final class TransferPanelViewTests: XCTestCase {
         AppModel(backend: MockBackend.demo())
     }
 
-    /// 在真实窗口中渲染 TransferPageView，返回 NSHostingView 供断言。
+    /// 同时返回宿主和窗口，由调用者持有至断言与关闭完成。
     private func renderInWindow(
         store: TransferStore,
         model: AppModel? = nil,
         size: NSSize = NSSize(width: 600, height: 400)
-    ) -> NSHostingView<AnyView> {
+    ) -> (hosting: NSHostingView<AnyView>, window: NSWindow) {
         let page = AnyView(TransferPageView(store: store)
             .environmentObject(model ?? makeModel()))
         let hosting = NSHostingView(rootView: page)
@@ -1212,10 +1212,11 @@ final class TransferPanelViewTests: XCTestCase {
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
+        window.isReleasedWhenClosed = false
         window.contentView = hosting
         window.orderFrontRegardless()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
-        return hosting
+        return (hosting, window)
     }
 
     /// 递归统计 NSView 层级中非零尺寸子视图数量。
@@ -1255,8 +1256,8 @@ final class TransferPanelViewTests: XCTestCase {
             groupID: UUID().uuidString, groupName: "下载文件B", password: nil, passphrase: nil)
         store.refresh()
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         let viewCount = countNonTrivialSubviews(in: hosting)
         XCTAssertGreaterThan(viewCount, 5, "两个组渲染后应有足够多的子视图，实际 \(viewCount)")
@@ -1273,8 +1274,8 @@ final class TransferPanelViewTests: XCTestCase {
             groupID: groupID.uuidString, groupName: "展开测试组", password: nil, passphrase: nil)
         store.refresh()
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         XCTAssertEqual(store.taskGroups.count, 1)
         XCTAssertEqual(store.taskGroups.first?.tasks.count, 1, "批量任务作为单条记录")
@@ -1291,8 +1292,8 @@ final class TransferPanelViewTests: XCTestCase {
             groupID: nil, groupName: nil, password: nil, passphrase: nil)
         store.refresh()
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         let viewCount = countNonTrivialSubviews(in: hosting)
         XCTAssertGreaterThan(viewCount, 3, "单文件批量行应有足够子视图")
@@ -1316,8 +1317,8 @@ final class TransferPanelViewTests: XCTestCase {
         }
         store.refresh()
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         XCTAssertEqual(store.taskGroups.count, 1, "失败组应出现在组列表中")
         XCTAssertEqual(store.taskGroups.first?.status, .failed)
@@ -1342,8 +1343,8 @@ final class TransferPanelViewTests: XCTestCase {
         }
         store.refresh()
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         let conflictTask = store.tasks.first { $0.pendingConflict != nil }
         XCTAssertNotNil(conflictTask, "待确认任务应存在于 store")
@@ -1382,8 +1383,8 @@ final class TransferPanelViewTests: XCTestCase {
             groupID: UUID().uuidString, groupName: "空目录", password: nil, passphrase: nil)
         store.refresh()
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         XCTAssertEqual(store.taskGroups.count, 1, "空目录组应出现")
         XCTAssertEqual(store.taskGroups.first?.tasks.count, 1, "批量记录作为单条任务")
@@ -1470,8 +1471,8 @@ final class TransferPanelViewTests: XCTestCase {
         let spy = makeSpy()
         let store = makeStore(spy: spy)
 
-        let hosting = renderInWindow(store: store)
-        defer { hosting.window?.close() }
+        let (hosting, window) = renderInWindow(store: store)
+        defer { window.close() }
 
         let viewCount = countNonTrivialSubviews(in: hosting)
         XCTAssertGreaterThan(viewCount, 0, "空态视图也应有子视图")

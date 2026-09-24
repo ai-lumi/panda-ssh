@@ -135,6 +135,112 @@ fn from_core_conflict_maps_all_fields() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn failed_batch_outcome_preserves_error_text_and_empty_results() {
+    for error in [
+        PandaError::NotInitialized.to_string(),
+        PandaError::UnknownHost("host".into()).to_string(),
+        PandaError::MissingPassword("host".into()).to_string(),
+        panda_core::Error::Timeout.to_string(),
+        "  传输失败: /目录/文件\n原始错误  ".into(),
+        String::new(),
+    ] {
+        let outcome = failed_batch_outcome(error.clone());
+        assert_failed_outcome(&outcome, &error);
+    }
+}
+
+#[test]
+fn failed_batch_outcome_does_not_reclassify_cancellation_errors() {
+    for error in [
+        PandaError::Cancelled.to_string(),
+        panda_core::Error::Cancelled.to_string(),
+    ] {
+        let outcome = failed_batch_outcome(error.clone());
+        assert_failed_outcome(&outcome, &error);
+    }
+}
+
+fn assert_failed_outcome(outcome: &BatchOutcome, error: &str) {
+    assert!(outcome.completed.is_empty());
+    assert!(outcome.skipped.is_empty());
+    assert_eq!(outcome.errors, vec![error]);
+    assert!(!outcome.cancelled);
+}
+
+// 冲突解析器由核心服务创建；仅捕获真实私有执行器的结果，不替换执行行为。
+struct RecordingBatchExecutor(tokio::sync::mpsc::UnboundedSender<BatchOutcome>);
+
+impl BatchExecutor for RecordingBatchExecutor {
+    fn execute(&self, ctx: &BatchContext) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>> {
+        let execution = FfiBatchExecutor.execute(ctx);
+        let sender = self.0.clone();
+        Box::pin(async move {
+            let outcome = execution.await;
+            sender.send(outcome.clone()).unwrap();
+            outcome
+        })
+    }
+}
+
+fn execute_batch_for_test(host_id: &str, direction: BatchDirection) -> BatchOutcome {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let service = BatchTransferService::new(Box::new(RecordingBatchExecutor(sender)));
+    runtime().block_on(async {
+        let sources = vec!["/unused/source".into()];
+        let dest_dir = "/unused/destination".into();
+        match direction {
+            BatchDirection::Upload => {
+                service.start_upload(host_id.into(), sources, dest_dir, None, None)
+            }
+            BatchDirection::Download => {
+                service.start_download(host_id.into(), sources, dest_dir, None, None)
+            }
+        }
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .expect("私有执行器应及时返回前置失败")
+            .expect("私有执行器应返回原始执行结果")
+    })
+}
+
+#[test]
+fn executor_unknown_host_preserves_failure_contract() {
+    let _g = global_test_lock();
+    reset();
+    for direction in [BatchDirection::Upload, BatchDirection::Download] {
+        let outcome = execute_batch_for_test("nonexistent-host", direction);
+        assert_failed_outcome(&outcome, "no host with id nonexistent-host");
+    }
+}
+
+#[test]
+fn executor_empty_host_preserves_failure_contract() {
+    let _g = global_test_lock();
+    reset();
+    for direction in [BatchDirection::Upload, BatchDirection::Download] {
+        let outcome = execute_batch_for_test("", direction);
+        assert_failed_outcome(&outcome, "no host with id ");
+    }
+}
+
+#[test]
+fn executor_missing_password_preserves_failure_contract() {
+    let _g = global_test_lock();
+    reset();
+    // 既有夹具分别覆盖无凭据引用、引用存在但凭据缺失；两者均不得尝试连接。
+    for host_id in ["test-host", "refused-host"] {
+        for direction in [BatchDirection::Upload, BatchDirection::Download] {
+            let outcome = execute_batch_for_test(host_id, direction);
+            assert_failed_outcome(
+                &outcome,
+                &format!("host {host_id} uses password auth but no password was provided"),
+            );
+        }
+    }
+}
+
+#[test]
 fn unknown_task_returns_structured_error() {
     let _g = global_test_lock();
     reset();

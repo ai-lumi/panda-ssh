@@ -128,6 +128,7 @@ final class TabStripIntrinsicWidthTests: XCTestCase {
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 100),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
+        window.isReleasedWhenClosed = false
         window.contentView = hosting
         window.orderFrontRegardless()
         defer { window.close() }
@@ -167,6 +168,7 @@ final class TabStripIntrinsicWidthTests: XCTestCase {
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 100),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
+        window.isReleasedWhenClosed = false
         window.contentView = hosting
         window.orderFrontRegardless()
         defer { window.close() }

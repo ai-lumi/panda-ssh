@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import Combine
 
 #if os(macOS)
 @testable import PandaSSH_macOS
@@ -233,9 +234,11 @@ final class LoggerFileTests: XCTestCase {
             }
         }
         group.wait()
+        let coreEntries = logEntries(limit: UInt32(Logger.maxBufferEntries))
+        XCTAssertEqual(coreEntries.count, count, "Rust 同步写入应保留全部条目")
+        XCTAssertEqual(Set(coreEntries.map(\.message)), Set((0..<count).map { "msg-\($0)" }))
 
-        // @Published entries 通过 DispatchQueue.main.async 更新,等待主线程处理
-        let exp = expectation(description: "entries updated on main thread")
+        let exp = expectation(description: "主线程刷新完成")
         DispatchQueue.main.async {
             exp.fulfill()
         }
@@ -244,5 +247,68 @@ final class LoggerFileTests: XCTestCase {
         XCTAssertEqual(logger.entries.count, count)
         let messages = Set(logger.entries.map(\.message))
         XCTAssertEqual(messages.count, count, "并发写入不应丢失条目")
+        XCTAssertEqual(logger.entries.map(\.id), coreEntries.reversed().map(\.id))
+    }
+
+    func testBackgroundWritePublishesOnMainThread() {
+        let logger = Logger(configDirectory: nil)
+        let published = expectation(description: "后台写入在主线程发布")
+        let sink = logger.$entries.dropFirst().prefix(1).sink { entries in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertEqual(entries.map(\.message), ["后台消息"])
+            published.fulfill()
+        }
+
+        DispatchQueue.global().async {
+            logger.info("后台消息", module: "Test")
+        }
+        wait(for: [published], timeout: 2)
+        withExtendedLifetime(sink) {}
+    }
+
+    func testBackgroundClearPublishesOnMainThread() {
+        let logger = Logger(configDirectory: nil)
+        logger.info("待清空", module: "Test")
+        let published = expectation(description: "后台清空在主线程发布")
+        let sink = logger.$entries.dropFirst().prefix(1).sink { entries in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertTrue(entries.isEmpty)
+            published.fulfill()
+        }
+
+        DispatchQueue.global().async {
+            logger.clear()
+        }
+        wait(for: [published], timeout: 2)
+        withExtendedLifetime(sink) {}
+    }
+
+    func testPendingBackgroundRefreshCannotRestoreClearedEntries() {
+        let logger = Logger(configDirectory: nil)
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            logger.info("清空前", module: "Test")
+            group.leave()
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+        logger.clear()
+        let sink = logger.$entries.dropFirst().sink { entries in
+            XCTAssertFalse(entries.contains { $0.message == "清空前" })
+        }
+        logger.info("清空后", module: "Test")
+        XCTAssertEqual(logger.entries.map(\.message), ["清空后"])
+
+        let refreshed = expectation(description: "迟到刷新处理完成")
+        DispatchQueue.main.async {
+            XCTAssertEqual(logger.entries.map(\.message), ["清空后"])
+            XCTAssertEqual(
+                logger.entries.map(\.id),
+                logEntries(limit: UInt32(Logger.maxBufferEntries)).reversed().map(\.id)
+            )
+            refreshed.fulfill()
+        }
+        wait(for: [refreshed], timeout: 2)
+        withExtendedLifetime(sink) {}
     }
 }

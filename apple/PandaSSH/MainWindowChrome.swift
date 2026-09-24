@@ -6,7 +6,7 @@
 //   2. 基于 AppKit NSSplitViewController 的原生左右分栏容器（侧栏 + 详情）
 //   3. 红绿灯（关闭/最小化/缩放）按钮区域的安全宽度测量
 //   4. 窗口空白区域的手动拖拽与双击缩放
-//   5. 通过 ObjC 运行时禁用 NSHostingView 的自动窗口拖动
+//   5. 通过公开窗口属性禁用背景隐式拖动
 //
 // 所有这些仅在 macOS 下生效（#if os(macOS)），iPadOS 不涉及窗口 chrome。
 // =============================================================================
@@ -316,9 +316,6 @@ struct MainWindowChrome: NSViewRepresentable {
         private weak var observedWindow: NSWindow?
         /// 已注册的 NotificationCenter 观察者列表，用于在窗口切换时统一移除
         private var observations: [NSObjectProtocol] = []
-        /// 已禁用内容视图的自动窗口拖动；空白区由 WindowDragView 手动 performDrag。
-        /// 标记是否已经执行过禁用操作，避免重复执行
-        private var didDisableHostingViewDrag = false
 
         init(metrics: MacOSWorkspaceChromeMetrics) {
             self.metrics = metrics
@@ -338,8 +335,6 @@ struct MainWindowChrome: NSViewRepresentable {
                 observations.forEach(NotificationCenter.default.removeObserver)
                 // 清空监听列表
                 observations = []
-                // 窗口切换时重置标记，确保新窗口也会禁用自动拖窗。
-                didDisableHostingViewDrag = false
             }
             // 方法结束后更新记录的窗口引用
             defer { observedWindow = window }
@@ -412,13 +407,10 @@ struct MainWindowChrome: NSViewRepresentable {
                 // 确保红绿灯按钮可见
                 restoreStandardWindowButtons(in: window)
             }
-            // 禁用 NSHostingView 的自动窗口拖动，防止页签拖放时窗口跟随移动。
-            // 空白区拖窗由 WindowDragView 通过 window.performDrag(with:) 手动处理。
-            if !didDisableHostingViewDrag {
-                // 禁用内容视图的自动拖窗行为
-                disableHostingViewWindowDrag(in: window)
-                // 标记已执行，避免重复操作
-                didDisableHostingViewDrag = true
+            // 保留 SwiftUI/AppKit 管理的宿主类型及 KVO；只关闭背景隐式拖窗。
+            // 空白区域仍由 WindowDragView 显式调用 performDrag。
+            if window.isMovableByWindowBackground {
+                window.isMovableByWindowBackground = false
             }
             // 测量并更新红绿灯安全宽度
             metrics.update(window: window)
@@ -450,22 +442,6 @@ struct MainWindowChrome: NSViewRepresentable {
                 }
             }
         }
-
-        /// 查找窗口内容视图层级中的 NSHostingView 并禁用自动窗口拖动。
-        /// 页签按钮的 `.onDrag` 使用独立的拖拽会话，不受此属性影响。
-        private func disableHostingViewWindowDrag(in window: NSWindow) {
-            guard let contentView = window.contentView else { return }
-            // mouseDownCanMoveWindow 是只读属性，需通过 ObjC 运行时创建子类覆盖。
-            // 将内容视图的 isa 替换为返回 false 的子类，阻止 AppKit 自动窗口拖动。
-            // mouseDown 仍转发给子视图，确保 SwiftUI 手势（含 .onDrag）正常工作。
-            let subclass: AnyClass = NoWindowDragContentView.ensureSubclass(
-                // 基于内容视图的实际类型创建子类
-                basedOn: type(of: contentView)
-            )
-            // 将内容视图的类替换为我们的子类
-            object_setClass(contentView, subclass)
-        }
-
     }
 }
 
@@ -518,41 +494,5 @@ struct WindowDragView: NSViewRepresentable {
     }
 }
 
-/// 通过 ObjC 运行时动态创建的 NSView 子类，覆盖 `mouseDownCanMoveWindow` 返回 false。
-/// 用于将窗口内容视图的 isa 替换为该类，阻止 AppKit 在非空白区自动拖动窗口。
-/// 继承自内容视图的实际类（NSHostingView），保留所有既有方法。
-/// 使用 enum 作为命名空间（不可实例化，仅包含静态方法）
-private enum NoWindowDragContentView {
-    /// 已注册的子类引用（缓存，避免重复创建）
-    private static var registeredSubclass: AnyClass?
-
-    /// 确保基于指定父类创建并注册一个「禁止窗口拖动」的子类
-    /// - Parameter superclass: 原始内容视图的类（通常是 NSHostingView 或其子类）
-    /// - Returns: 注册好的子类引用（mouseDownCanMoveWindow 返回 false）
-    static func ensureSubclass(basedOn superclass: AnyClass) -> AnyClass {
-        // 如果已经创建过子类，直接返回缓存的引用（每个进程只需注册一次）
-        if let existing = registeredSubclass { return existing }
-        // 新子类的类名（ObjC 运行时中唯一标识）
-        let name = "PandaNoWindowDragContentView"
-        // 在 ObjC 运行时中动态创建一个新类，继承自 superclass
-        guard let subclass = objc_allocateClassPair(superclass, name, 0) else {
-            // 创建失败则回退使用原始类
-            return superclass
-        }
-        // 创建一个闭包，始终返回 false（覆盖 mouseDownCanMoveWindow 的行为）
-        let block: @convention(block) (Any) -> Bool = { _ in false }
-        // 将 Swift 闭包转换为 ObjC 的方法实现（IMP）
-        let imp = imp_implementationWithBlock(block)
-        // 获取 mouseDownCanMoveWindow 属性的 selector（方法标识符）
-        let selector = #selector(getter: NSView.mouseDownCanMoveWindow)
-        // 将实现添加到子类中，类型编码 "B16@0:8" 表示返回 BOOL、参数为 self 和 _cmd
-        class_addMethod(subclass, selector, imp, "B16@0:8")
-        // 注册类对，使其在运行时可用
-        objc_registerClassPair(subclass)
-        // 缓存子类引用
-        registeredSubclass = subclass
-        return subclass
-    }
-}
 // 结束 #if os(macOS) 条件编译块
 #endif

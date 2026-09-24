@@ -171,6 +171,18 @@ final class LocalizationResourceTests: XCTestCase {
             "The host key of srv1.example.com has changed: recorded SHA256:stored, presented SHA256:present.")
     }
 
+    func test已知无参数描述符按显式语言解析() {
+        let descriptor = MessageDescriptor(code: "error.auth_failed", parameters: [], technicalDetail: nil)
+        XCTAssertEqual(LocalizedTextResolver.shared.string(descriptor: descriptor, language: .zhHans), "认证失败")
+        XCTAssertEqual(LocalizedTextResolver.shared.string(descriptor: descriptor, language: .en), "Authentication failed")
+    }
+
+    func test需要参数的模板收到空数组时降级() {
+        let descriptor = MessageDescriptor(code: "error.host_key_mismatch", parameters: [], technicalDetail: nil)
+        XCTAssertEqual(LocalizedTextResolver.shared.string(descriptor: descriptor, language: .en),
+                       LocalizedTextResolver.builtinGenericError)
+    }
+
     /// kind 与模板占位符不符 → 通用错误资源，不显示占位符。
     func testDescriptorKindMismatchReturnsGenericError() {
         let descriptor = MessageDescriptor(

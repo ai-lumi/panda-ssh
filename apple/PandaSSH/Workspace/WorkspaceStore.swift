@@ -306,9 +306,10 @@ final class WorkspaceStore: ObservableObject {
     func beginApplicationShutdown() {
         guard isAcceptingNewConnections else { return }
         isAcceptingNewConnections = false
+        let previousTabIDs = Set(tabs.map(\.id))
         transferStore?.beginApplicationShutdown()
         _ = workspaceBeginApplicationShutdown()
-        syncFromFfi()
+        syncAndReleaseSessions(previousTabIDs: previousTabIDs)
     }
 
     // MARK: - 页签排序与分组
