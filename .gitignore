@@ -21,3 +21,6 @@ xcuserdata/
 
 # 备份文件
 *.backup-*
+
+# 缓存
+scripts/localization/__pycache__/

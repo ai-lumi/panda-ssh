@@ -787,6 +787,10 @@ type = "password"
         let path = group_path(&groups, "b");
         assert!(path.contains("A"));
         assert!(path.contains("B"));
+
+        // 悬空 parent_id:父组不存在
+        let dangling = vec![group("x", "X", Some("nonexistent"))];
+        assert_eq!(group_path(&dangling, "x"), "X");
     }
 
     #[test]

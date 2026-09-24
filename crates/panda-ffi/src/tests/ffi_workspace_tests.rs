@@ -768,3 +768,275 @@
         let _test_guard = reset_workspace();
         assert!(terminal_session_retry(unique_tab_id("ffi-retry-unknown")).is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // 分组 API
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn workspace_group_create_and_snapshot() {
+        let _guard = reset_workspace();
+        let tab = workspace_open_tab("grp-host".into(), TabKindEnum::Terminal).unwrap();
+
+        let group_id = workspace_create_group(tab.id.clone(), Some("测试组".into()));
+        assert!(!group_id.is_empty());
+
+        let snap = workspace_group_snapshot();
+        assert_eq!(snap.groups.len(), 1);
+        assert_eq!(snap.groups[0].id, group_id);
+        assert_eq!(snap.groups[0].name, "测试组");
+        assert_eq!(snap.groups[0].tab_ids, vec![tab.id.clone()]);
+        assert!(snap.ungrouped_tab_ids.is_empty());
+    }
+
+    #[test]
+    fn workspace_group_delete_moves_tabs_to_ungrouped() {
+        let _guard = reset_workspace();
+        let tab = workspace_open_tab("grp-del-host".into(), TabKindEnum::Terminal).unwrap();
+        let group_id = workspace_create_group(tab.id.clone(), None);
+
+        workspace_delete_group(group_id);
+
+        let snap = workspace_group_snapshot();
+        assert!(snap.groups.is_empty());
+        assert_eq!(snap.ungrouped_tab_ids, vec![tab.id.clone()]);
+    }
+
+    #[test]
+    fn workspace_group_rename_updates_name() {
+        let _guard = reset_workspace();
+        let tab = workspace_open_tab("grp-ren-host".into(), TabKindEnum::Terminal).unwrap();
+        let group_id = workspace_create_group(tab.id.clone(), Some("旧名".into()));
+
+        workspace_rename_group(group_id.clone(), "新名".into());
+
+        let snap = workspace_group_snapshot();
+        assert_eq!(snap.groups[0].name, "新名");
+    }
+
+    #[test]
+    fn workspace_group_move_tab_between_groups() {
+        let _guard = reset_workspace();
+        let t1 = workspace_open_tab("grp-mv-host".into(), TabKindEnum::Terminal).unwrap();
+        let t2 = workspace_open_tab("grp-mv-host".into(), TabKindEnum::Terminal).unwrap();
+        let g1 = workspace_create_group(t1.id.clone(), Some("G1".into()));
+        let g2 = workspace_create_group(t2.id.clone(), Some("G2".into()));
+
+        workspace_move_tab_to_group(t1.id.clone(), g2.clone());
+
+        let snap = workspace_group_snapshot();
+        let g1_snap = snap.groups.iter().find(|g| g.id == g1).unwrap();
+        let g2_snap = snap.groups.iter().find(|g| g.id == g2).unwrap();
+        assert!(g1_snap.tab_ids.is_empty());
+        assert_eq!(g2_snap.tab_ids, vec![t2.id.clone(), t1.id.clone()]);
+    }
+
+    #[test]
+    fn workspace_group_remove_tab_becomes_ungrouped() {
+        let _guard = reset_workspace();
+        let tab = workspace_open_tab("grp-rm-host".into(), TabKindEnum::Terminal).unwrap();
+        let group_id = workspace_create_group(tab.id.clone(), None);
+
+        workspace_remove_tab_from_group(tab.id.clone());
+
+        let snap = workspace_group_snapshot();
+        assert!(snap.groups.iter().find(|g| g.id == group_id).unwrap().tab_ids.is_empty());
+        assert_eq!(snap.ungrouped_tab_ids, vec![tab.id.clone()]);
+    }
+
+    #[test]
+    fn workspace_display_order_returns_all_tab_ids() {
+        let _guard = reset_workspace();
+        let t1 = workspace_open_tab("do-host".into(), TabKindEnum::Terminal).unwrap();
+        let t2 = workspace_open_tab("do-host".into(), TabKindEnum::Sftp).unwrap();
+
+        let order = workspace_display_order();
+        assert_eq!(order.len(), 2);
+        assert!(order.contains(&t1.id));
+        assert!(order.contains(&t2.id));
+    }
+
+    // -----------------------------------------------------------------------
+    // From 转换
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_conversions_tab_group_and_snapshot() {
+        let core_group = panda_core::TabGroup {
+            id: "g1".into(),
+            name: "组1".into(),
+            tab_ids: vec!["t1".into(), "t2".into()],
+        };
+        let record: TabGroupRecord = core_group.into();
+        assert_eq!(record.id, "g1");
+        assert_eq!(record.name, "组1");
+        assert_eq!(record.tab_ids, vec!["t1", "t2"]);
+
+        let core_snap = panda_core::GroupSnapshot {
+            groups: vec![panda_core::TabGroup {
+                id: "g2".into(),
+                name: "组2".into(),
+                tab_ids: vec!["t3".into()],
+            }],
+            ungrouped_tab_ids: vec!["t4".into()],
+        };
+        let snap_record: GroupSnapshotRecord = core_snap.into();
+        assert_eq!(snap_record.groups.len(), 1);
+        assert_eq!(snap_record.groups[0].id, "g2");
+        assert_eq!(snap_record.ungrouped_tab_ids, vec!["t4"]);
+    }
+
+    #[test]
+    fn from_conversions_presented_key_and_tofu_outcome() {
+        let key_info = panda_core::PresentedKeyInfo {
+            host: "example.com".into(),
+            port: 22,
+            key: "ssh-ed2511 AAAA...".into(),
+            fingerprint: "SHA256:abc".into(),
+        };
+        let record: PresentedKeyRecord = key_info.into();
+        assert_eq!(record.host, "example.com");
+        assert_eq!(record.port, 22);
+        assert_eq!(record.fingerprint, "SHA256:abc");
+
+        for (core, ffi) in [
+            (panda_core::TofuOutcome::Trusted, TofuOutcomeEnum::Trusted),
+            (panda_core::TofuOutcome::Rejected, TofuOutcomeEnum::Rejected),
+            (panda_core::TofuOutcome::Cancelled, TofuOutcomeEnum::Cancelled),
+        ] {
+            let converted: TofuOutcomeEnum = core.into();
+            assert_eq!(converted, ffi);
+        }
+    }
+
+    fn init_test_store() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::ffi_store::init_store(dir.path().to_string_lossy().into_owned()).unwrap();
+    }
+
+    #[test]
+    fn tofu_register_presenter_returns_key_info() {
+        let _g = reset_workspace();
+        init_test_store();
+        let result = tofu_register(
+            "tofu-host.example.com".into(),
+            22,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest".into(),
+            "SHA256:testfingerprint".into(),
+        )
+        .unwrap();
+        assert!(result.is_presenter);
+        assert!(!result.token.is_empty());
+        assert!(result.presented.is_some());
+        let presented = result.presented.unwrap();
+        assert_eq!(presented.host, "tofu-host.example.com");
+        assert_eq!(presented.port, 22);
+    }
+
+    /// 合法格式的 ed25519 公钥（`<keytype> <base64>`），可通过 known_hosts 校验。
+    const VALID_ED25519_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample";
+
+    #[test]
+    fn tofu_register_waiter_and_confirm_delivers_trusted() {
+        let _g = reset_workspace();
+        init_test_store();
+        let presenter = tofu_register(
+            "tofu-waiter.example.com".into(),
+            22,
+            VALID_ED25519_KEY.into(),
+            "SHA256:waiterfp".into(),
+        )
+        .unwrap();
+        assert!(presenter.is_presenter);
+
+        let waiter = tofu_register(
+            "tofu-waiter.example.com".into(),
+            22,
+            VALID_ED25519_KEY.into(),
+            "SHA256:waiterfp".into(),
+        )
+        .unwrap();
+        assert!(!waiter.is_presenter);
+        assert!(waiter.presented.is_none());
+
+        tofu_confirm(presenter.token.clone()).unwrap();
+
+        let outcome = tofu_await_outcome(waiter.token);
+        assert_eq!(outcome, TofuOutcomeEnum::Trusted);
+    }
+
+    #[test]
+    fn tofu_reject_delivers_rejected_to_waiter() {
+        let _g = reset_workspace();
+        init_test_store();
+        let presenter = tofu_register(
+            "tofu-reject.example.com".into(),
+            22,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReject".into(),
+            "SHA256:rejectfp".into(),
+        )
+        .unwrap();
+
+        let waiter = tofu_register(
+            "tofu-reject.example.com".into(),
+            22,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReject".into(),
+            "SHA256:rejectfp".into(),
+        )
+        .unwrap();
+
+        tofu_reject(presenter.token);
+
+        let outcome = tofu_await_outcome(waiter.token);
+        assert_eq!(outcome, TofuOutcomeEnum::Rejected);
+    }
+
+    #[test]
+    fn tofu_cancel_delivers_cancelled_to_waiter() {
+        let _g = reset_workspace();
+        init_test_store();
+        let presenter = tofu_register(
+            "tofu-cancel.example.com".into(),
+            22,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICancel".into(),
+            "SHA256:cancelfp".into(),
+        )
+        .unwrap();
+
+        let waiter = tofu_register(
+            "tofu-cancel.example.com".into(),
+            22,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICancel".into(),
+            "SHA256:cancelfp".into(),
+        )
+        .unwrap();
+
+        tofu_cancel(presenter.token);
+
+        let outcome = tofu_await_outcome(waiter.token);
+        assert_eq!(outcome, TofuOutcomeEnum::Cancelled);
+    }
+
+    #[test]
+    fn tofu_await_outcome_unknown_token_returns_cancelled() {
+        let _g = reset_workspace();
+        let outcome = tofu_await_outcome("nonexistent-token".into());
+        assert_eq!(outcome, TofuOutcomeEnum::Cancelled);
+    }
+
+    #[test]
+    fn tofu_reset_clears_waiter_channels() {
+        let _g = reset_workspace();
+        init_test_store();
+        let _presenter = tofu_register(
+            "tofu-reset.example.com".into(),
+            22,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReset".into(),
+            "SHA256:resetfp".into(),
+        )
+        .unwrap();
+        tofu_reset();
+        let outcome = tofu_await_outcome("any-token".into());
+        assert_eq!(outcome, TofuOutcomeEnum::Cancelled);
+    }

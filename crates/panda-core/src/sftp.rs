@@ -75,12 +75,6 @@ fn system_time_to_secs(t: SystemTime) -> Option<u64> {
     t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
-/// 判断 SFTP 服务器返回的错误消息是否表示"目录已存在"。
-fn is_already_exists_message(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    lower.contains("already exists") || lower.contains("file exists") || lower.contains("exists")
-}
-
 fn build_conflict_info(
     source_size: u64,
     source_mtime: Option<u64>,
@@ -478,10 +472,22 @@ impl SftpClient {
         for part in parts.into_iter().rev() {
             match self.session.create_dir(part).await {
                 Ok(()) => {}
-                Err(russh_sftp::client::error::Error::Status(status))
-                    if status.status_code == russh_sftp::protocol::StatusCode::Failure
-                        && is_already_exists_message(&status.error_message) => {}
-                Err(e) => return Err(e.into()),
+                Err(error) => {
+                    // SFTP v3 用通用 Failure 表示目录竞争，不能依赖服务端错误文案。
+                    // 只有回查确认为目录才幂等成功；权限错误及无法确认时保留原错误。
+                    let directory_exists = matches!(
+                        &error,
+                        russh_sftp::client::error::Error::Status(status)
+                            if status.status_code == russh_sftp::protocol::StatusCode::Failure
+                    ) && self
+                        .session
+                        .metadata(part)
+                        .await
+                        .is_ok_and(|meta| meta.is_dir());
+                    if !directory_exists {
+                        return Err(error.into());
+                    }
+                }
             }
         }
         Ok(())
@@ -715,14 +721,5 @@ mod tests {
 
         let result = wait_if_paused(Some(&cancel), Some(&pause), None).await;
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn is_already_exists_message_detects_various_forms() {
-        assert!(is_already_exists_message("File already exists"));
-        assert!(is_already_exists_message("file exists"));
-        assert!(is_already_exists_message("directory EXISTS"));
-        assert!(!is_already_exists_message("not found"));
-        assert!(!is_already_exists_message("permission denied"));
     }
 }

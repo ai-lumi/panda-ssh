@@ -8,7 +8,7 @@ enum TransferDirection: Equatable {
     case download
 }
 
-/// 传输任务六态:排队 / 传输中 / 已暂停 / 已完成 / 失败 / 已取消。
+/// 传输任务七态:排队 / 传输中 / 已暂停 / 已完成 / 失败 / 已取消 / 已跳过。
 /// 命名与 FFI `TransferStatusEnum` 区分,UI 层保持 `.done` 以匹配原型标签。
 enum TransferStatus: String, Equatable {
     case queued
@@ -17,16 +17,18 @@ enum TransferStatus: String, Equatable {
     case done
     case failed
     case cancelled
+    case skipped
 
     /// 徽标文案(与原型 stLabel 一致)。
     var label: String {
         switch self {
-        case .queued: "排队"
-        case .running: "传输中"
-        case .paused: "已暂停"
-        case .done: "已完成"
-        case .failed: "失败"
-        case .cancelled: "已取消"
+        case .queued: l10n.str("transfer.status.queued.label")
+        case .running: l10n.str("transfer.status.running.label")
+        case .paused: l10n.str("transfer.status.paused.label")
+        case .done: l10n.str("transfer.status.done.label")
+        case .failed: l10n.str("transfer.status.failed.label")
+        case .cancelled: l10n.str("transfer.status.cancelled.label")
+        case .skipped: l10n.str("transfer.status.skipped.label")
         }
     }
 }
@@ -606,12 +608,20 @@ private func mockBatchRecord(_ task: MockBatchTask) -> BatchTransferRecord {
     }
 
     private func batchName(_ task: MockBatchTask) -> String {
-        let count = task.sources.count
-        if count == 0 { return "批量\(task.direction == .upload ? "上传" : "下载")" }
-        let first = (task.sources[0] as NSString).lastPathComponent
-        if count == 1 { return first }
-        return "\(first) 等 \(count) 项"
+        batchDisplayName(sources: task.sources, direction: task.direction)
     }
+}
+
+private func batchDisplayName(sources: [String], direction: TransferDirection) -> String {
+    let count = sources.count
+    if count == 0 {
+        return l10n.str(direction == .upload
+            ? "transfer.batch.name.default.upload.label"
+            : "transfer.batch.name.default.download.label")
+    }
+    let first = (sources[0] as NSString).lastPathComponent
+    if count == 1 { return first }
+    return String(format: l10n.str("transfer.batch.name.multiple.label"), first, count)
 }
 
 // MARK: - TransferStore
@@ -746,7 +756,8 @@ final class TransferStore: ObservableObject {
         let revisions = readRevisions()
         if revisions[0] != nil,
            batchSource == nil || revisions[1] != nil,
-           revisions == lastRevisions {
+           (revisions == lastRevisions || (tasks.isEmpty && hiddenIDs.isEmpty)) {
+            lastRevisions = revisions
             adjustPollingFrequency()
             return
         }
@@ -859,7 +870,7 @@ final class TransferStore: ObservableObject {
             mock.clearFinished()
         } else {
             // 真实源下终态任务加入隐藏集合,避免 FFI 暂无删除接口导致反复出现。
-            hiddenIDs.formUnion(tasks.filter { $0.status == .done || $0.status == .failed || $0.status == .cancelled }.map(\.id))
+            hiddenIDs.formUnion(tasks.filter { $0.status == .done || $0.status == .failed || $0.status == .cancelled || $0.status == .skipped }.map(\.id))
         }
         refresh()
         // 清理已不在 FFI 任务列表中的隐藏记录与分组注册,避免无限增长。
@@ -906,6 +917,8 @@ final class TransferStore: ObservableObject {
                 Logger.shared.warning("传输失败 name=\(task.name); 方向=\(dir); 原因=\(task.error ?? "未知")", module: LogModule.transfer)
             case .cancelled:
                 Logger.shared.info("传输取消 name=\(task.name); 方向=\(dir)", module: LogModule.transfer)
+            case .skipped:
+                Logger.shared.info("传输跳过 name=\(task.name); 方向=\(dir)", module: LogModule.transfer)
             default:
                 break
             }
@@ -1007,6 +1020,7 @@ private extension TransferStatus {
         case .completed: self = .done
         case .failed: self = .failed
         case .cancelled: self = .cancelled
+        case .skipped: self = .skipped
         }
     }
 
@@ -1042,14 +1056,7 @@ private extension TransferRecord {
         self.groupID = batchRecord.groupID
         self.groupName = batchRecord.groupName
         self.pendingConflict = batchRecord.pendingConflict
-        let count = batchRecord.sources.count
-        if count == 0 {
-            self.name = "批量\(batchRecord.direction == .upload ? "上传" : "下载")"
-        } else if count == 1 {
-            self.name = (self.source as NSString).lastPathComponent
-        } else {
-            self.name = "\((self.source as NSString).lastPathComponent) 等 \(count) 项"
-        }
+        self.name = batchDisplayName(sources: batchRecord.sources, direction: batchRecord.direction)
     }
 }
 
@@ -1076,14 +1083,7 @@ private extension BatchTransferRecord {
         // FFI 层暂未返回 groupID/groupName，设为 nil
         self.groupID = nil
         self.groupName = nil
-        let count = ffiRecord.sources.count
-        if count == 0 {
-            self.name = "批量\(self.direction == .upload ? "上传" : "下载")"
-        } else if count == 1 {
-            self.name = (ffiRecord.sources[0] as NSString).lastPathComponent
-        } else {
-            self.name = "\((ffiRecord.sources[0] as NSString).lastPathComponent) 等 \(count) 项"
-        }
+        self.name = batchDisplayName(sources: ffiRecord.sources, direction: self.direction)
     }
 }
 
@@ -1128,11 +1128,17 @@ struct TransferGroup: Identifiable, Equatable {
     var totalSize: UInt64 { tasks.reduce(0) { $0 + $1.size } }
     /// 组内已传输字节总数。
     var transferred: UInt64 { tasks.reduce(0) { $0 + $1.transferred } }
+    /// 组内已跳过的任务数。
+    var skippedCount: Int { tasks.filter { $0.status == .skipped }.count }
+    /// 组内已跳过的字节数。
+    var skippedBytes: UInt64 { tasks.filter { $0.status == .skipped }.reduce(0) { $0 + $1.size } }
+    /// 进度分母：总大小减已跳过大小（跳过文件不计入传输目标）。
+    var effectiveTotalSize: UInt64 { totalSize > skippedBytes ? totalSize - skippedBytes : 0 }
     /// 0...1 的组级进度。
     var progress: Double {
-        totalSize == 0 ? 1 : min(1, Double(transferred) / Double(totalSize))
+        effectiveTotalSize == 0 ? 1 : min(1, Double(transferred) / Double(effectiveTotalSize))
     }
-    /// 聚合后的组级状态：按 running > paused > queued > failed > cancelled > done 的优先级。
+    /// 聚合后的组级状态：按 running > paused > queued > failed > cancelled > skipped > done 的优先级。
     var status: TransferStatus {
         let statuses = Set(tasks.map(\.status))
         if statuses.contains(.running) { return .running }
@@ -1140,6 +1146,7 @@ struct TransferGroup: Identifiable, Equatable {
         if statuses.contains(.queued) { return .queued }
         if statuses.contains(.failed) { return .failed }
         if statuses.contains(.cancelled) { return .cancelled }
+        if statuses.contains(.skipped) { return .skipped }
         return .done
     }
 }

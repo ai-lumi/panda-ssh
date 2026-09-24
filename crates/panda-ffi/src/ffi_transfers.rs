@@ -59,6 +59,7 @@ pub enum TransferStatusEnum {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 /// FFI-friendly snapshot of a transfer task.
@@ -120,6 +121,7 @@ fn from_core_status(s: TransferStatus) -> TransferStatusEnum {
         TransferStatus::Completed => TransferStatusEnum::Completed,
         TransferStatus::Failed => TransferStatusEnum::Failed,
         TransferStatus::Cancelled => TransferStatusEnum::Cancelled,
+        TransferStatus::Skipped => TransferStatusEnum::Skipped,
     }
 }
 
@@ -440,8 +442,9 @@ pub struct OrchestrationResultRecord {
 /// 将扫描+聚合→选择任务类型→入队工作流集中为单一入口。
 ///
 /// 调用方提供扫描结果和选中路径；核心规划后直接入队：
-/// - 上传时：目录组 → 批量传输；独立文件 → 单文件传输
-/// - 下载时：目录组内文件 → 共享 groupID 的独立传输；独立文件 → 单文件传输
+/// - 两个方向均产出逐文件传输任务；目录组内文件共享 groupID
+/// - 独立文件无组标识；空目录不产生任务
+#[allow(unused_variables)]
 #[uniffi::export]
 pub fn orchestrate_sftp_transfers(
     selected_paths: Vec<String>,
@@ -473,66 +476,52 @@ pub fn orchestrate_sftp_transfers(
     let plan = plan_sftp_orchestration(&selected_paths, &core_items, core_direction);
 
     let mut transfer_ids = Vec::new();
-    let mut batch_ids = Vec::new();
+    let batch_ids = Vec::new();
 
-    for planned in &plan.transfers {
-        let size = match direction {
-            TransferDirectionEnum::Upload if planned.size == 0 => {
-                total_size(PathBuf::from(&planned.source).as_path())
+    match direction {
+        TransferDirectionEnum::Upload => {
+            for planned in &plan.transfers {
+                let size = if planned.size == 0 {
+                    total_size(PathBuf::from(&planned.source).as_path())
+                } else {
+                    planned.size
+                };
+                let params = TransferParams {
+                    direction: to_core_direction(direction),
+                    host_id: host_id.clone(),
+                    local_path: planned.source.clone(),
+                    remote_path: planned.destination.clone(),
+                    size,
+                    password: password.clone(),
+                    passphrase: passphrase.clone(),
+                    group_id: planned.group_id.clone(),
+                    group_name: planned.group_name.clone(),
+                };
+                let id = runtime()
+                    .block_on(async { transfer_service().start_transfer(params) })
+                    .map_err(|e| PandaError::Core(e.to_string()))?;
+                transfer_ids.push(id);
             }
-            _ => planned.size,
-        };
-        let params = TransferParams {
-            direction: to_core_direction(direction),
-            host_id: host_id.clone(),
-            local_path: if direction == TransferDirectionEnum::Upload {
-                planned.source.clone()
-            } else {
-                planned.destination.clone()
-            },
-            remote_path: if direction == TransferDirectionEnum::Upload {
-                planned.destination.clone()
-            } else {
-                planned.source.clone()
-            },
-            size,
-            password: password.clone(),
-            passphrase: passphrase.clone(),
-            group_id: planned.group_id.clone(),
-            group_name: planned.group_name.clone(),
-        };
-        let id = runtime()
-            .block_on(async { transfer_service().start_transfer(params) })
-            .map_err(|e| PandaError::Core(e.to_string()))?;
-        transfer_ids.push(id);
-    }
-
-    for batch in &plan.batches {
-        let id = match direction {
-            TransferDirectionEnum::Upload => runtime()
-                .block_on(async {
-                    batch_transfer::batch_service().start_upload(
-                        host_id.clone(),
-                        batch.sources.clone(),
-                        dest_dir.clone(),
-                        password.clone(),
-                        passphrase.clone(),
-                    )
-                })
-                .map_err(|e| PandaError::Core(e.to_string()))?,
-            TransferDirectionEnum::Download => runtime()
-                .block_on(async {
-                    batch_transfer::batch_service().start_download(
-                        host_id.clone(),
-                        batch.sources.clone(),
-                        dest_dir.clone(),
-                        password.clone(),
-                        passphrase.clone(),
-                    )
-                })
-                .map_err(|e| PandaError::Core(e.to_string()))?,
-        };
-        batch_ids.push(id);
+        }
+        TransferDirectionEnum::Download => {
+            for planned in &plan.transfers {
+                let params = TransferParams {
+                    direction: to_core_direction(direction),
+                    host_id: host_id.clone(),
+                    local_path: planned.destination.clone(),
+                    remote_path: planned.source.clone(),
+                    size: planned.size,
+                    password: password.clone(),
+                    passphrase: passphrase.clone(),
+                    group_id: planned.group_id.clone(),
+                    group_name: planned.group_name.clone(),
+                };
+                let id = runtime()
+                    .block_on(async { transfer_service().start_transfer(params) })
+                    .map_err(|e| PandaError::Core(e.to_string()))?;
+                transfer_ids.push(id);
+            }
+        }
     }
 
     Ok(OrchestrationResultRecord {

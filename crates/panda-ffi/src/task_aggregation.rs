@@ -106,3 +106,24 @@ pub fn aggregate_task_groups_ffi(
     let result = aggregate_task_groups(&selected_paths, &core_items, core_direction);
     result_to_record(&result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use panda_core::TransferDirection;
+
+    #[test]
+    fn group_to_record_maps_delete_direction_to_upload() {
+        let group = TaskGroup {
+            id: "g1".into(),
+            name: "dir".into(),
+            source_root: "/src".into(),
+            destination_root: "/dst".into(),
+            directories: vec![],
+            direction: TransferDirection::Delete,
+            items: vec![],
+        };
+        let rec = group_to_record(&group);
+        assert_eq!(rec.direction, BatchTransferDirectionEnum::Upload);
+    }
+}

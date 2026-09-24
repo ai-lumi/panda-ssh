@@ -93,6 +93,14 @@ pub fn init_store(config_dir: String) -> Result<(), PandaError> {
     Ok(())
 }
 
+/// 重置全局 store 为 None（仅测试用），使 `stores()` 返回 `NotInitialized`。
+#[cfg(test)]
+pub(crate) fn reset_store_for_test() {
+    *STORES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
 #[cfg(target_os = "ios")]
 fn ffi_storage_location() -> StorageLocation {
     StorageLocation::PlatformContainer

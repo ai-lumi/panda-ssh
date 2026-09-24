@@ -38,11 +38,11 @@ struct TransferPageView: View {
             if store.tasks.isEmpty {
                 // 没有传输任务时显示空态
                 ContentUnavailableView(
-                    "暂无传输任务",
+                    l10n.str("transfer.panel.empty.title"),
                     // 标题
                     systemImage: "arrow.up.arrow.down",
                     // 上下箭头图标，表示传输
-                    description: Text("选中文件后点击「上传 →」或「← 下载」")
+                    description: Text(l10n.str("transfer.panel.empty.description"))
                     // 操作提示
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -93,10 +93,10 @@ struct TransferPageView: View {
             // 水平排列
             VStack(alignment: .leading, spacing: 4) {
                 // 垂直排列，左对齐，间距 4 点
-                Text("传输任务")
+                Text(l10n.str("transfer.panel.title"))
                     .font(.title2.bold())
                     // 标题字体（约 22pt）+ 粗体
-                Text("\(store.activeCount) 个活动任务 · 共 \(store.tasks.count) 项")
+                Text(String(format: l10n.str("transfer.panel.active_count.label"), "\(store.activeCount)", "\(store.tasks.count)"))
                     // 显示活动任务数和总任务数
                     .font(.caption)
                     // 小号字体
@@ -105,7 +105,7 @@ struct TransferPageView: View {
             }
             Spacer()
             // 弹性空间：将右侧按钮推到最右边
-            Button("清除已完成") { store.clearFinished() }
+            Button(l10n.str("transfer.action.clear_finished.label")) { store.clearFinished() }
             // 点击后清除所有已完成/已取消的任务
                 .buttonStyle(.bordered)
                 // 带边框的按钮样式
@@ -164,8 +164,13 @@ private struct GroupRow: View {
                 // 第三行：百分比 + 已传输/总大小 + 操作按钮 + 展开/收起按钮
                 Text("\(Int(group.progress * 100))%")
                 // 显示百分比（如"45%"）
-                Text("\(formatBytes(group.transferred)) / \(formatBytes(group.totalSize))")
-                // 显示已传输字节数 / 总字节数（如"1.5 MiB / 3.3 MiB"）
+                Text("\(formatBytes(group.transferred)) / \(formatBytes(group.effectiveTotalSize))")
+                // 显示已传输字节数 / 有效总字节数（跳过文件不计入分母）
+                if group.skippedCount > 0 {
+                    Text(String(format: l10n.str("transfer.group.skipped.count"), group.skippedCount))
+                    // 包含已跳过文件时显示跳过数量
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 // 弹性空间
                 groupOperations
@@ -226,12 +231,12 @@ private struct GroupRow: View {
         case .running, .queued:
             // 运行中或排队中 -> 显示"暂停"和"取消"按钮
             HStack(spacing: 8) {
-                Button("暂停") { store.pauseGroup(id: group.id) }
+                Button(l10n.str("transfer.action.pause.label")) { store.pauseGroup(id: group.id) }
                 // 暂停整个组的传输
                     .buttonStyle(.borderless)
                     // 无边框按钮（纯文字按钮）
                     .font(.caption)
-                Button("取消") { store.cancelGroup(id: group.id) }
+                Button(l10n.str("transfer.action.cancel.label")) { store.cancelGroup(id: group.id) }
                 // 取消整个组的传输
                     .buttonStyle(.borderless)
                     .font(.caption)
@@ -239,23 +244,23 @@ private struct GroupRow: View {
         case .paused:
             // 已暂停 -> 显示"继续"和"取消"按钮
             HStack(spacing: 8) {
-                Button("继续") { store.resumeGroup(id: group.id) }
+                Button(l10n.str("transfer.action.resume.label")) { store.resumeGroup(id: group.id) }
                 // 恢复传输
                     .buttonStyle(.borderless)
                     .font(.caption)
-                Button("取消") { store.cancelGroup(id: group.id) }
+                Button(l10n.str("transfer.action.cancel.label")) { store.cancelGroup(id: group.id) }
                     .buttonStyle(.borderless)
                     .font(.caption)
             }
         case .failed:
             // 失败 -> 显示"重试"按钮
-            Button("重试") { store.retryGroup(id: group.id) }
+            Button(l10n.str("transfer.action.retry.label")) { store.retryGroup(id: group.id) }
             // 重新尝试失败的传输
                 .buttonStyle(.borderless)
                 .font(.caption)
-        case .done, .cancelled:
+        case .done, .cancelled, .skipped:
             EmptyView()
-            // 完成或已取消 -> 不显示任何操作按钮
+            // 完成、已取消或已跳过 -> 不显示任何操作按钮
         }
     }
 }
@@ -298,20 +303,20 @@ private struct TransferRow: View {
                 // ViewThatFits 自动选择能在水平方向放得下的第一个视图
                 // 宽屏时：源和目标水平并排
                 HStack(alignment: .top, spacing: 24) {
-                    endpoint(title: "源", name: presentation.sourceEndpoint, path: presentation.sourcePath)
+                    endpoint(title: l10n.str("transfer.row.source.label"), name: presentation.sourceEndpoint, path: presentation.sourcePath)
                         .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
                     // 源端点信息：最小宽度 240，撑满可用空间
-                    endpoint(title: "目标", name: presentation.destinationEndpoint, path: presentation.destinationPath)
+                    endpoint(title: l10n.str("transfer.row.destination.label"), name: presentation.destinationEndpoint, path: presentation.destinationPath)
                         .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
                     // 目标端点信息
                 }
                 // 窄屏时：源和目标垂直堆叠
                 VStack(alignment: .leading, spacing: 8) {
-                    endpoint(title: "源", name: presentation.sourceEndpoint, path: presentation.sourcePath)
-                    endpoint(title: "目标", name: presentation.destinationEndpoint, path: presentation.destinationPath)
+                    endpoint(title: l10n.str("transfer.row.source.label"), name: presentation.sourceEndpoint, path: presentation.sourcePath)
+                    endpoint(title: l10n.str("transfer.row.destination.label"), name: presentation.destinationEndpoint, path: presentation.destinationPath)
                 }
             }
-            Button(showsPaths ? "收起完整路径" : "查看完整路径") { showsPaths.toggle() }
+            Button(showsPaths ? l10n.str("transfer.row.path_collapse.action") : l10n.str("transfer.row.path_expand.action")) { showsPaths.toggle() }
             // 切换完整路径显示/隐藏
                 .buttonStyle(.borderless)
                 .font(.caption)
@@ -364,7 +369,7 @@ private struct TransferRow: View {
                 // 圆圈感叹号图标
                     .foregroundStyle(Color.orange)
                     // 橙色图标
-                Text("\u{201C}\(conflict.name)\u{201D} 已存在，等待覆盖确认")
+                Text(String(format: l10n.str("transfer.row.conflict_wait.message"), conflict.name))
                 // 显示冲突文件名和提示文字
                     .lineLimit(1)
                 Spacer()
@@ -395,15 +400,15 @@ private struct TransferRow: View {
     private var speedInfo: some View {
         HStack(spacing: 8) {
             // 水平排列，间距 8 点
-            Text("速度 \(formatSpeed(presentation.liveSpeed))")
+            Text(String(format: l10n.str("transfer.row.speed.current.label"), formatSpeed(presentation.liveSpeed)))
             // 实时传输速度（如"速度 1.2 MiB/s"）
-            Text("(") + Text("均速 \(formatSpeed(task.totalSpeed))") + Text(")")
+            Text("(") + Text(String(format: l10n.str("transfer.row.speed.average.label"), formatSpeed(task.totalSpeed))) + Text(")")
             // 平均速度（如"(均速 980 KiB/s)"）
             if task.status == .running, let remaining = task.estimatedTimeRemaining {
                 // 仅在传输中且有预估剩余时间时显示
                 Spacer()
                 // 弹性空间推到右侧
-                Text("剩余 \(formatDuration(remaining))")
+                Text(String(format: l10n.str("transfer.row.remaining.label"), formatDuration(remaining)))
                 // 显示剩余时间（如"剩余 2分30秒"）
             }
         }
@@ -432,7 +437,7 @@ private struct TransferRow: View {
     private func endpoint(title: String, name: String, path: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             // 垂直排列，左对齐，间距 3 点
-            Text("\(title)：\(name)")
+            Text(String(format: l10n.str("transfer.row.endpoint.title_format"), title, name))
             // 显示"源：本地"或"目标：myserver"
                 .font(.caption.weight(.semibold))
                 // 小号半粗体
@@ -451,7 +456,7 @@ private struct TransferRow: View {
                 // 允许用户选中和复制路径文本
                 .help(path)
                 // 鼠标悬停时显示完整路径作为 tooltip
-                .accessibilityLabel("\(title)路径：\(path)")
+                .accessibilityLabel(String(format: l10n.str("transfer.row.endpoint.path_accessibility"), title, path))
                 // VoiceOver 朗读的无障碍标签
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -475,16 +480,16 @@ private struct TransferRow: View {
             // 运行中或排队中
             if task.isBatch {
                 // 批量任务：只显示"取消"（批量任务不支持单独暂停）
-                Button("取消") { store.cancel(id: task.id) }
+                Button(l10n.str("transfer.action.cancel.label")) { store.cancel(id: task.id) }
                     .buttonStyle(.borderless)
                     .font(.caption)
             } else {
                 // 单个任务：显示"暂停"和"取消"
                 HStack(spacing: 8) {
-                    Button("暂停") { store.pause(id: task.id) }
+                    Button(l10n.str("transfer.action.pause.label")) { store.pause(id: task.id) }
                         .buttonStyle(.borderless)
                         .font(.caption)
-                    Button("取消") { store.cancel(id: task.id) }
+                    Button(l10n.str("transfer.action.cancel.label")) { store.cancel(id: task.id) }
                         .buttonStyle(.borderless)
                         .font(.caption)
                 }
@@ -492,10 +497,10 @@ private struct TransferRow: View {
         case .paused:
             // 已暂停：显示"继续"和"取消"
             HStack(spacing: 8) {
-                Button("继续") { store.resume(id: task.id) }
+                Button(l10n.str("transfer.action.resume.label")) { store.resume(id: task.id) }
                     .buttonStyle(.borderless)
                     .font(.caption)
-                Button("取消") { store.cancel(id: task.id) }
+                Button(l10n.str("transfer.action.cancel.label")) { store.cancel(id: task.id) }
                     .buttonStyle(.borderless)
                     .font(.caption)
             }
@@ -505,14 +510,14 @@ private struct TransferRow: View {
                 EmptyView()
                 // 批量任务失败不显示重试按钮（需要逐个重试子任务）
             } else {
-                Button("重试") { store.retry(id: task.id) }
+                Button(l10n.str("transfer.action.retry.label")) { store.retry(id: task.id) }
                 // 单个任务：显示"重试"按钮
                     .buttonStyle(.borderless)
                     .font(.caption)
             }
-        case .done, .cancelled:
+        case .done, .cancelled, .skipped:
             EmptyView()
-            // 完成或已取消：不显示操作按钮
+            // 完成、已取消或已跳过：不显示操作按钮
         }
     }
 }
@@ -554,6 +559,8 @@ private struct StatusBadge: View {
         // 失败 -> 红色 14% 不透明（淡红色）
         case .cancelled: Color.secondary.opacity(0.2)
         // 已取消 -> 灰色 20% 不透明
+        case .skipped: Color.secondary.opacity(0.2)
+        // 已跳过 -> 灰色 20% 不透明
         }
     }
 
@@ -572,6 +579,8 @@ private struct StatusBadge: View {
         // 失败 -> 红色
         case .cancelled: .secondary
         // 已取消 -> 灰色
+        case .skipped: .secondary
+        // 已跳过 -> 灰色
         }
     }
 }
@@ -619,14 +628,14 @@ struct TransferTaskPresentation {
         let name = hostName?.trimmingCharacters(in: .whitespacesAndNewlines)
         // 去除主机名首尾的空白字符和换行符
         let remote = name.flatMap { $0.isEmpty ? nil : $0 }
-            ?? (task.hostID.isEmpty ? "未知主机" : task.hostID)
+            ?? (task.hostID.isEmpty ? l10n.str("transfer.endpoint.unknown_host.label") : task.hostID)
         // 确定远程主机显示名：
         // 1. 如果有有效的主机名（非空），使用它
         // 2. 否则如果 hostID 非空，使用 hostID
         // 3. 否则显示"未知主机"
-        sourceEndpoint = task.direction == .upload ? "本地" : remote
+        sourceEndpoint = task.direction == .upload ? l10n.str("transfer.endpoint.local.label") : remote
         // 上传任务的源是"本地"，下载任务的源是远程主机
-        destinationEndpoint = task.direction == .upload ? remote : "本地"
+        destinationEndpoint = task.direction == .upload ? remote : l10n.str("transfer.endpoint.local.label")
         // 上传任务的目标是远程主机，下载任务的目标是"本地"
         sourcePath = task.isBatch && !task.batchSources.isEmpty
             ? task.batchSources.joined(separator: "\n") : task.source

@@ -7,7 +7,5 @@ static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) type GlobalTestGuard = MutexGuard<'static, ()>;
 
 pub(crate) fn global_test_lock() -> GlobalTestGuard {
-    GLOBAL_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    GLOBAL_TEST_LOCK.lock().unwrap()
 }

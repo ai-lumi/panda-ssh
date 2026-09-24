@@ -251,6 +251,15 @@ struct FailRules {
     fail_rmdir: HashSet<String>,
     fail_remove: HashSet<String>,
     no_mtime: HashSet<String>,
+    /// 两个独立连接都完成缺失检查后才允许 mkdir，确定性复现竞争。
+    mkdir_barriers: HashMap<String, Arc<tokio::sync::Barrier>>,
+    mkdir_status: HashMap<String, (StatusCode, String)>,
+    mkdir_existing_message: Option<String>,
+    /// 在缺失检查与 mkdir 之间插入普通文件或目录。
+    mkdir_file_race: HashSet<String>,
+    mkdir_directory_race: HashSet<String>,
+    stat_status: HashMap<String, StatusCode>,
+    stat_status_after_mkdir: HashMap<String, StatusCode>,
 }
 
 /// A tiny in-memory filesystem backing the SFTP subsystem: flat maps of
@@ -496,22 +505,55 @@ impl russh_sftp::server::Handler for MemFs {
         path: String,
         _attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        if self.fail.lock().await.fail_mkdir.contains(&path) {
-            return Err(StatusCode::Failure);
+        let (barrier, file_race, directory_race, status, existing_message) = {
+            let mut fail = self.fail.lock().await;
+            if fail.fail_mkdir.contains(&path) {
+                return Err(StatusCode::Failure);
+            }
+            if let Some(status) = fail.stat_status_after_mkdir.remove(&path) {
+                fail.stat_status.insert(path.clone(), status);
+            }
+            (
+                fail.mkdir_barriers.get(&path).cloned(),
+                fail.mkdir_file_race.remove(&path),
+                fail.mkdir_directory_race.remove(&path),
+                fail.mkdir_status.get(&path).cloned(),
+                fail.mkdir_existing_message.clone(),
+            )
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
         }
-        if self.dirs.lock().await.contains(&path) || path == "/" {
+        // 与 open 保持相同锁顺序；检查与插入不可分离，否则 fake 自身会吞掉竞争。
+        let mut files = self.files.lock().await;
+        let mut dirs = self.dirs.lock().await;
+        if file_race {
+            files.insert(path.clone(), b"race payload".to_vec());
+        }
+        if directory_race {
+            dirs.insert(path.clone());
+        }
+        if let Some((status_code, error_message)) = status {
+            return Ok(Status {
+                id,
+                status_code,
+                error_message,
+                language_tag: "en-US".to_string(),
+            });
+        }
+        if dirs.contains(&path) || files.contains_key(&path) || path == "/" {
             return Ok(Status {
                 id,
                 status_code: StatusCode::Failure,
-                error_message: "already exists".to_string(),
+                error_message: existing_message.unwrap_or_else(|| "already exists".to_string()),
                 language_tag: "en-US".to_string(),
             });
         }
         let parent = parent_of(&path);
-        if parent != "/" && !self.dirs.lock().await.contains(&parent) {
+        if parent != "/" && !dirs.contains(&parent) {
             return Err(StatusCode::NoSuchFile);
         }
-        self.dirs.lock().await.insert(path);
+        dirs.insert(path);
         Ok(Self::ok(id))
     }
 
@@ -527,6 +569,9 @@ impl russh_sftp::server::Handler for MemFs {
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        if let Some(status) = self.fail.lock().await.stat_status.get(&path).copied() {
+            return Err(status);
+        }
         if let Some(content) = self.files.lock().await.get(&path) {
             return Ok(Attrs {
                 id,
@@ -1326,6 +1371,349 @@ async fn sftp_create_dir_all_fails_when_permission_denied() {
 
     sftp.close().await.unwrap();
     session.disconnect().await.unwrap();
+}
+
+/// 第三阶段资源边界：只验证扫描计划与 SFTP I/O，不模拟组调度状态机。
+mod directory_preparation {
+    use super::*;
+    use panda_core::sftp_orchestration::scan_local_orchestration;
+
+    async fn fixture() -> (tempfile::TempDir, SshSession, SftpClient, MemFs) {
+        let (port, fs) = start_server_with_fs().await;
+        let dir = tempfile::tempdir().unwrap();
+        let session = connect(port, dir.path(), PASSWORD).await.unwrap();
+        let sftp = SftpClient::new(&session).await.unwrap();
+        (dir, session, sftp, fs)
+    }
+
+    async fn finish(sftp: SftpClient, session: SshSession) {
+        sftp.close().await.unwrap();
+        session.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_mkdir_accepts_verified_directory_without_matching_message() {
+        let (port, fs) = start_server_with_fs().await;
+        let dir = tempfile::tempdir().unwrap();
+        let first_session = connect(port, dir.path(), PASSWORD).await.unwrap();
+        let second_session = connect(port, dir.path(), PASSWORD).await.unwrap();
+        let first = SftpClient::new(&first_session).await.unwrap();
+        let second = SftpClient::new(&second_session).await.unwrap();
+
+        for (index, message) in ["Failure", "目录已存在", "already exists"]
+            .iter()
+            .enumerate()
+        {
+            let root = format!("/并发 {index}");
+            let path = format!("{root}/parent/child");
+            fs.fail(|rules| {
+                for directory in [&root, &format!("{root}/parent"), &path] {
+                    rules
+                        .mkdir_barriers
+                        .insert(directory.clone(), Arc::new(tokio::sync::Barrier::new(2)));
+                }
+                rules.mkdir_existing_message = Some((*message).into());
+            })
+            .await;
+            let (left, right) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(first.create_dir_all(&path), second.create_dir_all(&path))
+            })
+            .await
+            .expect("两个连接应同时到达 mkdir，不得依赖延时制造竞争");
+            assert!(
+                left.is_ok() && right.is_ok(),
+                "竞争后的目录应幂等成功，消息={message}，结果={left:?}/{right:?}"
+            );
+            assert!(first.metadata(&path).await.unwrap().is_dir());
+        }
+        assert_eq!(fs.dirs.lock().await.len(), 9);
+        assert!(fs.files.lock().await.is_empty());
+        finish(first, first_session).await;
+        finish(second, second_session).await;
+    }
+
+    #[tokio::test]
+    async fn mkdir_race_with_regular_file_must_not_succeed_or_overwrite() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules.mkdir_file_race.insert("/occupied".into());
+        })
+        .await;
+        let result = sftp.create_dir_all("/occupied").await;
+        assert!(
+            result.is_err(),
+            "mkdir 期间出现普通文件不能视为目录成功：{result:?}"
+        );
+        assert_eq!(fs.files.lock().await["/occupied"], b"race payload");
+        assert!(!sftp.metadata("/occupied").await.unwrap().is_dir());
+        assert!(fs.dirs.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn misleading_exists_message_without_directory_must_fail() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules.mkdir_status.insert(
+                "/missing".into(),
+                (StatusCode::Failure, "already exists".into()),
+            );
+        })
+        .await;
+        let result = sftp.create_dir_all("/missing").await;
+        assert!(result.is_err(), "错误文本不能代替目录元数据：{result:?}");
+        assert!(fs.dirs.lock().await.is_empty());
+        assert!(fs.files.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn failed_metadata_recheck_must_not_accept_mkdir_failure() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules.mkdir_status.insert(
+                "/unverifiable".into(),
+                (StatusCode::Failure, "already exists".into()),
+            );
+            rules
+                .stat_status_after_mkdir
+                .insert("/unverifiable".into(), StatusCode::PermissionDenied);
+        })
+        .await;
+        let result = sftp.create_dir_all("/unverifiable").await;
+        assert!(result.is_err(), "无权限回查目录不能转为成功：{result:?}");
+        assert!(fs.dirs.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn mkdir_permission_denied_is_preserved() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules.mkdir_status.insert(
+                "/blocked".into(),
+                (
+                    StatusCode::PermissionDenied,
+                    "permission denied: parent exists".into(),
+                ),
+            );
+        })
+        .await;
+        let result = sftp.create_dir_all("/blocked/child").await;
+        assert!(matches!(
+            result,
+            Err(Error::Sftp(russh_sftp::client::error::Error::Status(status)))
+                if status.status_code == StatusCode::PermissionDenied
+        ));
+        assert!(fs.dirs.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_permission_error_is_not_hidden_by_concurrent_directory() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules.mkdir_directory_race.insert("/blocked".into());
+            rules.mkdir_status.insert(
+                "/blocked".into(),
+                (StatusCode::PermissionDenied, "permission denied".into()),
+            );
+        })
+        .await;
+        let result = sftp.create_dir_all("/blocked").await;
+        assert!(matches!(
+            result,
+            Err(Error::Sftp(russh_sftp::client::error::Error::Status(status)))
+                if status.status_code == StatusCode::PermissionDenied
+        ));
+        assert!(sftp.metadata("/blocked").await.unwrap().is_dir());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_permission_denied_does_not_attempt_mkdir() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules
+                .stat_status
+                .insert("/blocked".into(), StatusCode::PermissionDenied);
+        })
+        .await;
+        let result = sftp.create_dir_all("/blocked").await;
+        assert!(matches!(
+            result,
+            Err(Error::Sftp(russh_sftp::client::error::Error::Status(status)))
+                if status.status_code == StatusCode::PermissionDenied
+        ));
+        assert!(fs.dirs.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn existing_regular_file_rejects_leaf_and_parent_paths() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        fs.files
+            .lock()
+            .await
+            .insert("/occupied".into(), b"original".to_vec());
+        for path in ["/occupied", "/occupied/child"] {
+            let result = sftp.create_dir_all(path).await;
+            assert!(
+                matches!(result, Err(Error::Other(ref message)) if message.contains("/occupied"))
+            );
+        }
+        assert_eq!(fs.files.lock().await["/occupied"], b"original");
+        assert!(fs.dirs.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn scanned_empty_tree_preserves_all_levels_with_single_top_name() {
+        let (dir, session, sftp, fs) = fixture().await;
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("empty/sub")).unwrap();
+        let plan = scan_local_orchestration(
+            &[root.to_string_lossy().into_owned()],
+            "/remote",
+            &ScanOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(plan.transfers.is_empty());
+        assert!(plan.batches.is_empty());
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].destination_root, "/remote/project");
+        assert_eq!(plan.groups[0].directories.len(), 3);
+        for directory in &plan.groups[0].directories {
+            sftp.create_dir_all(&directory.destination).await.unwrap();
+        }
+        let expected: HashSet<String> = [
+            "/remote",
+            "/remote/project",
+            "/remote/project/empty",
+            "/remote/project/empty/sub",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(*fs.dirs.lock().await, expected);
+        assert!(sftp
+            .list_dir("/remote/project/empty/sub")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(fs.files.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn file_upload_recreates_removed_parents_without_repeating_top_name() {
+        let (dir, session, sftp, fs) = fixture().await;
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.swift"), b"payload").unwrap();
+        let plan = scan_local_orchestration(
+            &[root.to_string_lossy().into_owned()],
+            "/remote",
+            &ScanOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.transfers.len(), 1);
+        for directory in &plan.groups[0].directories {
+            sftp.create_dir_all(&directory.destination).await.unwrap();
+        }
+        // 目录准备后外部删除父目录，单文件写入仍需自行保证父目录存在。
+        fs.dirs.lock().await.clear();
+        let file = &plan.transfers[0];
+        assert_eq!(file.destination, "/remote/project/src/main.swift");
+        sftp.upload_with_pause(
+            Path::new(&file.source),
+            &file.destination,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.files.lock().await.len(), 1);
+        assert_eq!(fs.files.lock().await[&file.destination], b"payload");
+        assert_eq!(
+            *fs.dirs.lock().await,
+            ["/remote", "/remote/project", "/remote/project/src"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn failed_empty_directory_does_not_poison_sibling_file_io() {
+        let (dir, session, sftp, fs) = fixture().await;
+        fs.fail(|rules| {
+            rules.mkdir_status.insert(
+                "/remote/project/blocked".into(),
+                (StatusCode::PermissionDenied, "permission denied".into()),
+            );
+        })
+        .await;
+        assert!(sftp
+            .create_dir_all("/remote/project/blocked")
+            .await
+            .is_err());
+        let source = dir.path().join("ok.txt");
+        std::fs::write(&source, b"sibling").unwrap();
+        sftp.upload(&source, "/remote/project/ok.txt", None)
+            .await
+            .unwrap();
+        assert!(!fs.dirs.lock().await.contains("/remote/project/blocked"));
+        assert_eq!(fs.files.lock().await["/remote/project/ok.txt"], b"sibling");
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn source_removed_after_scan_does_not_create_remote_file() {
+        let (dir, session, sftp, fs) = fixture().await;
+        let source = dir.path().join("gone.txt");
+        std::fs::write(&source, b"queued").unwrap();
+        let plan = scan_local_orchestration(
+            &[source.to_string_lossy().into_owned()],
+            "/remote",
+            &ScanOptions::default(),
+        )
+        .await
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let file = &plan.transfers[0];
+        let result = sftp
+            .upload_with_pause(
+                Path::new(&file.source),
+                &file.destination,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+        assert!(fs.files.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
+
+    #[tokio::test]
+    async fn empty_and_root_paths_are_noops() {
+        let (_dir, session, sftp, fs) = fixture().await;
+        for path in ["", "/", "///"] {
+            sftp.create_dir_all(path).await.unwrap();
+        }
+        assert!(fs.dirs.lock().await.is_empty());
+        assert!(fs.files.lock().await.is_empty());
+        finish(sftp, session).await;
+    }
 }
 
 #[tokio::test]

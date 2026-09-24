@@ -529,4 +529,59 @@ mod tests {
         assert!(logger.entries(100).is_empty());
         assert!(logger.entries(0).is_empty());
     }
+
+    /// 当路径无父目录（纯文件名）时，`parent()` 返回 `None`，跳过目录创建。
+    #[test]
+    fn configure_file_path_with_bare_filename_skips_mkdir() {
+        let logger = Logger::new(None);
+        logger.info("test", "before-configure");
+        let result = logger.configure_file_path(PathBuf::from("bare-name.log"));
+        assert!(result.is_ok());
+        let _ = fs::remove_file("bare-name.log");
+    }
+
+    /// 缓冲区已满时配置文件路径，若回写历史条目失败则禁用持久化并记录告警。
+    #[test]
+    fn configure_file_path_buffer_flush_failure_disables_persistence() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, "file").unwrap();
+        let logger = Logger::new(None);
+        for i in 0..5 {
+            logger.info("test", &format!("buf-{i}"));
+        }
+        let bad_path = blocker.join("sub").join("test.log");
+        logger.configure_file_path(bad_path).unwrap();
+        assert!(logger.entries(20).iter().any(|e| {
+            e.level == LogLevel::Error && e.message == "日志文件不可写，当前仅保留内存日志"
+        }));
+    }
+
+    /// 持久化失败告警在缓冲区满时淘汰最旧条目。
+    #[test]
+    fn record_persistence_failure_evicts_oldest_when_buffer_full() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, "file").unwrap();
+        let logger = Logger::new(None);
+        for i in 0..1000 {
+            logger.info("test", &format!("fill-{i}"));
+        }
+        assert_eq!(logger.len(), 1000);
+        let bad_path = blocker.join("sub").join("test.log");
+        logger.configure_file_path(bad_path).unwrap();
+        assert_eq!(logger.len(), 1000);
+        assert!(logger.entries(1).iter().any(|e| e.level == LogLevel::Error));
+    }
+
+    /// 直接调用 `rotate_file`，当源文件不存在时不报错。
+    #[test]
+    fn rotate_file_missing_source_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("nonexistent.log");
+        let logger = Logger::new(None);
+        assert!(logger.rotate_file(&log_path).is_ok());
+        let backup = log_path.with_extension("log.1");
+        assert!(!backup.exists());
+    }
 }

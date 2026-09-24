@@ -38,6 +38,11 @@ pub struct TaskGroup {
     pub id: String,
     /// 组名（顶层目录名）。
     pub name: String,
+    /// 使用完整源路径关联组，不能以显示名称反查。
+    pub source_root: String,
+    pub destination_root: String,
+    /// 保留空目录及嵌套目录，不计入文件数量。
+    pub directories: Vec<TaskItem>,
     /// 传输方向。
     pub direction: TransferDirection,
     /// 组内文件任务列表。
@@ -124,6 +129,19 @@ pub fn aggregate_task_groups(
     all_items: &[TaskItem],
     direction: TransferDirection,
 ) -> AggregationResult {
+    // 同次选择按完整源路径去重，不能按内容或末级名称合并。
+    let mut seen = std::collections::HashSet::new();
+    let selected_paths: Vec<_> = selected_paths
+        .iter()
+        .filter(|p| seen.insert(p.as_str()))
+        .cloned()
+        .collect();
+    seen.clear();
+    let all_items: Vec<_> = all_items
+        .iter()
+        .filter(|item| seen.insert(item.source.as_str()))
+        .cloned()
+        .collect();
     // 1. 找出选中的顶层目录（排除被其他选中目录包含的子目录）
     let selected_dir_paths: Vec<&str> = selected_paths
         .iter()
@@ -166,9 +184,25 @@ pub fn aggregate_task_groups(
                 })
                 .cloned()
                 .collect();
+            let mut directories: Vec<_> = all_items
+                .iter()
+                .filter(|item| {
+                    item.is_dir
+                        && (item.source == *dir_path || is_descendant_of(&item.source, dir_path))
+                })
+                .cloned()
+                .collect();
+            directories.sort_by(|a, b| a.source.cmp(&b.source));
+            let root = all_items
+                .iter()
+                .find(|item| item.source == *dir_path)
+                .unwrap();
             TaskGroup {
                 id: Uuid::new_v4().to_string(),
                 name: group_name,
+                source_root: root.source.clone(),
+                destination_root: root.destination.clone(),
+                directories,
                 direction,
                 items,
             }
@@ -243,6 +277,47 @@ mod tests {
             name: extract_name(source),
             is_dir: true,
         }
+    }
+
+    #[test]
+    fn unified_aggregation_deduplicates_selection_and_scan_items() {
+        let selected = vec![
+            "/a/project".into(),
+            "/a/project".into(),
+            "/a/project/sub".into(),
+            "/a/project/sub/file".into(),
+            "/a/free".into(),
+            "/a/free".into(),
+        ];
+        let mut items = vec![
+            dir_item("/a/project", "/target/project"),
+            dir_item("/a/project/sub", "/target/project/sub"),
+            file_item("/a/project/sub/file", "/target/project/sub/file", 0),
+            file_item("/a/free", "/target/free", 1),
+        ];
+        items.extend(items.clone());
+        let result = aggregate_task_groups(&selected, &items, TransferDirection::Upload);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].items.len(), 1);
+        assert_eq!(result.groups[0].directories.len(), 2);
+        assert_eq!(result.standalone_items.len(), 1);
+    }
+
+    #[test]
+    fn unified_aggregation_keeps_full_roots_for_same_named_directories() {
+        let selected = vec!["/a/中文 空间".into(), "/b/中文 空间".into()];
+        let items = vec![
+            dir_item("/a/中文 空间", "/target/中文 空间"),
+            dir_item("/b/中文 空间", "/target/中文 空间"),
+            dir_item("/b/中文 空间/空", "/target/中文 空间/空"),
+        ];
+        let result = aggregate_task_groups(&selected, &items, TransferDirection::Download);
+        assert_eq!(result.groups[0].source_root, "/a/中文 空间");
+        assert_eq!(result.groups[1].source_root, "/b/中文 空间");
+        assert_eq!(result.groups[1].destination_root, "/target/中文 空间");
+        assert_eq!(result.groups[1].directories.len(), 2);
+        assert_ne!(result.groups[0].id, result.groups[1].id);
+        assert!(result.groups.iter().all(|g| g.items.is_empty()));
     }
 
     // === 1.2 分组规则测试 ===
@@ -358,6 +433,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![
                 file_item("/a/f1.txt", "/remote/f1.txt", 100),
@@ -372,6 +450,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![],
         };
@@ -385,6 +466,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![
                 file_item("/a/f1.txt", "/remote/f1.txt", 100),
@@ -407,6 +491,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![file_item("/a/f1.txt", "/remote/f1.txt", 100)],
         };
@@ -419,6 +506,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![],
         };
@@ -433,6 +523,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![
                 file_item("/a/f1.txt", "/remote/f1.txt", 100),
@@ -454,11 +547,25 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![file_item("/a/f1.txt", "/remote/f1.txt", 100)],
         };
         let status_of = |_src: &str| -> TaskStatus { TaskStatus::Done };
         assert_eq!(group.aggregate_status(&status_of), TaskStatus::Done);
+
+        let empty_group = TaskGroup {
+            id: "g_empty".to_string(),
+            name: "empty".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
+            direction: TransferDirection::Upload,
+            items: vec![],
+        };
+        assert_eq!(empty_group.aggregate_status(&status_of), TaskStatus::Done);
     }
 
     #[test]
@@ -466,6 +573,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![
                 file_item("/a/f1.txt", "/remote/f1.txt", 100),
@@ -480,6 +590,15 @@ mod tests {
             }
         };
         assert_eq!(group.aggregate_status(&status_of), TaskStatus::Failed);
+
+        let all_cancelled = |_src: &str| -> TaskStatus { TaskStatus::Cancelled };
+        assert_eq!(group.aggregate_status(&all_cancelled), TaskStatus::Cancelled);
+
+        let all_paused = |_src: &str| -> TaskStatus { TaskStatus::Paused };
+        assert_eq!(group.aggregate_status(&all_paused), TaskStatus::Paused);
+
+        let all_queued = |_src: &str| -> TaskStatus { TaskStatus::Queued };
+        assert_eq!(group.aggregate_status(&all_queued), TaskStatus::Queued);
     }
 
     // === 3.1 group_cancel_plan 测试 ===
@@ -489,6 +608,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![
                 file_item("/a/f1.txt", "/remote/f1.txt", 100),
@@ -504,6 +626,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![],
         };
@@ -518,6 +643,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![
                 file_item("/a/f1.txt", "/remote/f1.txt", 100),
@@ -528,8 +656,7 @@ mod tests {
         let status_of = |src: &str| -> TaskStatus {
             match src {
                 "/a/f1.txt" => TaskStatus::Done,
-                "/a/f2.txt" => TaskStatus::Failed,
-                "/a/f3.txt" => TaskStatus::Failed,
+                "/a/f2.txt" | "/a/f3.txt" => TaskStatus::Failed,
                 _ => TaskStatus::Done,
             }
         };
@@ -542,6 +669,9 @@ mod tests {
         let group = TaskGroup {
             id: "g1".to_string(),
             name: "test".to_string(),
+            source_root: "/a".into(),
+            destination_root: "/remote".into(),
+            directories: vec![],
             direction: TransferDirection::Upload,
             items: vec![file_item("/a/f1.txt", "/remote/f1.txt", 100)],
         };

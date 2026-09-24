@@ -1,0 +1,85 @@
+[
+  {
+    "code": "transfer.preparation.failed",
+    "legacy_wire_text": "目录准备失败",
+    "description": "目录准备阶段整体失败"
+  },
+  {
+    "code": "transfer.dir_create.failed",
+    "description": "单个远端目录创建失败，参数：源路径、目标路径、错误详情"
+  },
+  {
+    "code": "transfer.conflict_check.failed",
+    "description": "覆盖冲突检查失败，参数：源路径、目标路径、错误详情"
+  },
+  {
+    "code": "transfer.scan.cancelled",
+    "legacy_wire_text": "扫描已取消",
+    "description": "文件扫描被用户取消"
+  },
+  {
+    "code": "transfer.scan.failed",
+    "description": "文件扫描失败，参数：路径、错误详情"
+  },
+  {
+    "code": "transfer.scan.depth_exceeded",
+    "legacy_wire_text": "max scan depth exceeded",
+    "description": "扫描深度超过上限"
+  },
+  {
+    "code": "transfer.executor.unconfigured",
+    "legacy_wire_text": "目录执行器未配置",
+    "description": "目录执行器 trait 未注入"
+  },
+  {
+    "code": "transfer.task.invalid_id",
+    "legacy_wire_text": "无效任务 id",
+    "description": "任务标识格式无效"
+  },
+  {
+    "code": "transfer.task.unknown",
+    "legacy_wire_text": "未知任务",
+    "description": "任务标识未找到对应记录"
+  },
+  {
+    "code": "transfer.task.not_retryable",
+    "legacy_wire_text": "任务不在可重试状态",
+    "description": "任务当前状态不允许重试"
+  },
+  {
+    "code": "transfer.task.terminal",
+    "legacy_wire_text": "任务已终态",
+    "description": "任务已处于终态不可操作"
+  },
+  {
+    "code": "transfer.task.not_waiting_conflict",
+    "legacy_wire_text": "任务不在等待冲突状态",
+    "description": "任务不在等待覆盖决策状态"
+  },
+  {
+    "code": "transfer.group.unknown",
+    "description": "组标识未找到对应记录，参数：组 ID"
+  },
+  {
+    "code": "transfer.cancelled",
+    "legacy_wire_text": "传输已取消",
+    "description": "传输操作被取消"
+  },
+  {
+    "code": "transfer.operation.exiting",
+    "legacy_wire_text": "应用正在退出，不能启动新任务",
+    "description": "应用正在退出时拒绝新任务"
+  },
+  {
+    "code": "transfer.operation.unknown",
+    "description": "操作标识未找到对应记录，参数：操作 ID"
+  },
+  {
+    "code": "transfer.operation.invalid_id",
+    "description": "操作标识格式无效，参数：解析错误"
+  },
+  {
+    "code": "transfer.batch.item_failed",
+    "description": "批量传输单项失败，参数：源路径、目标路径、错误详情"
+  }
+]

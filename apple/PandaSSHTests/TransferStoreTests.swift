@@ -908,14 +908,14 @@ final class TransferTaskPresentationTests: XCTestCase {
     }
 
     func test零字节仅完成状态展示完成进度() {
-        for status in [TransferStatus.queued, .running, .paused, .failed, .cancelled, .done] {
+        for status in [TransferStatus.queued, .running, .paused, .failed, .cancelled, .skipped, .done] {
             let display = TransferTaskPresentation(task: task(size: 0, status: status), hostName: nil)
             XCTAssertEqual(display.progress, status == .done ? 1 : nil)
         }
     }
 
     func test停止任务不显示陈旧速度() {
-        for status in [TransferStatus.queued, .running, .paused, .failed, .cancelled, .done] {
+        for status in [TransferStatus.queued, .running, .paused, .failed, .cancelled, .skipped, .done] {
             var value = task(status: status)
             value.liveSpeed = 512
             let display = TransferTaskPresentation(task: value, hostName: nil)
@@ -983,3 +983,499 @@ final class TaskRevisionTests: XCTestCase {
         XCTAssertEqual(store.tasks.first?.status, .failed)
     }
 }
+
+// MARK: - 6.5: 刷新、轮询与快照稳定性
+
+@MainActor
+final class TransferStoreRefreshTests: XCTestCase {
+
+    private func makeSpy() -> BatchTransferSourceSpy {
+        BatchTransferSourceSpy()
+    }
+
+    private func makeStoreWithSpy() -> (TransferStore, BatchTransferSourceSpy) {
+        let spy = makeSpy()
+        spy.revision = 1
+        let store = TransferStore(source: spy, batchSource: spy)
+        return (store, spy)
+    }
+
+    // MARK: 正常流程
+
+    /// 首次上传后 add() 立即触发 refresh，无需等待 tick 即可在 tasks 中看到新任务。
+    func testAddImmediatelyReflectsTaskWithoutTick() {
+        let (store, _) = makeStoreWithSpy()
+
+        let id = store.addBatchUpload(sources: ["/local/a.txt"], destDir: "/remote")
+
+        XCTAssertNotNil(store.tasks.first { $0.id == id })
+        XCTAssertEqual(store.tasks.count, 1)
+    }
+
+    /// 文件和组快照在多次 tick 后保持稳定：修订不变时不重读快照，组成员不丢失。
+    func testFileAndGroupSnapshotsRemainStableAcrossTicks() {
+        let spy = makeSpy()
+        spy.revision = 1
+        let store = TransferStore(source: spy, batchSource: spy)
+        let groupID = UUID()
+        let id1 = store.addBatchUpload(sources: ["/local/a.txt"], destDir: "/remote", groupID: groupID, groupName: "g")
+        let id2 = store.addBatchUpload(sources: ["/local/b.txt"], destDir: "/remote", groupID: groupID, groupName: "g")
+
+        let readsBefore = spy.listReads
+        for _ in 0..<5 {
+            store.tick()
+        }
+
+        XCTAssertEqual(store.tasks.filter { $0.groupID == groupID }.count, 2)
+        XCTAssertNotNil(store.tasks.first { $0.id == id1 })
+        XCTAssertNotNil(store.tasks.first { $0.id == id2 })
+        // 修订未变，tick 不应重读快照
+        XCTAssertEqual(spy.listReads, readsBefore)
+    }
+
+    /// 单文件任务从入队到完成的完整生命周期在 spy 驱动下可观测。
+    func testSingleTaskLifecycleFromQueuedToDone() {
+        let (store, spy) = makeStoreWithSpy()
+        let id = store.addBatchUpload(sources: ["/local/only.txt"], destDir: "/remote")
+
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .queued)
+
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 50, status: .running)
+        spy.revision! += 1
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .running)
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.transferred, 50)
+
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 100, status: .done)
+        spy.revision! += 1
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .done)
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.transferred, 100)
+    }
+
+    // MARK: 意外操作
+
+    /// 准备失败的批量任务仍然出现在任务列表中，且修订变化后 UI 能感知失败。
+    func testPreparationFailureStillPublishesUpdate() {
+        let (store, spy) = makeStoreWithSpy()
+        let id = store.addBatchUpload(sources: ["/local/dir"], destDir: "/remote")
+
+        spy.setBatchTask(id: id, totalSize: 0, transferred: 0, status: .failed)
+        spy.revision! += 1
+        store.tick()
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertEqual(task?.status, .failed)
+    }
+
+    /// 等待覆盖确认（pendingConflict）的批量任务在修订变化后仍然更新到 UI。
+    func testPendingConflictStillPublishesUpdate() {
+        let (store, spy) = makeStoreWithSpy()
+        let id = store.addBatchUpload(sources: ["/local/a.txt"], destDir: "/remote")
+
+        let conflict = PendingConflict(
+            name: "a.txt",
+            sourceSize: 100,
+            sourceDate: Date(timeIntervalSince1970: 1_700_000_000),
+            targetSize: 200,
+            targetDate: Date(timeIntervalSince1970: 1_700_000_100)
+        )
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .queued, pendingConflict: conflict)
+        spy.revision! += 1
+        store.tick()
+
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.pendingConflict, conflict)
+
+        // 冲突解决后任务继续
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .running, pendingConflict: nil)
+        spy.revision! += 1
+        store.tick()
+
+        XCTAssertNil(store.tasks.first { $0.id == id }?.pendingConflict)
+        XCTAssertEqual(store.tasks.first { $0.id == id }?.status, .running)
+    }
+
+    /// 停机后已完成的任务不被丢弃：终态任务在 tasks 中仍可见。
+    func testShutdownDoesNotDiscardCompletedTasks() {
+        let (store, spy) = makeStoreWithSpy()
+        let done = store.addBatchUpload(sources: ["/local/done.txt"], destDir: "/remote")
+        spy.setBatchTask(id: done, totalSize: 100, transferred: 100, status: .done)
+        spy.revision! += 1
+        store.tick()
+        XCTAssertEqual(store.tasks.first { $0.id == done }?.status, .done)
+
+        store.beginApplicationShutdown()
+
+        // 已完成任务不被清除
+        XCTAssertNotNil(store.tasks.first { $0.id == done })
+        XCTAssertEqual(store.tasks.first { $0.id == done }?.status, .done)
+    }
+
+    // MARK: 边界条件
+
+    /// 只有空目录准备（零文件批量）时任务仍出现在列表中。
+    func testEmptyBatchUploadStillAppears() {
+        let (store, _) = makeStoreWithSpy()
+        let id = store.addBatchUpload(sources: [], destDir: "/remote/empty")
+
+        let task = store.tasks.first { $0.id == id }
+        XCTAssertNotNil(task)
+        XCTAssertTrue(task?.isBatch ?? false)
+    }
+
+    /// 进度未变时不重复发布：修订不变导致 tick 跳过快照读取，tasks 引用保持稳定。
+    func testUnchangedProgressDoesNotRepublish() {
+        let (store, spy) = makeStoreWithSpy()
+        let id = store.addBatchUpload(sources: ["/local/a.txt"], destDir: "/remote")
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 50, status: .running)
+        spy.revision! += 1
+        store.tick()
+
+        let snapshot1 = store.tasks
+        let readsAfterFirstTick = spy.listReads
+
+        // 多次 tick，修订不变
+        store.tick()
+        store.tick()
+        store.tick()
+
+        let snapshot2 = store.tasks
+        XCTAssertEqual(snapshot1, snapshot2)
+        XCTAssertEqual(spy.listReads, readsAfterFirstTick, "修订未变时 tick 不应重读快照")
+    }
+
+    /// 任务全部结束后 tick 不触发快照读取（空转节省 CPU）。
+    func testTerminalTasksDoNotTriggerSnapshotReads() {
+        let (store, spy) = makeStoreWithSpy()
+        let id = store.addBatchUpload(sources: ["/local/a.txt"], destDir: "/remote")
+        spy.setBatchTask(id: id, totalSize: 100, transferred: 100, status: .done)
+        spy.revision! += 1
+        store.tick() // 读取一次快照
+
+        let readsAfterDone = spy.listReads
+
+        // 后续 tick 修订不变，不应再读快照
+        store.tick()
+        store.tick()
+        XCTAssertEqual(spy.listReads, readsAfterDone)
+    }
+
+    /// 空任务列表下 tick 不触发快照读取。
+    func testEmptyTaskListDoesNotTriggerSnapshotReads() {
+        let spy = makeSpy()
+        spy.revision = 1
+        let store = TransferStore(source: spy, batchSource: spy)
+        // 不添加任何任务
+
+        store.tick()
+        store.tick()
+
+        XCTAssertEqual(spy.listReads, 0, "空列表不应读取快照")
+    }
+}
+
+// MARK: - 7.1 原生 UI 视图测试
+
+#if os(macOS)
+import SwiftUI
+
+@MainActor
+final class TransferPanelViewTests: XCTestCase {
+
+    // MARK: - 辅助
+
+    private func makeSpy() -> BatchTransferSourceSpy {
+        let spy = BatchTransferSourceSpy()
+        spy.revision = 1
+        return spy
+    }
+
+    private func makeStore(spy: BatchTransferSourceSpy) -> TransferStore {
+        TransferStore(source: spy, batchSource: spy)
+    }
+
+    private func makeModel() -> AppModel {
+        AppModel(backend: MockBackend.demo())
+    }
+
+    /// 在真实窗口中渲染 TransferPageView，返回 NSHostingView 供断言。
+    private func renderInWindow(
+        store: TransferStore,
+        model: AppModel? = nil,
+        size: NSSize = NSSize(width: 600, height: 400)
+    ) -> NSHostingView<AnyView> {
+        let page = AnyView(TransferPageView(store: store)
+            .environmentObject(model ?? makeModel()))
+        let hosting = NSHostingView(rootView: page)
+        hosting.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        return hosting
+    }
+
+    /// 递归统计 NSView 层级中非零尺寸子视图数量。
+    private func countNonTrivialSubviews(in view: NSView) -> Int {
+        var count = 0
+        for sub in view.subviews {
+            if sub.frame.width > 1 && sub.frame.height > 1 { count += 1 }
+            count += countNonTrivialSubviews(in: sub)
+        }
+        return count
+    }
+
+    /// 递归查找所有 NSTextField 子视图的文本内容。
+    private func allTextLabels(in view: NSView) -> [String] {
+        var texts: [String] = []
+        for sub in view.subviews {
+            if let tf = sub as? NSTextField, !tf.stringValue.isEmpty {
+                texts.append(tf.stringValue)
+            }
+            texts.append(contentsOf: allTextLabels(in: sub))
+        }
+        return texts
+    }
+
+    // MARK: - 正常流程
+
+    /// 上传和下载组在真实窗口中渲染后视图层级完整。
+    func test两种方向组渲染后视图层级完整() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupA = UUID()
+        _ = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/a.txt", "/local/b.txt"], destDir: "/remote/A",
+            groupID: groupA.uuidString, groupName: "上传目录A", password: nil, passphrase: nil)
+        _ = spy.enqueueBatchDownload(
+            hostID: "", sources: ["/remote/b.txt"], destDir: "/local/B",
+            groupID: UUID().uuidString, groupName: "下载文件B", password: nil, passphrase: nil)
+        store.refresh()
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        let viewCount = countNonTrivialSubviews(in: hosting)
+        XCTAssertGreaterThan(viewCount, 5, "两个组渲染后应有足够多的子视图，实际 \(viewCount)")
+        XCTAssertEqual(store.taskGroups.count, 2)
+    }
+
+    /// 组数据包含正确数量的子任务。
+    func test组成员数量正确() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupID = UUID()
+        _ = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/x.txt", "/local/y.txt", "/local/z.txt"], destDir: "/remote/X",
+            groupID: groupID.uuidString, groupName: "展开测试组", password: nil, passphrase: nil)
+        store.refresh()
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        XCTAssertEqual(store.taskGroups.count, 1)
+        XCTAssertEqual(store.taskGroups.first?.tasks.count, 1, "批量任务作为单条记录")
+        let countCollapsed = countNonTrivialSubviews(in: hosting)
+        XCTAssertGreaterThan(countCollapsed, 0, "收起状态下应有子视图")
+    }
+
+    /// 单文件批量任务在视图中正确渲染。
+    func test单文件批量渲染() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        _ = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/solo.txt"], destDir: "/remote/solo",
+            groupID: nil, groupName: nil, password: nil, passphrase: nil)
+        store.refresh()
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        let viewCount = countNonTrivialSubviews(in: hosting)
+        XCTAssertGreaterThan(viewCount, 3, "单文件批量行应有足够子视图")
+        XCTAssertEqual(store.tasks.count, 1)
+    }
+
+    // MARK: - 意外操作
+
+    /// 失败组在视图中仍然可见。
+    func test失败组仍然可见() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupID = UUID()
+        let idStr = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/fail.txt"], destDir: "/remote/fail",
+            groupID: groupID.uuidString, groupName: "失败组", password: nil, passphrase: nil)
+        store.refresh()
+
+        if let id = UUID(uuidString: idStr) {
+            spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .failed)
+        }
+        store.refresh()
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        XCTAssertEqual(store.taskGroups.count, 1, "失败组应出现在组列表中")
+        XCTAssertEqual(store.taskGroups.first?.status, .failed)
+        let viewCount = countNonTrivialSubviews(in: hosting)
+        XCTAssertGreaterThan(viewCount, 3, "失败组应有可见的视图层级")
+    }
+
+    /// 等待覆盖确认的任务仍然发布更新。
+    func test待确认任务仍然可见() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupID = UUID()
+        let idStr = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/conflict.txt"], destDir: "/remote/conflict",
+            groupID: groupID.uuidString, groupName: "冲突组", password: nil, passphrase: nil)
+        store.refresh()
+
+        if let id = UUID(uuidString: idStr) {
+            spy.setBatchTask(id: id, totalSize: 200, transferred: 0, status: .queued,
+                             pendingConflict: PendingConflict(name: "conflict.txt", sourceSize: 200,
+                                                              sourceDate: nil, targetSize: 100, targetDate: nil))
+        }
+        store.refresh()
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        let conflictTask = store.tasks.first { $0.pendingConflict != nil }
+        XCTAssertNotNil(conflictTask, "待确认任务应存在于 store")
+        XCTAssertEqual(conflictTask?.status, .queued, "待确认任务状态为排队")
+    }
+
+    /// 单任务取消不影响同组其他任务。
+    func test单任务取消不影响同组其他任务() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupID = UUID()
+        let id1 = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/a.txt"], destDir: "/remote/mixed",
+            groupID: groupID.uuidString, groupName: "混合组", password: nil, passphrase: nil)
+        _ = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/b.txt"], destDir: "/remote/mixed",
+            groupID: groupID.uuidString, groupName: "混合组", password: nil, passphrase: nil)
+        store.refresh()
+
+        if let taskID = UUID(uuidString: id1) {
+            store.cancel(id: taskID)
+        }
+        XCTAssertTrue(spy.cancelledIDs.contains(id1), "应取消指定任务")
+        let remaining = store.tasks.filter { $0.groupID == groupID && $0.id.uuidString != id1 }
+        XCTAssertFalse(spy.cancelledIDs.contains(remaining.first?.id.uuidString ?? ""), "不应取消其他任务")
+    }
+
+    // MARK: - 边界条件
+
+    /// 空目录组（零文件）在视图中可见。
+    func test空目录组可见() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        _ = spy.enqueueBatchUpload(
+            hostID: "", sources: [], destDir: "/remote/empty",
+            groupID: UUID().uuidString, groupName: "空目录", password: nil, passphrase: nil)
+        store.refresh()
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        XCTAssertEqual(store.taskGroups.count, 1, "空目录组应出现")
+        XCTAssertEqual(store.taskGroups.first?.tasks.count, 1, "批量记录作为单条任务")
+        let viewCount = countNonTrivialSubviews(in: hosting)
+        XCTAssertGreaterThan(viewCount, 0, "空目录组应有视图")
+    }
+
+    /// 长路径和中文路径的 presentation 正确格式化。
+    func test长路径和中文路径格式化() {
+        let task = TransferTask(record: TransferRecord(
+            id: UUID(), direction: .upload, name: "中文文件名.txt", size: 1000, transferred: 500,
+            status: .running,
+            source: "/Users/用户/文档/中文文件名.txt",
+            destination: "/home/deploy/非常长的目标路径/子目录/中文文件名.txt",
+            hostID: "host1", error: nil, version: 1, failAt: nil,
+            isBatch: false, batchSources: [], batchDestDir: "",
+            groupID: nil, groupName: nil, pendingConflict: nil))
+        let presentation = TransferTaskPresentation(task: task, hostName: "生产服务器")
+        XCTAssertEqual(presentation.sourceEndpoint, "本地")
+        XCTAssertEqual(presentation.destinationEndpoint, "生产服务器")
+        XCTAssertTrue(presentation.sourcePath.contains("中文文件名"))
+        XCTAssertTrue(presentation.destinationPath.contains("中文文件名"))
+    }
+
+    /// 零字节任务的进度为 1（完成态）。
+    func test零字节任务进度() {
+        let task = TransferTask(record: TransferRecord(
+            id: UUID(), direction: .upload, name: "empty.txt", size: 0, transferred: 0,
+            status: .done,
+            source: "/local/empty.txt", destination: "/remote/empty.txt",
+            hostID: "host1", error: nil, version: 1, failAt: nil,
+            isBatch: false, batchSources: [], batchDestDir: "",
+            groupID: nil, groupName: nil, pendingConflict: nil))
+        let presentation = TransferTaskPresentation(task: task, hostName: "server")
+        XCTAssertEqual(presentation.progress, 1.0, "零字节完成态进度应为 1")
+    }
+
+    /// 进度刷新不丢失组数据（通过 store 数据验证）。
+    func test进度刷新保持组数据完整() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupID = UUID()
+        let idStr = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/a.txt", "/local/b.txt"], destDir: "/remote/progress",
+            groupID: groupID.uuidString, groupName: "进度组", password: nil, passphrase: nil)
+        store.refresh()
+
+        let initialGroups = store.taskGroups
+        XCTAssertEqual(initialGroups.count, 1)
+
+        if let id = UUID(uuidString: idStr) {
+            spy.setBatchTask(id: id, totalSize: 1000, transferred: 500, status: .running)
+        }
+        store.refresh()
+
+        let updatedGroups = store.taskGroups
+        XCTAssertEqual(updatedGroups.count, 1, "刷新后组数量不变")
+        XCTAssertEqual(updatedGroups.first?.tasks.count, 1, "刷新后组成员数不变")
+        XCTAssertGreaterThan(updatedGroups.first?.transferred ?? 0, 0, "进度应增加")
+    }
+
+    /// 重试后组数据保持完整。
+    func test重试后组数据完整() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+        let groupID = UUID()
+        let idStr = spy.enqueueBatchUpload(
+            hostID: "", sources: ["/local/retry.txt"], destDir: "/remote/retry",
+            groupID: groupID.uuidString, groupName: "重试组", password: nil, passphrase: nil)
+        store.refresh()
+
+        if let id = UUID(uuidString: idStr) {
+            spy.setBatchTask(id: id, totalSize: 100, transferred: 0, status: .failed)
+        }
+        store.refresh()
+
+        XCTAssertEqual(store.taskGroups.first?.status, .failed)
+        store.retryGroup(id: groupID)
+        XCTAssertEqual(store.taskGroups.count, 1, "重试后组仍存在")
+    }
+
+    /// 空任务列表渲染空态视图。
+    func test空任务列表渲染空态() {
+        let spy = makeSpy()
+        let store = makeStore(spy: spy)
+
+        let hosting = renderInWindow(store: store)
+        defer { hosting.window?.close() }
+
+        let viewCount = countNonTrivialSubviews(in: hosting)
+        XCTAssertGreaterThan(viewCount, 0, "空态视图也应有子视图")
+        XCTAssertEqual(store.tasks.count, 0)
+    }
+}
+#endif

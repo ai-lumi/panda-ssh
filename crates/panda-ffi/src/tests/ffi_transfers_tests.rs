@@ -111,6 +111,7 @@ fn status_conversion_covers_all_variants() {
         (TransferStatus::Completed, TransferStatusEnum::Completed),
         (TransferStatus::Failed, TransferStatusEnum::Failed),
         (TransferStatus::Cancelled, TransferStatusEnum::Cancelled),
+        (TransferStatus::Skipped, TransferStatusEnum::Skipped),
     ];
     for (core, ffi) in cases {
         assert_eq!(from_core_status(core), ffi);
@@ -136,6 +137,7 @@ fn snapshot_to_record_converts_all_fields() {
         eta_seconds: Some(10.0),
         group_id: Some("g1".into()),
         group_name: Some("组".into()),
+        conflict: None,
     };
     let rec = snapshot_to_record(snap);
     assert_eq!(rec.id, "abc");
@@ -589,7 +591,7 @@ fn orchestration_single_file_upload_returns_one_transfer() {
 }
 
 #[test]
-fn orchestration_directory_upload_returns_one_batch() {
+fn orchestration_directory_upload_returns_per_file_transfers() {
     let _g = global_test_lock();
     reset_both_services();
     let result = orchestrate_sftp_transfers(
@@ -605,12 +607,15 @@ fn orchestration_directory_upload_returns_one_batch() {
         None,
     )
     .unwrap();
-    assert!(result.transfer_ids.is_empty());
-    assert_eq!(result.batch_ids.len(), 1);
+    assert_eq!(result.transfer_ids.len(), 1, "目录上传产生逐文件传输");
+    assert!(result.batch_ids.is_empty(), "不再产生整体批量任务");
+    let snap = transfer_status(result.transfer_ids[0].clone()).unwrap();
+    assert!(snap.group_id.is_some(), "目录内文件应关联组 ID");
+    assert_eq!(snap.direction, TransferDirectionEnum::Upload);
 }
 
 #[test]
-fn orchestration_mixed_upload_returns_transfers_and_batch() {
+fn orchestration_mixed_upload_returns_all_transfers() {
     let _g = global_test_lock();
     reset_both_services();
     let result = orchestrate_sftp_transfers(
@@ -627,8 +632,12 @@ fn orchestration_mixed_upload_returns_transfers_and_batch() {
         None,
     )
     .unwrap();
-    assert_eq!(result.transfer_ids.len(), 1);
-    assert_eq!(result.batch_ids.len(), 1);
+    assert_eq!(result.transfer_ids.len(), 2, "目录文件与独立文件均为逐文件传输");
+    assert!(result.batch_ids.is_empty(), "不再产生整体批量任务");
+    let grouped = transfer_status(result.transfer_ids[0].clone()).unwrap();
+    let standalone = transfer_status(result.transfer_ids[1].clone()).unwrap();
+    assert!(grouped.group_id.is_some(), "目录内文件应关联组 ID");
+    assert!(standalone.group_id.is_none(), "独立文件不应有组 ID");
 }
 
 #[test]
@@ -692,5 +701,188 @@ fn orchestration_unknown_host_returns_error() {
     match err {
         PandaError::UnknownHost(ref h) if h == "nonexistent-host" => {}
         _ => panic!("expected PandaError::UnknownHost, got {err:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6.1 契约补充：凭据隔离、空选择区分、组关联、路径一致性
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_record_does_not_carry_credentials() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+    let id = start_transfer(
+        TransferDirectionEnum::Upload,
+        "refused-host".into(),
+        "/tmp/secret".into(),
+        "/remote/secret".into(),
+        100,
+        Some("super-secret-password".into()),
+        Some("super-secret-passphrase".into()),
+        None,
+        None,
+    )
+    .unwrap();
+    wait_for_ffi_status(&id, TransferStatusEnum::Failed);
+    let snap = transfer_status(id).unwrap();
+    assert_eq!(snap.local_path, "/tmp/secret");
+    assert_eq!(snap.remote_path, "/remote/secret");
+    assert_eq!(snap.host_id, "refused-host");
+    let snap_debug = format!("{snap:?}");
+    assert!(
+        !snap_debug.contains("super-secret-password"),
+        "快照不应包含密码明文"
+    );
+    assert!(
+        !snap_debug.contains("super-secret-passphrase"),
+        "快照不应包含口令明文"
+    );
+}
+
+#[test]
+fn group_snapshot_does_not_carry_credentials() {
+    use panda_core::transfer::{TransferDirection, TransferGroupSnapshot, TransferStatus};
+    let g = TransferGroupSnapshot {
+        group_id: "g1".into(),
+        group_name: "秘组".into(),
+        direction: TransferDirection::Upload,
+        total_count: 1,
+        completed_count: 0,
+        total_bytes: 100,
+        transferred_bytes: 0,
+        status: TransferStatus::Running,
+    };
+    let rec = group_to_record(g);
+    let debug = format!("{rec:?}");
+    assert!(!debug.contains("password"));
+    assert!(!debug.contains("passphrase"));
+}
+
+#[test]
+fn orchestration_empty_selection_returns_empty_without_host_lookup() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec![],
+        vec![],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(result.transfer_ids.is_empty());
+    assert!(result.batch_ids.is_empty());
+}
+
+#[test]
+fn orchestration_empty_directory_produces_no_tasks() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/tmp/emptydir".into()],
+        vec![dir_record("/tmp/emptydir", "/remote/emptydir")],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(result.transfer_ids.is_empty(), "空目录无文件传输");
+    assert!(result.batch_ids.is_empty(), "空目录不再产生批量任务");
+}
+
+#[test]
+fn orchestration_download_directory_files_share_group_id() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/remote/dirB".into()],
+        vec![
+            dir_record("/remote/dirB", "/tmp/dirB"),
+            file_record("/remote/dirB/a.txt", "/tmp/dirB/a.txt", 100),
+            file_record("/remote/dirB/b.txt", "/tmp/dirB/b.txt", 200),
+        ],
+        TransferDirectionEnum::Download,
+        "test-host".into(),
+        "/tmp".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.transfer_ids.len(), 2);
+    let snap_a = transfer_status(result.transfer_ids[0].clone()).unwrap();
+    let snap_b = transfer_status(result.transfer_ids[1].clone()).unwrap();
+    assert!(snap_a.group_id.is_some(), "目录下载文件应关联组 ID");
+    assert_eq!(snap_a.group_id, snap_b.group_id, "同目录文件应共享组 ID");
+    assert_eq!(snap_a.group_name, snap_b.group_name);
+    assert_eq!(snap_a.direction, TransferDirectionEnum::Download);
+}
+
+#[test]
+fn orchestration_upload_snapshot_paths_match_plan() {
+    let _g = global_test_lock();
+    reset_both_services();
+    let result = orchestrate_sftp_transfers(
+        vec!["/tmp/file.txt".into()],
+        vec![file_record("/tmp/file.txt", "/remote/file.txt", 42)],
+        TransferDirectionEnum::Upload,
+        "test-host".into(),
+        "/remote".into(),
+        Some("pw".into()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.transfer_ids.len(), 1);
+    let snap = transfer_status(result.transfer_ids[0].clone()).unwrap();
+    assert_eq!(snap.local_path, "/tmp/file.txt");
+    assert_eq!(snap.remote_path, "/remote/file.txt");
+    assert_eq!(snap.size, 42);
+    assert_eq!(snap.host_id, "test-host");
+    assert!(snap.group_id.is_none(), "独立文件不应有组 ID");
+}
+
+#[test]
+fn group_retry_preserves_task_ids_via_ffi() {
+    let _g = global_test_lock();
+    reset_transfer_service_for_test();
+
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let id = start_transfer(
+            TransferDirectionEnum::Upload,
+            "refused-host".into(),
+            format!("/tmp/rid{i}"),
+            format!("/remote/rid{i}"),
+            100,
+            Some("pw".into()),
+            None,
+            Some("g-retry".into()),
+            Some("重试组".into()),
+        )
+        .unwrap();
+        ids.push(id);
+    }
+
+    for id in &ids {
+        wait_for_ffi_status(id, TransferStatusEnum::Failed);
+    }
+
+    transfer_group_retry("g-retry".into()).unwrap();
+
+    for id in &ids {
+        wait_for_ffi_status(id, TransferStatusEnum::Failed);
+        let snap = transfer_status(id.clone()).unwrap();
+        assert!(
+            snap.local_path.starts_with("/tmp/rid"),
+            "重试应保持原始路径"
+        );
+        assert!(
+            snap.remote_path.starts_with("/remote/rid"),
+            "重试应保持原始远端路径"
+        );
     }
 }

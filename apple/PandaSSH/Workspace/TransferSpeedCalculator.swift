@@ -14,12 +14,16 @@ func formatSpeed(_ bytesPerSecond: Int64) -> String {
 /// 剩余时间格式化：小于 1 秒显示"1 秒内"，其余按秒/分/时展示。
 func formatDuration(_ interval: TimeInterval) -> String {
     let seconds = Int(interval)
-    if seconds < 1 { return "1 秒内" }
-    if seconds < 60 { return "\(seconds) 秒" }
+    if seconds < 1 { return l10n.str("transfer.duration.zero.message") }
+    if seconds < 60 {
+        return "\(seconds) \(l10n.str("transfer.duration.second.unit"))"
+    }
     let minutes = seconds / 60
     let secs = seconds % 60
-    if minutes < 60 { return "\(minutes) 分 \(secs) 秒" }
+    if minutes < 60 {
+        return "\(minutes) \(l10n.str("transfer.duration.minute.unit")) \(secs) \(l10n.str("transfer.duration.second.unit"))"
+    }
     let hours = minutes / 60
     let mins = minutes % 60
-    return "\(hours) 时 \(mins) 分"
+    return "\(hours) \(l10n.str("transfer.duration.hour.unit")) \(mins) \(l10n.str("transfer.duration.minute.unit"))"
 }

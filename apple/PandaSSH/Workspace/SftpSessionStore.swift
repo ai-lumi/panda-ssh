@@ -447,6 +447,10 @@ final class FilePaneNavigator: ObservableObject {
     var rootTitle: String { source.rootTitle }
     // 根目录显示标题（如 "本地"、"远程 — server1"）
 
+    func recordError(_ error: Error) {
+        lastError = error
+    }
+
     var canGoUp: Bool { path != root && path != "/" }
     // 是否可以返回上级目录
     // 条件：当前路径不是根目录 且 不是文件系统根目录 "/"
@@ -749,12 +753,12 @@ final class SftpSessionStore: ObservableObject {
     // 防止同一个任务完成事件多次触发刷新
 
     /// 测试注入点:覆盖本地目录扫描行为。
-    var scanLocalHandler: (([String], String) -> [BatchItemRecord])?
+    var scanLocalHandler: (([String], String) throws -> [BatchItemRecord])?
     // 测试注入点：覆盖本地目录递归扫描行为
     // 单元测试可以注入自定义实现，验证扫描逻辑
 
     /// 测试注入点:覆盖远程目录扫描行为。
-    var scanRemoteHandler: (([String], String) -> [BatchItemRecord])?
+    var scanRemoteHandler: (([String], String) throws -> [BatchItemRecord])?
     // 测试注入点：覆盖远程目录递归扫描行为
 
 
@@ -1269,7 +1273,14 @@ final class SftpSessionStore: ObservableObject {
     func upload(localPaths: [String]) async -> [TransferTask] {
         guard !localPaths.isEmpty else { return [] }
         let destinationDirectory = remotePane.path
-        let allItems = await scanLocalItems(paths: localPaths, destDir: destinationDirectory)
+        let allItems: [BatchItemRecord]
+        do {
+            allItems = try await scanLocalItems(paths: localPaths, destDir: destinationDirectory)
+        } catch {
+            localPane.recordError(error)
+            Logger.shared.error("本地扫描失败: paths=\(localPaths), error=\(error)", module: LogModule.sftp)
+            return []
+        }
         guard !allItems.isEmpty else { return [] }
 
         let ffiItems = allItems.map { TaskItemRecord(source: $0.source, destination: $0.destination, size: $0.size, name: ($0.source as NSString).lastPathComponent, isDir: $0.isDir) }
@@ -1288,7 +1299,14 @@ final class SftpSessionStore: ObservableObject {
     @discardableResult
     func download(remotePaths: [String]) async -> [TransferTask] {
         guard !remotePaths.isEmpty else { return [] }
-        let items = await scanRemoteItems(paths: remotePaths, destDir: localPane.path)
+        let items: [BatchItemRecord]
+        do {
+            items = try await scanRemoteItems(paths: remotePaths, destDir: localPane.path)
+        } catch {
+            remotePane.recordError(error)
+            Logger.shared.error("远程扫描失败: paths=\(remotePaths), error=\(error)", module: LogModule.sftp)
+            return []
+        }
         guard !items.isEmpty else { return [] }
 
         let ffiItems = items.map { TaskItemRecord(source: $0.source, destination: $0.destination, size: $0.size, name: ($0.source as NSString).lastPathComponent, isDir: $0.isDir) }
@@ -1324,12 +1342,6 @@ final class SftpSessionStore: ObservableObject {
     private func uploadSingleFile(name: String, size: UInt64) async -> TransferTask? {
         let source = joinPath(localPane.path, name)
         let destination = joinPath(remotePane.path, name)
-        if connectionSecrets != nil,
-           let conflict = try? await checkUploadConflict(name: name, source: source, destination: destination) {
-            conflictContext = (.upload, name, size, source, destination)
-            pendingConflict = conflict
-            return nil
-        }
         return enqueueSingle(direction: .upload, name: name, size: size, source: source, destination: destination)
     }
 
@@ -1398,28 +1410,26 @@ final class SftpSessionStore: ObservableObject {
         return transfers.tasks.filter { ids.contains($0.id.uuidString) }
     }
 
-    private func scanLocalItems(paths: [String], destDir: String) async -> [BatchItemRecord] {
+    private func scanLocalItems(paths: [String], destDir: String) async throws -> [BatchItemRecord] {
         let handler = scanLocalHandler
-        // 本地递归扫描可能在主线程耗时数百 ms，放后台执行（测试 handler 亦同）。
-        return (try? await FFIBackground.run { () -> [BatchItemRecord] in
+        return try await FFIBackground.run { () -> [BatchItemRecord] in
             if let handler {
-                return handler(paths, destDir)
+                return try handler(paths, destDir)
             }
             return try scanLocalBatch(sources: paths, destDir: destDir)
-        }) ?? []
+        }
     }
 
-    private func scanRemoteItems(paths: [String], destDir: String) async -> [BatchItemRecord] {
+    private func scanRemoteItems(paths: [String], destDir: String) async throws -> [BatchItemRecord] {
         let handler = scanRemoteHandler
         let hostID = host.id
-        // 远端递归扫描含 SSH/SFTP 网络往返，放后台执行（测试 handler 亦同）。
         if let handler {
-            return (try? await FFIBackground.run {
-                handler(paths, destDir)
-            }) ?? []
+            return try await FFIBackground.run {
+                try handler(paths, destDir)
+            }
         }
         guard let secrets = connectionSecrets else { return [] }
-        return (try? await FFIBackground.run {
+        return try await FFIBackground.run {
             try scanRemoteBatch(
                 hostId: hostID,
                 sources: paths,
@@ -1427,7 +1437,7 @@ final class SftpSessionStore: ObservableObject {
                 password: secrets.password,
                 passphrase: secrets.passphrase
             )
-        }) ?? []
+        }
     }
 
 
@@ -1516,26 +1526,6 @@ final class SftpSessionStore: ObservableObject {
         }
         _ = await remotePane.reload()
         return (deleted, failed)
-    }
-
-    private func checkUploadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {
-        // 网络往返（开 SFTP channel + stat）在后台执行。
-        let sessionHandle = sftpHandle
-        let record = try await FFIBackground.run {
-            guard let sessionHandle else { throw PandaError.UnknownSftpHandle(0) }
-            return try PandaCoreBridge.shared.checkUploadConflict(
-                handle: sessionHandle, localPath: source, remotePath: destination
-            )
-        }
-        return record.map {
-            PendingConflict(
-                name: name,
-                sourceSize: $0.sourceSize,
-                sourceDate: $0.sourceMtime.map { Date(timeIntervalSince1970: Double($0)) },
-                targetSize: $0.targetSize,
-                targetDate: $0.targetMtime.map { Date(timeIntervalSince1970: Double($0)) }
-            )
-        }
     }
 
     private func checkDownloadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {

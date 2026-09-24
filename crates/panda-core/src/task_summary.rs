@@ -22,11 +22,12 @@ pub enum WorkStatus {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 impl WorkStatus {
     pub fn is_unfinished(self) -> bool {
-        !matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        !matches!(self, Self::Completed | Self::Failed | Self::Cancelled | Self::Skipped)
     }
 }
 

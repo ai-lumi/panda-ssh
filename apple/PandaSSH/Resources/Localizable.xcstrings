@@ -1,273 +1,642 @@
 {
-  "sourceLanguage" : "zh-Hans",
-  "strings" : {
-    "›" : {
-
-    },
-    "\"%@\" 已存在" : {
-
-    },
-    "“%@” 已存在，等待覆盖确认" : {
-
-    },
-    "(" : {
-
-    },
-    ")" : {
-
-    },
-    "「%@」出示的主机密钥与本地记录**不一致**。\n服务器可能被重装，也可能正在遭遇**中间人攻击**。为安全起见已中断连接。" : {
-
-    },
-    "%@" : {
-
-    },
-    "%@ / %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ / %2$@"
+  "sourceLanguage": "zh-Hans",
+  "strings": {
+    "›": {},
+    "\"%@\" 已存在": {},
+    "“%@” 已存在，等待覆盖确认": {},
+    "(": {},
+    ")": {},
+    "「%@」出示的主机密钥与本地记录**不一致**。\n服务器可能被重装，也可能正在遭遇**中间人攻击**。为安全起见已中断连接。": {},
+    "%@": {},
+    "%@ / %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@ / %2$@"
           }
         }
       }
     },
-    "%@ #%@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ #%2$@"
+    "%@ #%@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@ #%2$@"
           }
         }
       }
     },
-    "%@ 个活动任务 · 共 %@ 项" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ 个活动任务 · 共 %2$@ 项"
+    "%@ 个活动任务 · 共 %@ 项": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@ 个活动任务 · 共 %2$@ 项"
           }
         }
       }
     },
-    "%@：%@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@：%2$@"
+    "%@：%@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@：%2$@"
           }
         }
       }
     },
-    "%@:%@\n%@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@:%2$@\n%3$@"
+    "%@:%@\n%@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$@:%2$@\n%3$@"
           }
         }
       }
     },
-    "%@%%" : {
-
-    },
-    "↓ %@  ↑ %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "↓ %1$@  ↑ %2$@"
+    "%@%%": {},
+    "↓ %@  ↑ %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "↓ %1$@  ↑ %2$@"
           }
         }
       }
     },
-    "~/.ssh/id_ed25519" : {
-
-    },
-    "app.test.echo.label" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "echo: %@"
+    "~/.ssh/id_ed25519": {},
+    "app.test.echo.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "echo: %@"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "echo: %@"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "echo: %@"
           }
         }
       }
     },
-    "IP 或域名" : {
-
-    },
-    "Session #%@ · %@ %@ · 主机 %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Session #%1$@ · %2$@ %3$@ · 主机 %4$@"
+    "IP 或域名": {},
+    "Session #%@ · %@ %@ · 主机 %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "Session #%1$@ · %2$@ %3$@ · 主机 %4$@"
           }
         }
       }
     },
-    "settings.language.title" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Language"
+    "settings.language.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Language"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "语言"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语言"
           }
         }
       }
     },
-    "SSH 会话已结束" : {
-
-    },
-    "transfer.duration.amount.label" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld%@"
+    "SSH 会话已结束": {},
+    "transfer.action.cancel.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld%@"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消"
           }
         }
       }
     },
-    "transfer.duration.hour.unit" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "h"
+    "transfer.action.clear_finished.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear Finished"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "小时"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除已完成"
           }
         }
       }
     },
-    "transfer.duration.minute.unit" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "m"
+    "transfer.action.pause.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "分钟"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂停"
           }
         }
       }
     },
-    "transfer.duration.second.unit" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "s"
+    "transfer.action.resume.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "秒"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续"
           }
         }
       }
     },
-    "transfer.duration.unknown.message" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Unknown duration"
+    "transfer.action.retry.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未知时长"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试"
           }
         }
       }
     },
-    "transfer.duration.zero.message" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "0s"
+    "transfer.batch.name.default.download.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Batch Download"
           }
         },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "0秒"
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量下载"
           }
         }
       }
     },
-    "transfer.files.count" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "variations" : {
-            "plural" : {
-              "one" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld file"
+    "transfer.batch.name.default.upload.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Batch Upload"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量上传"
+          }
+        }
+      }
+    },
+    "transfer.batch.name.multiple.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ + %2$d items"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 等 %2$d 项"
+          }
+        }
+      }
+    },
+    "transfer.duration.amount.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld%@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld%@"
+          }
+        }
+      }
+    },
+    "transfer.duration.hour.unit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "h"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小时"
+          }
+        }
+      }
+    },
+    "transfer.duration.minute.unit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "m"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分钟"
+          }
+        }
+      }
+    },
+    "transfer.duration.second.unit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "s"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "秒"
+          }
+        }
+      }
+    },
+    "transfer.duration.unknown.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown duration"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未知时长"
+          }
+        }
+      }
+    },
+    "transfer.duration.zero.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "0s"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "0秒"
+          }
+        }
+      }
+    },
+    "transfer.endpoint.local.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地"
+          }
+        }
+      }
+    },
+    "transfer.endpoint.unknown_host.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown Host"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未知主机"
+          }
+        }
+      }
+    },
+    "transfer.group.skipped.count": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%d skipped"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳过 %d 项"
+          }
+        }
+      }
+    },
+    "transfer.panel.active_count.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ active · %2$@ total"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 个活动任务 · 共 %2$@ 项"
+          }
+        }
+      }
+    },
+    "transfer.panel.empty.description": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select files then tap Upload → or ← Download"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选中文件后点击「上传 →」或「← 下载」"
+          }
+        }
+      }
+    },
+    "transfer.panel.empty.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Transfer Tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无传输任务"
+          }
+        }
+      }
+    },
+    "transfer.panel.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transfers"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "传输任务"
+          }
+        }
+      }
+    },
+    "transfer.row.conflict_wait.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\"%@\" already exists, awaiting overwrite confirmation"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\"%@\" 已存在，等待覆盖确认"
+          }
+        }
+      }
+    },
+    "transfer.row.destination.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Destination"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目标"
+          }
+        }
+      }
+    },
+    "transfer.row.path_collapse.action": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapse Full Path"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起完整路径"
+          }
+        }
+      }
+    },
+    "transfer.row.path_expand.action": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View Full Path"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看完整路径"
+          }
+        }
+      }
+    },
+    "transfer.row.remaining.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ remaining"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "剩余 %@"
+          }
+        }
+      }
+    },
+    "transfer.row.source.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源"
+          }
+        }
+      }
+    },
+    "transfer.row.speed.average.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avg %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "均速 %@"
+          }
+        }
+      }
+    },
+    "transfer.row.speed.current.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speed %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "速度 %@"
+          }
+        }
+      }
+    },
+    "transfer.files.count": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld file"
                 }
               },
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld files"
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld files"
                 }
               }
             }
           }
         },
-        "zh-Hans" : {
-          "variations" : {
-            "plural" : {
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "共 %lld 个文件"
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "共 %lld 个文件"
                 }
               }
             }
@@ -275,174 +644,235 @@
         }
       }
     },
-    "主机 **%@** 使用密钥认证，但本机尚未选择私钥文件。请选择本机可用的私钥。" : {
-
-    },
-    "仅用于当前标签页，关闭标签后即销毁。" : {
-
-    },
-    "代码片段" : {
-
-    },
-    "传输任务" : {
-
-    },
-    "关闭后将断开与「%@」的 SSH 连接。" : {
-
-    },
-    "再按一次退出" : {
-
-    },
-    "凭据写入本地文件失败，主机未保存。请重试。" : {
-
-    },
-    "凭据已加密保护。请输入保护密码解锁。" : {
-
-    },
-    "剩余 %@" : {
-
-    },
-    "可选" : {
-
-    },
-    "启用后，所有已保存的 SSH 密码和私钥口令将被加密保护。" : {
-
-    },
-    "均速 %@" : {
-
-    },
-    "处理中…" : {
-
-    },
-    "如 web-prod" : {
-
-    },
-    "密码" : {
-
-    },
-    "密钥" : {
-
-    },
-    "对应的主机可能已被删除,请关闭该标签页" : {
-
-    },
-    "将关闭并断开 %@ 个已连接终端会话。" : {
-
-    },
-    "已选 %@ 项" : {
-
-    },
-    "已选：" : {
-
-    },
-    "建立终端或 SFTP 会话后，可在这里查看 Socket、SSH、通道和流量状态。" : {
-
-    },
-    "所有已保存的 SSH 密码和私钥口令已受保护。" : {
-
-    },
-    "无匹配主机" : {
-
-    },
-    "暂无已打开页签" : {
-
-    },
-    "服务器密钥已变更！" : {
-
-    },
-    "未知主机密钥" : {
-
-    },
-    "未设置保护密钥时，已保存的密码与私钥口令会以明文存储在本机配置目录。" : {
-
-    },
-    "本地" : {
-
-    },
-    "根级（无分组）" : {
-
-    },
-    "正在连接 %@:%@ …" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "正在连接 %1$@:%2$@ …"
+    "transfer.status.cancelled.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelled"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消"
           }
         }
       }
     },
-    "流量为应用层实际读写的加密 SSH 字节与通道逻辑数据，不含 TCP/IP 头和重传。空闲表示近期无数据，不是异常。" : {
-
-    },
-    "清除后下次连接需要重新输入，且不会自动填充。" : {
-
-    },
-    "确定删除「%@」吗？此操作不可撤销。" : {
-
-    },
-    "确定删除分组「%@」吗？组内主机将移回根级，子分组将一并删除。" : {
-
-    },
-    "确定删除片段「%@」吗？" : {
-
-    },
-    "确定要删除 %@ 项吗？此操作不可撤销。" : {
-
-    },
-    "确定要删除「%@」吗？此操作不可撤销。" : {
-
-    },
-    "移除后已保存的密码与私钥口令将以明文存储在本机配置目录。请确认输入当前保护密钥。" : {
-
-    },
-    "空目录" : {
-
-    },
-    "运行时日志将在此显示" : {
-
-    },
-    "远程" : {
-
-    },
-    "远端 shell 已正常退出。" : {
-
-    },
-    "连接时将要求手动输入" : {
-
-    },
-    "连接至 %@@%@:%@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "连接至 %1$@@%2$@:%3$@"
+    "transfer.status.done.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已完成"
           }
         }
       }
     },
-    "选中文件后点击「上传 →」或「← 下载」" : {
-
+    "transfer.status.failed.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "失败"
+          }
+        }
+      }
     },
-    "逗号分隔，如：运维, 日志" : {
-
+    "transfer.status.paused.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
+        }
+      }
     },
-    "速度 %@" : {
-
+    "transfer.status.queued.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Queued"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "排队"
+          }
+        }
+      }
     },
-    "需要私钥" : {
-
+    "transfer.status.running.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transferring"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "传输中"
+          }
+        }
+      }
     },
-    "首次连接 **%@**（%@:%@）。\n请核对服务器出示的主机密钥指纹，确认无误后再信任。信任后指纹将被记录，之后连接不再询问。" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "首次连接 **%1$@**（%2$@:%3$@）。\n请核对服务器出示的主机密钥指纹，确认无误后再信任。信任后指纹将被记录，之后连接不再询问。"
+    "transfer.status.skipped.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skipped"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已跳过"
+          }
+        }
+      }
+    },
+    "主机 **%@** 使用密钥认证，但本机尚未选择私钥文件。请选择本机可用的私钥。": {},
+    "仅用于当前标签页，关闭标签后即销毁。": {},
+    "代码片段": {},
+    "传输任务": {},
+    "关闭后将断开与「%@」的 SSH 连接。": {},
+    "再按一次退出": {},
+    "凭据写入本地文件失败，主机未保存。请重试。": {},
+    "凭据已加密保护。请输入保护密码解锁。": {},
+    "剩余 %@": {},
+    "可选": {},
+    "启用后，所有已保存的 SSH 密码和私钥口令将被加密保护。": {},
+    "均速 %@": {},
+    "处理中…": {},
+    "如 web-prod": {},
+    "密码": {},
+    "密钥": {},
+    "对应的主机可能已被删除,请关闭该标签页": {},
+    "将关闭并断开 %@ 个已连接终端会话。": {},
+    "已选 %@ 项": {},
+    "已选：": {},
+    "建立终端或 SFTP 会话后，可在这里查看 Socket、SSH、通道和流量状态。": {},
+    "所有已保存的 SSH 密码和私钥口令已受保护。": {},
+    "无匹配主机": {},
+    "暂无已打开页签": {},
+    "服务器密钥已变更！": {},
+    "未知主机密钥": {},
+    "未设置保护密钥时，已保存的密码与私钥口令会以明文存储在本机配置目录。": {},
+    "本地": {},
+    "根级（无分组）": {},
+    "正在连接 %@:%@ …": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "正在连接 %1$@:%2$@ …"
+          }
+        }
+      }
+    },
+    "流量为应用层实际读写的加密 SSH 字节与通道逻辑数据，不含 TCP/IP 头和重传。空闲表示近期无数据，不是异常。": {},
+    "清除后下次连接需要重新输入，且不会自动填充。": {},
+    "确定删除「%@」吗？此操作不可撤销。": {},
+    "确定删除分组「%@」吗？组内主机将移回根级，子分组将一并删除。": {},
+    "确定删除片段「%@」吗？": {},
+    "确定要删除 %@ 项吗？此操作不可撤销。": {},
+    "确定要删除「%@」吗？此操作不可撤销。": {},
+    "移除后已保存的密码与私钥口令将以明文存储在本机配置目录。请确认输入当前保护密钥。": {},
+    "空目录": {},
+    "运行时日志将在此显示": {},
+    "远程": {},
+    "远端 shell 已正常退出。": {},
+    "连接时将要求手动输入": {},
+    "连接至 %@@%@:%@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "连接至 %1$@@%2$@:%3$@"
+          }
+        }
+      }
+    },
+    "选中文件后点击「上传 →」或「← 下载」": {},
+    "逗号分隔，如：运维, 日志": {},
+    "速度 %@": {},
+    "需要私钥": {},
+    "首次连接 **%@**（%@:%@）。\n请核对服务器出示的主机密钥指纹，确认无误后再信任。信任后指纹将被记录，之后连接不再询问。": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "new",
+            "value": "首次连接 **%1$@**（%2$@:%3$@）。\n请核对服务器出示的主机密钥指纹，确认无误后再信任。信任后指纹将被记录，之后连接不再询问。"
+          }
+        }
+      }
+    },
+    "transfer.row.endpoint.title_format": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@：%@"
+          }
+        }
+      }
+    },
+    "transfer.row.endpoint.path_accessibility": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ path: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@路径：%@"
           }
         }
       }
     }
   },
-  "version" : "1.0"
+  "version": "1.0"
 }

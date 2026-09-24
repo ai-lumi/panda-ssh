@@ -33,6 +33,7 @@ pub enum DeleteStatusEnum {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -76,6 +77,7 @@ fn to_snapshot_record(
             WorkStatus::Completed => DeleteStatusEnum::Completed,
             WorkStatus::Failed => DeleteStatusEnum::Failed,
             WorkStatus::Cancelled => DeleteStatusEnum::Cancelled,
+            WorkStatus::Skipped => DeleteStatusEnum::Skipped,
         },
         source: snap.snapshot.source,
         processed: snap.snapshot.processed,
@@ -300,6 +302,54 @@ mod tests {
         setup();
         let result = start_local_delete(vec![]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn to_snapshot_record_maps_all_statuses_and_kinds() {
+        use panda_core::delete_service::DeleteServiceSnapshot;
+        use panda_core::task_summary::{WorkKind, WorkSnapshot, WorkStatus};
+
+        let all_statuses = [
+            (WorkStatus::Preparing, DeleteStatusEnum::Preparing),
+            (WorkStatus::Scanning, DeleteStatusEnum::Scanning),
+            (WorkStatus::Queued, DeleteStatusEnum::Queued),
+            (WorkStatus::Running, DeleteStatusEnum::Running),
+            (WorkStatus::Paused, DeleteStatusEnum::Paused),
+            (
+                WorkStatus::WaitingForDecision,
+                DeleteStatusEnum::WaitingForDecision,
+            ),
+            (WorkStatus::Cancelling, DeleteStatusEnum::Cancelling),
+            (WorkStatus::Completed, DeleteStatusEnum::Completed),
+            (WorkStatus::Failed, DeleteStatusEnum::Failed),
+            (WorkStatus::Cancelled, DeleteStatusEnum::Cancelled),
+            (WorkStatus::Skipped, DeleteStatusEnum::Skipped),
+        ];
+
+        for (ws, expected) in all_statuses {
+            let snap = WorkSnapshot::new("t1".into(), WorkKind::LocalDelete, ws, "/a".into());
+            let dss = DeleteServiceSnapshot {
+                task_id: "t1".into(),
+                snapshot: snap,
+            };
+            let rec = to_snapshot_record(dss);
+            assert_eq!(rec.status, expected, "status mismatch for {ws:?}");
+            assert_eq!(rec.kind, DeleteKindEnum::Local);
+        }
+
+        let snap = WorkSnapshot::new(
+            "t2".into(),
+            WorkKind::RemoteDelete,
+            WorkStatus::Running,
+            "/b".into(),
+        );
+        let dss = DeleteServiceSnapshot {
+            task_id: "t2".into(),
+            snapshot: snap,
+        };
+        let rec = to_snapshot_record(dss);
+        assert_eq!(rec.kind, DeleteKindEnum::Remote);
+        assert_eq!(rec.status, DeleteStatusEnum::Running);
     }
 
     #[test]

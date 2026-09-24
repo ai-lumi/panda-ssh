@@ -459,66 +459,47 @@ final class FilePaneNavigatorTests: XCTestCase {
     }
 
     /// 通用编排 handler:模拟核心 `orchestrate_sftp_transfers` 的聚合+入队行为。
-    /// - 上传时:目录 → 批量传输;独立文件 → 单文件传输
-    /// - 下载时:目录内文件 → 共享 groupID 的独立传输;独立文件 → 单文件传输
+    /// 两个方向统一产出逐文件传输任务;目录组内文件共享 groupID。
     private func injectOrchestrationHandler(session: SftpSessionStore, transfers: TransferStore) {
         session.orchestrationHandler = { selectedPaths, items, direction, hostID, destDir, password, passphrase in
             var transferIds: [String] = []
-            var batchIds: [String] = []
 
             let dirItems = items.filter { $0.isDir }
             let fileItems = items.filter { !$0.isDir }
             let dirSources = Set(dirItems.map(\.source))
-            let filesUnderDir = Set(fileItems.filter { file in
-                dirSources.contains(where: { file.source.hasPrefix($0 + "/") })
-            }.map(\.source))
-            let standaloneFiles = fileItems.filter { !filesUnderDir.contains($0.source) }
+            let ffiDirection: TransferDirection = direction == .upload ? .upload : .download
 
-            if direction == .upload {
-                for dirItem in dirItems {
-                    let batchId = transfers.addBatchUpload(
-                        sources: [dirItem.source],
-                        destDir: destDir,
-                        hostID: hostID,
-                        password: password,
-                        passphrase: passphrase
-                    )
-                    batchIds.append(batchId.uuidString)
-                }
-                for file in standaloneFiles {
+            for dirItem in dirItems {
+                let children = fileItems.filter { $0.source.hasPrefix(dirItem.source + "/") }
+                guard !children.isEmpty else { continue }
+                let groupID = UUID()
+                let groupName = dirItem.name
+                for child in children {
                     let id = transfers.add(
-                        direction: .upload, name: file.name, size: file.size,
-                        source: file.source, destination: file.destination,
-                        hostID: hostID, password: password, passphrase: passphrase
-                    )
-                    transferIds.append(id.uuidString)
-                }
-            } else {
-                for dirItem in dirItems {
-                    let children = fileItems.filter { $0.source.hasPrefix(dirItem.source + "/") }
-                    let groupID = UUID()
-                    let groupName = dirItem.name
-                    for child in children {
-                        let id = transfers.add(
-                            direction: .download, name: child.name, size: child.size,
-                            source: child.source, destination: child.destination,
-                            hostID: hostID, groupID: groupID, groupName: groupName,
-                            password: password, passphrase: passphrase
-                        )
-                        transferIds.append(id.uuidString)
-                    }
-                }
-                for file in standaloneFiles {
-                    let id = transfers.add(
-                        direction: .download, name: file.name, size: file.size,
-                        source: file.source, destination: file.destination,
-                        hostID: hostID, password: password, passphrase: passphrase
+                        direction: ffiDirection, name: child.name, size: child.size,
+                        source: child.source, destination: child.destination,
+                        hostID: hostID, groupID: groupID, groupName: groupName,
+                        password: password, passphrase: passphrase
                     )
                     transferIds.append(id.uuidString)
                 }
             }
 
-            return OrchestrationResultRecord(transferIds: transferIds, batchIds: batchIds)
+            let filesUnderDir = Set(fileItems.filter { file in
+                dirSources.contains(where: { file.source.hasPrefix($0 + "/") })
+            }.map(\.source))
+            let standaloneFiles = fileItems.filter { !filesUnderDir.contains($0.source) }
+
+            for file in standaloneFiles {
+                let id = transfers.add(
+                    direction: ffiDirection, name: file.name, size: file.size,
+                    source: file.source, destination: file.destination,
+                    hostID: hostID, password: password, passphrase: passphrase
+                )
+                transferIds.append(id.uuidString)
+            }
+
+            return OrchestrationResultRecord(transferIds: transferIds, batchIds: [])
         }
     }
 
@@ -710,11 +691,13 @@ final class FilePaneNavigatorTests: XCTestCase {
         session.selectLocal("Documents")
         _ = await session.uploadSelected()
 
-        // 目录上传走批量传输路径。
-        let batchRecords = transfers.listBatchTransfers()
-        XCTAssertEqual(batchRecords.count, 1)
-        XCTAssertEqual(batchRecords.first?.direction, .upload)
-        XCTAssertTrue(batchRecords.first?.sources.first?.contains("Documents") ?? false)
+        // 目录上传产出带 groupID 的逐文件传输任务。
+        let uploadGroup = transfers.taskGroups.first { $0.name == "Documents" }
+        XCTAssertNotNil(uploadGroup)
+        XCTAssertEqual(uploadGroup?.tasks.count, 1)
+        XCTAssertEqual(uploadGroup?.tasks.first?.direction, .upload)
+        XCTAssertTrue(uploadGroup?.tasks.first?.source.contains("Documents") ?? false)
+        XCTAssertTrue(transfers.listBatchTransfers().isEmpty, "不应产生批量记录")
 
         _ = await session.remotePane.reload()
         session.selectRemote("logs")
@@ -752,13 +735,13 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         let tasks = await session.upload(localPaths: [localDirectory])
 
-        // 目录走批量传输路径,不生成独立 TransferTask。
-        XCTAssertTrue(tasks.isEmpty, "目录上传应走批量路径,不返回独立任务")
-        let batchRecords = transfers.listBatchTransfers()
-        XCTAssertEqual(batchRecords.count, 1)
-        XCTAssertEqual(batchRecords.first?.sources, [localDirectory])
-        XCTAssertEqual(batchRecords.first?.destDir, remoteDirectory)
-        XCTAssertEqual(batchRecords.first?.direction, .upload)
+        // 目录上传产出带 groupID 的逐文件传输任务。
+        XCTAssertEqual(tasks.count, 1, "目录上传返回逐文件任务")
+        let uploadGroup = transfers.taskGroups.first { $0.name == "报销-20260706" }
+        XCTAssertNotNil(uploadGroup)
+        XCTAssertEqual(uploadGroup?.tasks.count, 1)
+        XCTAssertEqual(uploadGroup?.tasks.first?.direction, .upload)
+        XCTAssertTrue(transfers.listBatchTransfers().isEmpty, "不应产生批量记录")
     }
 
     func testDirectoryUploadWithEmptyScanDoesNotCreateTransferTasks() async {
@@ -797,12 +780,13 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         let tasks = await session.upload(localPaths: [localDirectory])
 
-        // 目录走批量传输路径。
-        XCTAssertTrue(tasks.isEmpty)
-        let batchRecords = transfers.listBatchTransfers()
-        XCTAssertEqual(batchRecords.count, 1)
-        XCTAssertEqual(batchRecords.first?.destDir, "/")
-        XCTAssertFalse(batchRecords.first?.destDir.contains("//") ?? true)
+        // 目录上传产出带 groupID 的逐文件传输任务。
+        XCTAssertEqual(tasks.count, 1, "目录上传返回逐文件任务")
+        let uploadGroup = transfers.taskGroups.first { $0.name == "project" }
+        XCTAssertNotNil(uploadGroup)
+        XCTAssertEqual(uploadGroup?.tasks.count, 1)
+        XCTAssertTrue(transfers.listBatchTransfers().isEmpty, "不应产生批量记录")
+        XCTAssertFalse(uploadGroup?.tasks.first?.destination.contains("//") ?? true)
     }
 
     func testUploadWithoutSelectionReturnsNil() async {
@@ -861,12 +845,13 @@ final class FilePaneNavigatorTests: XCTestCase {
 
         _ = await session.uploadSelected()
 
-        // 目录走批量传输路径,文件走独立任务。
-        let batchRecords = transfers.listBatchTransfers()
-        XCTAssertEqual(batchRecords.count, 1, "目录应产生一个批量传输任务")
-        XCTAssertTrue(batchRecords.first?.sources.contains(where: { $0.contains("Documents") }) ?? false)
+        // 目录产出带 groupID 的逐文件传输任务,文件走独立任务。
+        let uploadGroup = transfers.taskGroups.first { $0.name == "Documents" }
+        XCTAssertNotNil(uploadGroup, "目录应产生一个任务组")
+        XCTAssertTrue(uploadGroup?.tasks.allSatisfy { $0.source.contains("Documents") } ?? false)
+        XCTAssertTrue(transfers.listBatchTransfers().isEmpty, "不应产生批量记录")
         // 文件仍走独立任务。
-        let independentTasks = transfers.tasks.filter { !$0.isBatch && $0.groupID == nil }
+        let independentTasks = transfers.tasks.filter { $0.groupID == nil }
         XCTAssertEqual(independentTasks.count, 1)
         XCTAssertEqual(independentTasks.first?.name, "deploy.tar.gz")
     }

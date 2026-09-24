@@ -207,3 +207,59 @@ fn standalone_operations_reject_unknown_hosts_before_starting_a_connection() {
         Err(PandaError::UnknownHost(ref id)) if id == "ffi-sessions-unknown-host"
     ));
 }
+
+#[test]
+fn session_cancel_with_initialized_store_does_not_panic() {
+    let _g = global_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    crate::ffi_store::init_store(dir.path().to_string_lossy().into_owned()).unwrap();
+    session_cancel("nonexistent-session".into());
+}
+
+#[test]
+fn tracked_open_functions_reject_unknown_hosts() {
+    let _g = global_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    crate::ffi_store::init_store(dir.path().to_string_lossy().into_owned()).unwrap();
+    let unknown = "ffi-tracked-unknown-host".to_string();
+    let password = Some("unused".to_string());
+    let passphrase = Some("unused".to_string());
+
+    assert!(matches!(
+        sftp_session_open_tracked(
+            unknown.clone(),
+            password.clone(),
+            passphrase.clone(),
+            false,
+            "sid".into(),
+            0,
+        ),
+        Err(PandaError::UnknownHost(ref id)) if id == &unknown
+    ));
+    assert!(matches!(
+        shell_open_tracked(
+            unknown.clone(),
+            password.clone(),
+            passphrase.clone(),
+            false,
+            "sid".into(),
+            0,
+        ),
+        Err(PandaError::UnknownHost(ref id)) if id == &unknown
+    ));
+}
+
+#[test]
+fn session_is_stale_and_has_active_without_init_store() {
+    let _g = global_test_lock();
+    crate::ffi_store::reset_store_for_test();
+    assert!(session_is_stale("any".into(), 0));
+    assert!(!session_has_active("any".into(), 0));
+}
+
+#[test]
+fn session_cancel_without_init_store_does_not_panic() {
+    let _g = global_test_lock();
+    crate::ffi_store::reset_store_for_test();
+    session_cancel("any-session".into());
+}

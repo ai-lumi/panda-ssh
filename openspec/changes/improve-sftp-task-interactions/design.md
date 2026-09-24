@@ -6,7 +6,7 @@
 
 | 当前链路 | 已确认事实 | 本次处理 |
 | --- | --- | --- |
-| core `task_aggregation` → FFI `aggregate_task_groups_ffi` → `SftpSessionStore.aggregateItems` | 创建前分组已实际接入；目录上传转批量，下载按组建任务 | 复用，不回退到旧 `enqueueGroup` |
+| core `task_aggregation` → FFI `aggregate_task_groups_ffi` → `SftpSessionStore.aggregateItems` | 创建前分组已实际接入；目录上传历史上转批量 | 服从 `unify-upload-file-task-queue` 的逐文件任务与组模型，不回退到旧 `enqueueGroup` 或目录整体上传批量路由 |
 | `TransferStore.taskGroups` / `TransferGroup` | 仍按 groupID 组织视图并计算进度状态；core 有对应算法，旧 FFI `transfer_groups` 仍有独立实现 | 新增摘要复用 core 规则；逐步接入受影响汇总，不新增第三套规则 |
 | `TransferStore.tick` → `transferChangeCounter` | 全局计数不变即跳过列表；单文件进度只改自身 version，批量模块未通知全局计数 | 先写失败测试确认，再修通完整通知链 |
 | `SftpSessionStore.upload/download` | 扫描发生在正式任务入队之前 | 扫描前登记准备操作，交接时保证无漏计窗口 |
@@ -32,11 +32,11 @@
 
 新增最小的类型化任务摘要：任务标识、操作标识、可选组标识、类型（上传/下载/本地删除/远端删除）、阶段、状态、端点、进度单位（字节/条目/未知）、已处理数、总数可选值、失败数和支持的操作。传输专有速度与目标路径按需附带；本地删除不要求 hostID，不能为满足旧模型填假值。
 
-core 提供删除状态、汇总和未完成判定；FFI 将当前单文件、批量记录转换后交给 core 汇总，同时管理既有 runtime 适配。保持旧传输入口兼容，不要求先把历史执行器整体搬迁。Swift 的 TaskStore/任务源只做调用、映射和展示，保留原 TransferStore 的兼容层以缩小改动面。
+core 提供删除状态、汇总和未完成判定；FFI 将单文件、目录组及准备操作记录转换后交给 core 汇总，同时管理既有 runtime 适配。目录上传执行粒度服从 `unify-upload-file-task-queue`，不得为兼容历史批量上传结果恢复整体执行器。Swift 的 TaskStore/任务源只做调用、映射和展示，保留原 TransferStore 的兼容层以缩小改动面。
 
 所有会改变快照的事件都递增同一任务修订号，包括进度、错误、等待冲突、准备登记与交接、取消和清理。在源协议中暴露修订读取，测试源不依赖全局 FFI。读取时先记修订号，再读取列表；若读取期间有新事件，下一拍继续刷新，不在读取列表后记录一个未包含在快照内的新修订号。应用停机协调器直接通过后端任务登记与取消入口工作，不依赖 UI 缓存或定时器；通知可合并到现有刷新节奏，终态及时可见；无未完成任务时停止轮询。
 
-准备阶段登记 operation ID，再执行扫描；失败/取消用统一清理路径收尾。转入正式任务时保留 operation ID，摘要按该 ID 去重，不能先删除准备记录再创建任务形成空档。既有目录批量任务只计一次，不再同时把它的展示组计入任务数。尚未实现的其他批量业务可后续接入此登记接口，本次不实现那些业务。
+准备阶段登记 operation ID，再执行扫描；失败/取消用统一清理路径收尾。转入正式文件任务和目录组时保留 operation ID，摘要按该 ID 去重，不能先删除准备记录再创建任务形成空档。目录组及其成员只计一次，不把组头或准备操作重复计入文件任务数。尚未实现的其他批量业务可后续接入此登记接口，本次不实现那些业务。
 
 ### 删除执行与退出细节
 
@@ -54,7 +54,7 @@ core 提供删除状态、汇总和未完成判定；FFI 将当前单文件、�
 | panda-ffi、PandaCoreBridge、生成绑定 | 修改 | 同步契约、快照、错误、双端构建 |
 | TransferStore、源协议与 mock | 修改 | 混合类型、聚合角标、按需轮询、终态 |
 | 单文件/批量修订通知、准备登记及 core 摘要 | 修改 | 仅进度变化、等待冲突、快照竞争、交接不漏计 |
-| core task_aggregation、既有聚合 FFI、SFTP 调用链 | 复用/必要适配 | 保留目录上传批量路由，删除不冒充上传 |
+| core task_aggregation、既有聚合 FFI、SFTP 调用链 | 复用/必要适配 | 接入 `unify-upload-file-task-queue` 的逐文件目录上传、目录组与准备操作；删除不冒充上传 |
 | SftpSessionStore、SftpTabView | 修改 | 目标快照、选区、后台后关闭标签、刷新 |
 | TransferPanelView、SidebarView、工作区标题 | 修改 | 类型专属展示、名称检索、空列表 |
 | 上传下载、组操作、速度与窗口观察关系 | 保留/回归 | 现有测试和进行中传输检查 |

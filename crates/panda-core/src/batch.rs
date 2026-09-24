@@ -131,6 +131,7 @@ pub async fn scan_local_sources(
     let mut items = Vec::new();
     let mut total_size = 0u64;
     let mut visited: HashSet<LocalInode> = HashSet::new();
+    let mut visited_sources = HashSet::new();
 
     #[derive(Debug)]
     struct Frame {
@@ -151,7 +152,12 @@ pub async fn scan_local_sources(
         })
         .collect();
 
+    // 栈按父路径优先展开，重复/重叠的显式选择复用第一次遍历的目标映射。
+    stack.sort_by(|a, b| b.source.cmp(&a.source));
     while let Some(frame) = stack.pop() {
+        if !visited_sources.insert(frame.source.clone()) {
+            continue;
+        }
         if frame.depth > options.max_depth {
             return Err(Error::Other(format!(
                 "max scan depth exceeded at {}",
@@ -159,7 +165,9 @@ pub async fn scan_local_sources(
             )));
         }
 
-        let link_meta = tokio::fs::symlink_metadata(&frame.source).await?;
+        let link_meta = tokio::fs::symlink_metadata(&frame.source)
+            .await
+            .map_err(|error| scan_error(&frame.source.to_string_lossy(), error))?;
         let is_symlink = link_meta.is_symlink();
 
         // 决定实际类型与大小。若跟随符号链接，使用目标元数据并做循环检测。
@@ -175,7 +183,11 @@ pub async fn scan_local_sources(
                         (false, target_meta.len(), false)
                     }
                 }
-                Err(_) => (false, link_meta.len(), false),
+                // 保留既有断链语义；权限等其他错误必须显式失败。
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    (false, link_meta.len(), false)
+                }
+                Err(error) => return Err(scan_error(&frame.source.to_string_lossy(), error)),
             }
         } else if link_meta.is_dir() {
             let inode = local_inode(&link_meta);
@@ -198,8 +210,14 @@ pub async fn scan_local_sources(
                 continue;
             }
 
-            let mut entries = tokio::fs::read_dir(&frame.source).await?;
-            while let Some(entry) = entries.next_entry().await? {
+            let mut entries = tokio::fs::read_dir(&frame.source)
+                .await
+                .map_err(|error| scan_error(&frame.source.to_string_lossy(), error))?;
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|error| scan_error(&frame.source.to_string_lossy(), error))?
+            {
                 let child = entry.path();
                 let child_dest =
                     join_path(&frame.dest, entry.file_name().to_string_lossy().as_ref());
@@ -227,11 +245,47 @@ fn join_path(dir: &str, name: &str) -> String {
     crate::sftp_path::join_path(dir, name)
 }
 
+fn scan_error(path: &str, error: impl std::fmt::Display) -> Error {
+    Error::Other(format!("{path}: {error}"))
+}
+
+/// 只读远程扫描适配器；生产使用 SFTP，测试使用内存文件系统。
+pub trait RemoteSourceScanner: Send + Sync {
+    fn metadata<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<russh_sftp::protocol::FileAttributes>> + Send + 'a>>;
+    fn list_dir<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<crate::sftp::RemoteFile>>> + Send + 'a>>;
+    fn home_dir(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+}
+
+impl RemoteSourceScanner for SftpClient {
+    fn metadata<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<russh_sftp::protocol::FileAttributes>> + Send + 'a>>
+    {
+        Box::pin(SftpClient::metadata(self, path))
+    }
+    fn list_dir<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<crate::sftp::RemoteFile>>> + Send + 'a>> {
+        Box::pin(SftpClient::list_dir(self, path))
+    }
+    fn home_dir(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+        Box::pin(SftpClient::home_dir(self))
+    }
+}
+
 /// 扫描多个远程源路径，生成本地下载计划。
 ///
 /// 每个 source 的 basename 被放置到 `dest_dir` 下；远程目录会被递归展开。
-pub async fn scan_remote_sources(
-    client: &SftpClient,
+pub async fn scan_remote_sources<R: RemoteSourceScanner + ?Sized>(
+    client: &R,
     sources: &[String],
     dest_dir: &str,
     options: &ScanOptions,
@@ -259,7 +313,26 @@ pub async fn scan_remote_sources(
         })
         .collect();
 
+    stack.sort_by(|a, b| b.source.cmp(&a.source));
+    let mut home = None;
     while let Some(frame) = stack.pop() {
+        // 保留远程路径循环保护与深度上限；重叠选择复用父目录映射。
+        let canonical = if frame.source.starts_with('/') {
+            frame.source.clone()
+        } else {
+            if home.is_none() {
+                home = Some(
+                    client
+                        .home_dir()
+                        .await
+                        .map_err(|error| scan_error(&frame.source, error))?,
+                );
+            }
+            join_path(home.as_ref().unwrap(), &frame.source)
+        };
+        if !visited.insert(canonical) {
+            continue;
+        }
         if frame.depth > options.max_depth {
             return Err(Error::Other(format!(
                 "max scan depth exceeded at {}",
@@ -267,60 +340,41 @@ pub async fn scan_remote_sources(
             )));
         }
 
-        // 远程路径循环检测。
-        let canonical = if frame.source.starts_with('/') {
-            frame.source.clone()
+        // 先确定类型，不能把目录读取失败当作普通文件，也不能吞掉元数据错误。
+        let metadata = client
+            .metadata(&frame.source)
+            .await
+            .map_err(|error| scan_error(&frame.source, error))?;
+        if metadata.is_dir() {
+            let entries = client
+                .list_dir(&frame.source)
+                .await
+                .map_err(|error| scan_error(&frame.source, error))?;
+            items.push(BatchItem {
+                source: frame.source.clone(),
+                destination: frame.dest.clone(),
+                size: 0,
+                is_dir: true,
+            });
+            for entry in entries {
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                stack.push(Frame {
+                    source: entry.path,
+                    dest: join_path(&frame.dest, &entry.name),
+                    depth: frame.depth + 1,
+                });
+            }
         } else {
-            match client.home_dir().await {
-                Ok(home) => join_path(&home, &frame.source),
-                Err(_) => frame.source.clone(),
-            }
-        };
-        if !visited.insert(canonical) {
-            continue;
-        }
-
-        // 先尝试读取目录；若失败再当作文件取元数据。
-        match client.list_dir(&frame.source).await {
-            Ok(entries) => {
-                // 是目录。
-                items.push(BatchItem {
-                    source: frame.source.clone(),
-                    destination: frame.dest.clone(),
-                    size: 0,
-                    is_dir: true,
-                });
-
-                for entry in entries {
-                    // 跳过 . 与 ..
-                    if entry.name == "." || entry.name == ".." {
-                        continue;
-                    }
-                    let child_dest = join_path(&frame.dest, &entry.name);
-                    stack.push(Frame {
-                        source: entry.path,
-                        dest: child_dest,
-                        depth: frame.depth + 1,
-                    });
-                }
-            }
-            Err(_) => {
-                // 当作文件处理；尝试获取元数据以累加 total_size。
-                let size = client
-                    .metadata(&frame.source)
-                    .await
-                    .ok()
-                    .and_then(|m| m.size);
-                if let Some(s) = size {
-                    total_size += s;
-                }
-                items.push(BatchItem {
-                    source: frame.source,
-                    destination: frame.dest,
-                    size: size.unwrap_or(0),
-                    is_dir: false,
-                });
-            }
+            let size = metadata.size.unwrap_or(0);
+            total_size += size;
+            items.push(BatchItem {
+                source: frame.source,
+                destination: frame.dest,
+                size,
+                is_dir: false,
+            });
         }
     }
 
@@ -680,10 +734,7 @@ impl BatchConflictResolver {
 
 /// 批量传输执行器 trait：由调用方注入实际扫描与传输逻辑。
 pub trait BatchExecutor: Send + Sync + 'static {
-    fn execute(
-        &self,
-        ctx: &BatchContext,
-    ) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>>;
+    fn execute(&self, ctx: &BatchContext) -> Pin<Box<dyn Future<Output = BatchOutcome> + Send>>;
 }
 
 /// 执行器上下文：提供进度回报、取消检测与冲突决策通道，以及任务元数据。
@@ -793,7 +844,14 @@ impl BatchTransferService {
         password: Option<String>,
         passphrase: Option<String>,
     ) -> Result<String> {
-        self.start_task(BatchDirection::Upload, host_id, sources, dest_dir, password, passphrase)
+        self.start_task(
+            BatchDirection::Upload,
+            host_id,
+            sources,
+            dest_dir,
+            password,
+            passphrase,
+        )
     }
 
     pub fn start_download(
@@ -804,7 +862,14 @@ impl BatchTransferService {
         password: Option<String>,
         passphrase: Option<String>,
     ) -> Result<String> {
-        self.start_task(BatchDirection::Download, host_id, sources, dest_dir, password, passphrase)
+        self.start_task(
+            BatchDirection::Download,
+            host_id,
+            sources,
+            dest_dir,
+            password,
+            passphrase,
+        )
     }
 
     fn start_task(
@@ -847,8 +912,7 @@ impl BatchTransferService {
     }
 
     pub fn status(&self, task_id: &str) -> Result<BatchTaskSnapshot> {
-        let id = Uuid::parse_str(task_id)
-            .map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
+        let id = Uuid::parse_str(task_id).map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
         let tasks = self.inner.tasks.lock().unwrap();
         let entry = tasks
             .get(&id)
@@ -864,30 +928,22 @@ impl BatchTransferService {
     }
 
     pub fn cancel(&self, task_id: &str) -> Result<()> {
-        let id = Uuid::parse_str(task_id)
-            .map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
+        let id = Uuid::parse_str(task_id).map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
         let tasks = self.inner.tasks.lock().unwrap();
         let entry = tasks
             .get(&id)
             .ok_or_else(|| Error::Other(format!("未知任务: {task_id}")))?;
         entry.cancel.store(true, Ordering::Relaxed);
         if entry.resolver.is_waiting() {
-            entry
-                .resolver
-                .send_decision(ConflictResolution::Skip);
+            entry.resolver.send_decision(ConflictResolution::Skip);
             entry.resolver.clear_pending();
         }
         self.inner.notify_changed();
         Ok(())
     }
 
-    pub fn resolve_conflict(
-        &self,
-        task_id: &str,
-        overwrite: bool,
-    ) -> Result<()> {
-        let id = Uuid::parse_str(task_id)
-            .map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
+    pub fn resolve_conflict(&self, task_id: &str, overwrite: bool) -> Result<()> {
+        let id = Uuid::parse_str(task_id).map_err(|e| Error::Other(format!("无效任务 id: {e}")))?;
         let tasks = self.inner.tasks.lock().unwrap();
         let entry = tasks
             .get(&id)
@@ -1369,8 +1425,7 @@ mod batch_service_tests {
     #[tokio::test]
     async fn conflict_skip_then_completes() {
         let exec = ConflictExecutor::new();
-        let svc =
-            BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
+        let svc = BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
         let id = svc
             .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
             .unwrap();
@@ -1539,8 +1594,7 @@ mod batch_service_tests {
     #[tokio::test]
     async fn conflict_timeout_defaults_to_skip() {
         let exec = ConflictExecutor::new();
-        let svc =
-            BatchTransferService::with_params(Box::new(exec), params_with_timeout(0));
+        let svc = BatchTransferService::with_params(Box::new(exec), params_with_timeout(0));
         let id = svc
             .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
             .unwrap();
@@ -1585,9 +1639,7 @@ mod batch_service_tests {
             }
         }
 
-        let svc = BatchTransferService::new(Box::new(GatedExecutor {
-            gate: gate.clone(),
-        }));
+        let svc = BatchTransferService::new(Box::new(GatedExecutor { gate: gate.clone() }));
         let id = svc
             .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
             .unwrap();
@@ -1604,8 +1656,7 @@ mod batch_service_tests {
     #[tokio::test]
     async fn cancel_during_conflict_wait_sends_skip() {
         let exec = ConflictExecutor::new();
-        let svc =
-            BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
+        let svc = BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
         let id = svc
             .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
             .unwrap();
@@ -1631,8 +1682,7 @@ mod batch_service_tests {
     #[tokio::test]
     async fn consecutive_conflicts_resolve_independently() {
         let exec = ConflictExecutor::new();
-        let svc =
-            BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
+        let svc = BatchTransferService::with_params(Box::new(exec), params_with_timeout(300));
         let id = svc
             .start_upload("h".into(), vec!["s".into()], "/d".into(), None, None)
             .unwrap();
@@ -1735,7 +1785,13 @@ mod batch_service_tests {
     async fn snapshot_contains_all_fields() {
         let svc = BatchTransferService::new(Box::new(FakeExecutor::success()));
         let id = svc
-            .start_upload("host-abc".into(), vec!["x".into(), "y".into()], "/dest".into(), None, None)
+            .start_upload(
+                "host-abc".into(),
+                vec!["x".into(), "y".into()],
+                "/dest".into(),
+                None,
+                None,
+            )
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         let snap = svc.status(&id).unwrap();
