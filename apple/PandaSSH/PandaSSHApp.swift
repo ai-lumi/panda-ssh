@@ -76,7 +76,7 @@ struct PandaSSHApp: App {
 }
 
 enum TransferWindow {
-    static let title = "传输任务"
+    static let title = "任务"
     static let id = "panda-transfers"
 }
 

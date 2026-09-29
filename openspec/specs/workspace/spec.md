@@ -343,6 +343,20 @@ SFTP 文件行 SHALL 支持右键（macOS）或长按（iPadOS）呼出原生上
 - **WHEN** 右键 `c.txt`
 - **THEN** 选中集合先变为仅 `c.txt`，再弹出作用于 `c.txt` 的菜单
 
+#### Scenario: 单选时右键其他条目
+- **GIVEN** 已选中 a，b 未选中
+- **WHEN** 用户右键 b
+- **THEN** 菜单展示前选中集合变为仅 b，菜单作用于 b
+
+#### Scenario: 多选时右键集合外条目
+- **GIVEN** 已选中 a 和 b，c 未选中
+- **WHEN** 用户右键 c
+- **THEN** 菜单展示前取消 a 和 b 的选中，仅选中 c，菜单作用于 c
+
+#### Scenario: 取消菜单保留选区
+- **WHEN** 右键未选中条目后关闭菜单而不执行操作
+- **THEN** 新选区保持，不恢复旧选区；不执行文件操作
+
 ### Requirement: 传输完成后自动刷新
 
 上传完成后，若目标路径位于当前远程面板目录，SFTP 远程面板 SHALL 自动刷新；下载完成后，若目标路径位于当前本地面板目录，本地面板 SHALL 自动刷新。
@@ -461,25 +475,31 @@ SFTP 文件列表的每一行 SHALL 在右键（macOS）或长按（iPadOS）菜
 
 ### Requirement: SSH 终端标签页关闭二次确认
 
-用户关闭处于「已连接」状态的 SSH 终端标签页时，系统 SHALL 弹出二次确认对话框，询问是否关闭并断开会话。对话框样式 SHALL 遵循 macOS / iPadOS 原生规范（macOS 使用 `.confirmationDialog` 或系统 alert，iPadOS 使用同族原生弹窗）。用户确认后 SHALL 关闭标签页并断开会话；取消则保留标签页与会话。连接中或连接失败状态的终端标签页关闭时 SHALL 不弹出确认，直接关闭。
+用户关闭处于「已连接」状态的 SSH 终端标签页时，系统 SHALL 在 macOS 与 iPadOS 上显示系统原生警告框，明确说明关闭会断开会话。警告框 SHALL 提供「取消」与破坏性操作「关闭并断开」；用户确认后 SHALL 关闭标签页并断开会话，取消则保留标签页与会话。批量关闭包含已连接终端标签页时，系统 SHALL 使用同类原生警告框并显示受影响会话数量。连接中或连接失败状态的终端标签页关闭时 SHALL 不弹出确认，直接关闭。
 
 #### Scenario: 关闭已连接终端弹确认
 
 - **GIVEN** 一个处于已连接状态的终端标签页
 - **WHEN** 用户点击标签页关闭按钮
-- **THEN** 弹出原生确认对话框；用户确认后才关闭并断开会话
+- **THEN** 系统显示原生警告框；用户选择「关闭并断开」后才关闭标签页并断开会话
 
 #### Scenario: 取消关闭保留会话
 
-- **GIVEN** 一个处于已连接状态的终端标签页，已弹出关闭确认
+- **GIVEN** 一个处于已连接状态的终端标签页，已显示关闭确认
 - **WHEN** 用户选择「取消」
 - **THEN** 标签页保留，shell 会话不断开
+
+#### Scenario: 批量关闭已连接终端弹聚合确认
+
+- **GIVEN** 关闭其他标签页或关闭全部标签页的范围内包含已连接终端标签页
+- **WHEN** 用户发起批量关闭
+- **THEN** 系统显示原生警告框，并说明受影响的已连接终端会话数量
 
 #### Scenario: 关闭连接中标签页不弹确认
 
 - **GIVEN** 一个处于连接中状态的终端标签页
 - **WHEN** 用户点击标签页关闭按钮
-- **THEN** 不弹出确认，直接关闭该标签页
+- **THEN** 不显示确认，直接关闭该标签页
 
 ### Requirement: SFTP 标签页关闭与传输延续
 
@@ -795,7 +815,7 @@ iPad 工作区 SHALL 保留系统导航提供的侧栏恢复入口。统一页�
 - **THEN** 页签栏不为自定义恢复按钮占位，系统导航入口保持可用
 
 ### Requirement: iPad 导航与页签共用顶行
-iPad 统一工作区 SHALL 在系统导航栏中展示页签，内容区 MUST NOT 再绘制独立页签行。系统侧栏入口和状态栏安全区 SHALL 保留。此装配 MUST NOT 改变 macOS 顶部栏布局。
+iPad 统一工作区 SHALL 在系统导航栏中展示页签，内容区 MUST NOT 再绘制独立页签行。系统侧栏入口和状态栏安全区 SHALL 保留。此装配 MUST NOT 改变 macOS 顶部栏布局。iPad 设置独立全屏呈现期间，工作区导航页签与侧栏 SHALL 被设置遮盖且不可交互；工作区自身 SHALL 保持挂载、会话继续运行，关闭设置后恢复既有单行装配与当时仍有效的选择。
 
 #### Scenario: 侧栏显隐与旋转
 - **WHEN** iPad 侧栏展开、隐藏或窗口宽度变化
@@ -804,6 +824,23 @@ iPad 统一工作区 SHALL 在系统导航栏中展示页签，内容区 MUST NO
 #### Scenario: 多页签与空页签
 - **WHEN** 页签为空或超出视口宽度
 - **THEN** 显示既有空态或提供既有滚动交互，内容区不额外占用一行
+
+#### Scenario: 设置遮盖工作区导航
+
+- **WHEN** 用户在 iPad 打开设置
+- **THEN** 工作区页签和侧栏不再可见或可交互，设置显示自己的标题和关闭入口
+- **AND** 已有会话、后台传输及历史内容不因呈现而销毁
+
+#### Scenario: 关闭设置恢复工作区
+
+- **WHEN** 用户关闭 iPad 设置
+- **THEN** 返回进入前仍有效的页面和选择，工作区保持原来的单行导航页签装配
+- **AND** 不新建连接、不清空历史、不改变页签顺序
+
+#### Scenario: macOS 设置仍为独立窗口
+
+- **WHEN** 用户在 macOS 打开设置或关闭设置窗口
+- **THEN** 工作区顶部栏装配、侧栏入口和会话状态不受本次 iPad 呈现规则影响
 
 ### Requirement: 工作区原生视觉层级
 
@@ -989,3 +1026,207 @@ macOS 主窗口的窗口级 chrome 属性（标题栏样式、红绿灯按钮状
 - **GIVEN** 一个已打开的 SFTP 页签
 - **WHEN** SFTP 文件列表视图获得键盘焦点且用户按下 `Ctrl+Tab`
 - **THEN** 活动页签切换到下一个页签
+
+### Requirement: 工作区状态恢复
+
+系统 SHALL 在启动时读取持久化的工作区状态，恢复标签页结构并自动发起连接。恢复 SHALL 受 `restore_workspace_on_launch` 设置控制。状态文件不存在或损坏时 SHALL 显示空态，MUST NOT 崩溃。
+
+#### Scenario: 启动时恢复标签页
+
+- **GIVEN** 上次关闭时有两个终端标签和一个 SFTP 标签
+- **WHEN** App 启动且 `restore_workspace_on_launch` 为 `true`
+- **THEN** 恢复三个标签页结构并自动发起连接
+
+#### Scenario: 恢复设置关闭
+
+- **GIVEN** `restore_workspace_on_launch` 为 `false`
+- **WHEN** App 启动
+- **THEN** 显示空态，不恢复标签页
+
+### Requirement: 标签页生命周期由后端管理
+
+标签页的创建、关闭、列表查询 SHALL 由 Rust 后端统一管理。`workspace_tab_list()` 返回的标签页 SHALL 包含已去重的标题（同主机多标签追加序号后缀如 `"server(2)"`）和连接状态。`workspace_host_connection_status()` SHALL 按优先级（connected > connecting > failed > inactive）聚合该主机下所有标签页的连接状态。
+
+#### Scenario: 同主机多标签标题去重
+
+- **GIVEN** 3 个标签页连接到主机 "server"
+- **WHEN** 调用 `workspace_tab_list()`
+- **THEN** 标题分别为 `"server"`、`"server(2)"`、`"server(3)"`
+
+#### Scenario: 主机连接状态聚合
+
+- **GIVEN** 主机 H 有 2 个标签页，一个 connected，一个 failed
+- **WHEN** 调用 `workspace_host_connection_status(H)`
+- **THEN** 返回 `Connected`（connected 优先级最高）
+
+#### Scenario: 无标签页时状态为 Inactive
+
+- **GIVEN** 主机 H 无任何标签页
+- **WHEN** 调用 `workspace_host_connection_status(H)`
+- **THEN** 返回 `Inactive`
+
+### Requirement: 标签页关闭确认由后端管理
+
+关闭含有已连接终端的标签页 SHALL 触发后端关闭确认流程。`workspace_close_tab()` 在存在活跃连接时 SHALL 设置 `pending_close_confirmation`，前端查询后展示确认对话框。`workspace_confirm_close()` 执行关闭，`workspace_cancel_close()` 取消。批量关闭（`workspace_close_other_tabs()`、`workspace_close_all_tabs()`）SHALL 聚合需确认的终端数量。
+
+#### Scenario: 关闭已连接终端标签页
+
+- **GIVEN** 标签页有已连接的终端会话
+- **WHEN** 调用 `workspace_close_tab(tab_id)`
+- **THEN** 标签页不立即关闭，`pending_close_confirmation` 返回该标签页信息
+
+#### Scenario: 确认关闭
+
+- **WHEN** 用户确认并调用 `workspace_confirm_close()`
+- **THEN** 标签页关闭，连接释放
+
+#### Scenario: 批量关闭聚合确认
+
+- **GIVEN** 5 个标签页中 3 个有已连接终端
+- **WHEN** 调用 `workspace_close_all_tabs()`
+- **THEN** `pending_close_confirmation` 显示需确认 3 个终端
+
+### Requirement: 终端内容区右键上下文菜单
+
+终端标签页的内容区 SHALL 支持右键弹出原生上下文菜单：macOS 端通过鼠标右键触发；iPadOS 端 SHALL 同时支持触摸长按与外接鼠标右键（蓝牙 / USB 鼠标，含 Universal Control 从 Mac 转入的鼠标）触发。菜单条目 SHALL 至少包含：复制、粘贴、粘贴并回车、全选、清屏、重置终端、复制并粘贴、重连、关闭标签页。条目可用性 MUST 根据当前会话阶段与终端状态动态启用 / 禁用，禁用条目 SHALL 保留在菜单中但不可点击。两端的菜单条目集合与启用规则 SHALL 一致，差异只落在触发手势与原生菜单实现（`NSMenu` vs `UIEditMenuInteraction`）。
+
+#### Scenario: 无选中状态打开右键菜单
+
+- **GIVEN** 终端标签页处于 shell 阶段，且终端内容区当前无选中文本
+- **WHEN** 用户在终端内容区右键（macOS）、长按（iPadOS 触摸）或在 iPadOS 上外接鼠标右键点击
+- **THEN** 弹出上下文菜单，「复制」「复制并粘贴」为禁用态，「粘贴」「粘贴并回车」「全选」「清屏」「重置终端」「重连」「关闭标签页」为可用态
+
+#### Scenario: 有选中状态打开右键菜单
+
+- **GIVEN** 终端标签页处于 shell 阶段，且终端内容区存在非空选中文本
+- **WHEN** 用户在终端内容区右键
+- **THEN** 弹出上下文菜单，「复制」「复制并粘贴」为可用态
+
+#### Scenario: 连接失败阶段菜单条目禁用
+
+- **GIVEN** 终端标签页处于 failed 阶段
+- **WHEN** 用户右键终端内容区
+- **THEN** 菜单中「粘贴」「粘贴并回车」「清屏」「重置终端」「复制并粘贴」为禁用态，「重连」「关闭标签页」为可用态
+
+#### Scenario: 连接中阶段菜单条目禁用
+
+- **GIVEN** 终端标签页处于 connecting 阶段
+- **WHEN** 用户右键终端内容区
+- **THEN** 菜单中除「关闭标签页」外其它条目为禁用态
+
+#### Scenario: 执行复制
+
+- **GIVEN** 终端内容区有非空选中文本
+- **WHEN** 用户在右键菜单选择「复制」
+- **THEN** 选中文本被写入系统剪贴板，终端内容区保持选中态不变
+
+#### Scenario: 执行粘贴
+
+- **GIVEN** 系统剪贴板有文本，终端标签页处于 shell 阶段
+- **WHEN** 用户在右键菜单选择「粘贴」
+- **THEN** 系统剪贴板文本作为输入写入当前 SSH shell 通道，SHALL NOT 自动追加换行符
+
+#### Scenario: 执行粘贴并回车
+
+- **GIVEN** 系统剪贴板有文本，终端标签页处于 shell 阶段
+- **WHEN** 用户在右键菜单选择「粘贴并回车」
+- **THEN** 系统剪贴板文本写入 SSH shell 通道，随后 MUST 追加一个换行符（LF, U+000A）
+
+#### Scenario: 执行全选
+
+- **WHEN** 用户在右键菜单选择「全选」
+- **THEN** 终端可视缓冲区全部内容被选中
+
+#### Scenario: 执行清屏
+
+- **GIVEN** 终端标签页处于 shell 阶段
+- **WHEN** 用户在右键菜单选择「清屏」
+- **THEN** 系统 SHALL 通过当前 SSH shell 通道发送 `clear` 命令字节流到远端，远端 shell 负责清屏，SHALL NOT 在客户端本地清空滚动历史
+
+#### Scenario: 执行重置终端
+
+- **WHEN** 用户在右键菜单选择「重置终端」
+- **THEN** 系统在客户端清空终端滚动缓冲，并向当前 SSH shell 通道发送 RIS 控制序列（ESC c, U+001B U+0063）
+
+#### Scenario: 执行复制并粘贴
+
+- **GIVEN** 终端内容区有非空选中文本，终端标签页处于 shell 阶段
+- **WHEN** 用户在右键菜单选择「复制并粘贴」
+- **THEN** 选中文本被写入系统剪贴板，随后系统剪贴板文本被写入当前 SSH shell 通道，SHALL NOT 追加换行符
+
+#### Scenario: 执行重连
+
+- **GIVEN** 终端标签页处于 failed 阶段
+- **WHEN** 用户在右键菜单选择「重连」
+- **THEN** 系统调用既有终端会话重连流程（复用上次连接参数），会话阶段回到 connecting
+
+#### Scenario: 执行关闭标签页
+
+- **GIVEN** 终端标签页已连接（处于 shell 阶段）
+- **WHEN** 用户在右键菜单选择「关闭标签页」
+- **THEN** 系统 SHALL 触发既有「SSH 终端标签页关闭二次确认」流程，确认后才关闭
+
+#### Scenario: 右键命中链接时显示链接条目
+
+- **GIVEN** 右键点击位置命中 OSC 8 链接或 URL 文本
+- **WHEN** 用户右键终端内容区
+- **THEN** 菜单 SHALL 在常规条目之上额外显示「复制链接地址」与「打开链接」两个条目；不命中时 SHALL NOT 显示这两个条目
+
+### Requirement: 终端中键粘贴选中文本
+
+macOS 端终端标签页 SHALL 支持「中键粘贴选中文本」语义：用户左键选中文本松开后，系统在客户端内部维护一份「终端 PRIMARY selection」缓冲；用户中键点击终端内容区时，把该缓冲中文本作为输入字节流写入当前 SSH shell 通道。该缓冲 SHALL NOT 写入系统剪贴板（`NSPasteboard.general`），避免与 Cmd+C / Cmd+V 语义冲突。iPadOS 端 SHALL NOT 启用此能力——**限制根因**：SwiftTerm iOS 端不区分鼠标按键，外接鼠标（蓝牙 / USB）与 Universal Control 从 Mac 转入的鼠标的中键事件不会被 SwiftTerm iOS 路径捕获，因此 iPad 上即使外接鼠标也无法触发中键粘贴，该限制为已知边界，未来 SwiftTerm 升级或独立提案再解锁。
+
+#### Scenario: 选中后中键粘贴
+
+- **GIVEN** 终端标签页处于 shell 阶段
+- **WHEN** 用户左键拖拽选中文本并松开，随后中键点击终端内容区
+- **THEN** 系统把最近一次选中的文本写入当前 SSH shell 通道，SHALL NOT 追加换行符
+
+#### Scenario: 未选中时中键无操作
+
+- **GIVEN** 终端 PRIMARY selection 缓冲为空（从未选中文本或选中为空字符串）
+- **WHEN** 用户中键点击终端内容区
+- **THEN** 系统 SHALL NOT 向 SSH shell 通道写入任何字节，SHALL NOT 弹出菜单或对话框
+
+#### Scenario: 中键粘贴不污染系统剪贴板
+
+- **GIVEN** 用户在终端选中文本后，系统剪贴板当前内容为 X
+- **WHEN** 用户中键点击终端内容区完成粘贴
+- **THEN** 系统剪贴板内容 MUST 仍为 X，SHALL NOT 被替换为选中文本
+
+#### Scenario: 会话非 shell 阶段时中键无操作
+
+- **GIVEN** 终端标签页处于 connecting 或 failed 阶段
+- **WHEN** 用户中键点击终端内容区
+- **THEN** 系统 SHALL NOT 向任何通道写入字节
+
+#### Scenario: iPadOS 不启用中键粘贴
+
+- **GIVEN** iPadOS 平台的终端标签页（无论是否外接鼠标或 Universal Control 转入鼠标）
+- **WHEN** 用户在终端内容区中键点击或做任何手势
+- **THEN** 系统 SHALL NOT 触发中键粘贴相关行为，SHALL NOT 维护终端 PRIMARY selection 缓冲
+
+### Requirement: 终端选中即缓存 PRIMARY selection
+
+macOS 端终端内容区在用户完成文本选择（`mouseUp` 时存在非空选中文本）后，系统 SHALL 把选中文本写入客户端内部维护的「终端 PRIMARY selection」缓冲，覆盖前一次缓冲内容。该缓冲独立于系统剪贴板，SHALL NOT 在写入时触发系统剪贴板变更通知。iPadOS 端 SHALL NOT 维护此缓冲（中键粘贴能力不启用，无消费方）。
+
+> **已知边界**：读取选中文本以填充缓冲时，受 SwiftTerm `selection` 为 `internal` 限制，实现采用「瞬态 `copy` + 恢复剪贴板」模式（详见 [design.md 已知边界](../../design.md)）。缓冲本身为纯内存 `String`，不写系统剪贴板；但读取过程存在瞬态写入窗口（微秒级，结束后恢复原值）。此为实现 SwiftTerm 公共 API 缺失的必要妥协，未来 SwiftTerm 暴露公共选中文本入口后可消除。
+
+#### Scenario: 选中文本更新 PRIMARY 缓冲
+
+- **GIVEN** 终端标签页处于 shell 阶段
+- **WHEN** 用户左键拖拽选中文本并松开鼠标
+- **THEN** 终端 PRIMARY selection 缓冲被更新为当前选中文本，覆盖前一次缓冲内容
+
+#### Scenario: 空选中不更新 PRIMARY 缓冲
+
+- **GIVEN** 终端 PRIMARY selection 缓冲已存有文本 A
+- **WHEN** 用户左键点击终端空白处使选中为空字符串
+- **THEN** 终端 PRIMARY selection 缓冲 MUST 保持为 A，SHALL NOT 被替换为空字符串
+
+#### Scenario: PRIMARY 缓冲独立于系统剪贴板
+
+- **GIVEN** 用户在终端选中文本 B，系统剪贴板当前内容为 C
+- **WHEN** 文本 B 被写入终端 PRIMARY selection 缓冲
+- **THEN** 系统剪贴板内容 MUST 仍为 C，SHALL NOT 变为 B
+

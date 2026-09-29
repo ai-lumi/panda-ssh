@@ -35,8 +35,8 @@ struct TransferPageView: View {
             // 顶部标题栏
             Divider()
             // 分隔线
-            if store.tasks.isEmpty {
-                // 没有传输任务时显示空态
+            if store.tasks.isEmpty && store.deleteTasks.isEmpty {
+                // 没有任何任务（传输 + 删除）时显示空态
                 ContentUnavailableView(
                     l10n.str("transfer.panel.empty.title"),
                     // 标题
@@ -75,6 +75,10 @@ struct TransferPageView: View {
                         // .reversed() 反转顺序，最新的任务显示在最上面
                         TransferRow(task: task, store: store)
                         // 渲染单个任务行
+                    }
+                    // 删除任务行：独立于传输任务，使用 trash 图标
+                    ForEach(store.deleteTasks.reversed(), id: \.taskId) { snapshot in
+                        DeleteTaskRow(snapshot: snapshot)
                     }
                 }
                 .listStyle(.plain)
@@ -648,5 +652,118 @@ struct TransferTaskPresentation {
         liveSpeed = task.status == .running ? max(0, task.liveSpeed) : 0
         // 仅在传输中时显示实时速度，其他状态速度为 0
         // max(0, ...) 确保速度不为负数
+    }
+}
+
+// MARK: - Delete Task Row
+
+/// 删除任务行视图：显示本地/远端删除任务的进度和状态。
+/// 与 TransferRow 不同，删除任务用条目计数（processed/total）而非字节数表示进度，
+/// 并显示当前正在处理的路径。
+private struct DeleteTaskRow: View {
+    /// Rust 侧返回的删除任务快照
+    let snapshot: DeleteTaskSnapshotRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                // 类型图标：本地删除 = 垃圾桶，远端删除 = 垃圾桶 + 网络环
+                Image(systemName: snapshot.kind == .local ? "trash" : "trash.circle")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                // 任务类型标签
+                Text(snapshot.kind == .local ? "本地删除" : "远端删除")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                // 状态徽标
+                DeleteStatusBadge(status: snapshot.status)
+            }
+            // 源路径
+            Text(snapshot.source)
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            // 进度条和条目计数
+            HStack {
+                ProgressView(value: progressValue)
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+                Spacer()
+                Text(progressLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            // 当前正在处理的路径（仅 running/preparing/scanning 时显示）
+            if let currentPath = snapshot.currentPath, !currentPath.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Text(currentPath)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// 0...1 的进度值；total 为 nil 时用 discovered 作为预估总量
+    private var progressValue: Double {
+        let total = snapshot.total ?? max(snapshot.discovered, snapshot.processed)
+        guard total > 0 else { return 0 }
+        return min(1, Double(snapshot.processed) / Double(total))
+    }
+
+    /// 进度文本标签：已处理 / 总数
+    private var progressLabel: String {
+        let total = snapshot.total ?? snapshot.discovered
+        if total > 0 {
+            return "\(snapshot.processed)/\(total)"
+        }
+        return "\(snapshot.processed)/?"
+    }
+}
+
+/// 删除任务状态徽标：根据 DeleteStatusEnum 显示不同颜色和文案。
+private struct DeleteStatusBadge: View {
+    let status: DeleteStatusEnum
+
+    var body: some View {
+        Text(label)
+            .font(.caption2.weight(.medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.15), in: Capsule())
+            .foregroundStyle(color)
+    }
+
+    private var label: String {
+        switch status {
+        case .preparing: return "准备中"
+        case .scanning: return "扫描中"
+        case .queued: return "排队中"
+        case .running: return "删除中"
+        case .paused: return "已暂停"
+        case .waitingForDecision: return "等待确认"
+        case .cancelling: return "取消中"
+        case .completed: return "已完成"
+        case .failed: return "失败"
+        case .cancelled: return "已取消"
+        case .skipped: return "已跳过"
+        }
+    }
+
+    private var color: Color {
+        switch status {
+        case .preparing, .scanning, .queued: return .secondary
+        case .running, .cancelling: return .blue
+        case .paused, .waitingForDecision: return .orange
+        case .completed: return .green
+        case .failed: return .red
+        case .cancelled, .skipped: return .gray
+        }
     }
 }

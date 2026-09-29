@@ -770,12 +770,6 @@ final class SftpSessionStore: ObservableObject {
     /// 测试注入点:覆盖核心编排入口(聚合+入队)。
     var orchestrationHandler: (([String], [TaskItemRecord], TransferDirection, String, String, String?, String?) throws -> OrchestrationResultRecord)?
 
-    /// 测试注入点:覆盖远程文件删除行为。参数为 (name, isDirectory),返回 nil 表示成功。
-    var deleteRemoteHandler: ((String, Bool) -> String?)?
-    // 测试注入点：覆盖远程文件删除行为
-    // 参数：(文件名, 是否目录)
-    // 返回：nil 表示成功，否则返回错误描述
-
     /// 测试注入点:覆盖 home 目录解析行为。参数为 (hostID, password, passphrase)。
     /// 默认为 nil 走真实 FFI;注入后验证后台调度与回退语义。
     var homeDirResolver: (@Sendable (String, String?, String?) throws -> String)?
@@ -795,6 +789,15 @@ final class SftpSessionStore: ObservableObject {
 
     private var paneSubscriptions = Set<AnyCancellable>()
     // 面板变化订阅集合
+
+    /// 正在后台运行的删除任务：taskID → direction（本地/远程），
+    /// 终态时自动刷新对应面板。Timer 为空表示没有待轮询的任务。
+    private struct PendingDelete: Equatable {
+        let taskID: String
+        let direction: DeleteKindEnum
+    }
+    private var pendingDeletes: [PendingDelete] = []
+    private var deletePolling: AnyCancellable?
 
     init(host: HostEntry, transfers: TransferStore) {
         // 初始化方法：创建 SFTP 会话管理器
@@ -1456,76 +1459,102 @@ final class SftpSessionStore: ObservableObject {
         sftpChildPath(directory: dir, name: name)
     }
 
-    /// 本地删除核心逻辑(不刷新面板);批量删除时逐个调用、最后统一刷新一次。
-    private func deleteLocalCore(name: String) -> String? {
-        let path = joinPath(localPane.path, name)
+    /// 批量删除本地条目：启动 FFI 删除任务后立即返回，不阻塞等待终态。
+    /// Rust DeleteService 在后台执行，TransferPanelView 显示进度，
+    /// 终态时本类自动刷新 localPane。
+    /// 返回 taskID 表示启动成功，nil 表示启动失败。
+    @discardableResult
+    func deleteLocalBatch(names: [String]) -> String? {
+        let targets = names.map { joinPath(localPane.path, $0) }
         do {
-            try FileManager.default.removeItem(atPath: path)
+            let taskID = try startLocalDelete(targets: targets)
+            pendingDeletes.append(PendingDelete(taskID: taskID, direction: .local))
+            startDeletePollingIfNeeded()
+            return taskID
+        } catch {
+            Logger.shared.error("本地删除任务启动失败: error=\(error.localizedDescription)", module: LogModule.sftp)
             return nil
-        } catch {
-            let description = (error as NSError).localizedDescription
-            Logger.shared.error("删除本地文件失败: path=\(path), error=\(description)", module: LogModule.sftp)
-            return description
         }
     }
 
-    /// 远程删除核心逻辑(不刷新面板);支持测试注入 deleteRemoteHandler。
-    /// 网络往返与测试 handler 均在后台线程执行。
-    private func deleteRemoteCore(name: String) async -> String? {
-        guard let entry = remotePane.entries.first(where: { $0.name == name }) else {
-            return "条目不存在"
+    /// 批量删除远程条目：启动 FFI 删除任务后立即返回，不阻塞等待终态。
+    /// Rust DeleteService 在后台执行，TransferPanelView 显示进度，
+    /// 终态时本类自动刷新 remotePane。
+    /// 返回 taskID 表示启动成功，nil 表示启动失败。
+    @discardableResult
+    func deleteRemoteBatch(names: [String]) -> String? {
+        guard let handle = sftpHandle else {
+            Logger.shared.warning("远程删除跳过：SFTP 会话句柄无效", module: LogModule.sftp)
+            return nil
         }
-        let path = joinPath(remotePane.path, name)
-        let sessionHandle = sftpHandle
-        let isDir = entry.isDirectory
-        let handler = deleteRemoteHandler
+        let targets = names.map { joinPath(remotePane.path, $0) }
         do {
-            let result = try await FFIBackground.run { () -> String? in
-                if let handler {
-                    return handler(name, isDir)
-                }
-                guard let sessionHandle else { throw PandaError.UnknownSftpHandle(0) }
-                try PandaCoreBridge.shared.removeRemoteFile(
-                    handle: sessionHandle, remotePath: path, isDirectory: isDir
-                )
-                return nil
-            }
-            return result
+            let taskID = try startRemoteDelete(handle: handle, targets: targets)
+            pendingDeletes.append(PendingDelete(taskID: taskID, direction: .remote))
+            startDeletePollingIfNeeded()
+            return taskID
         } catch {
-            let description = (error as NSError).localizedDescription
-            Logger.shared.error("删除远程文件失败: path=\(path), error=\(description)", module: LogModule.sftp)
-            return description
+            Logger.shared.error("远程删除任务启动失败: error=\(error.localizedDescription)", module: LogModule.sftp)
+            return nil
         }
     }
 
-    /// 批量删除本地条目;逐个删除,全部完成后刷新面板一次。
-    func deleteLocalBatch(names: [String]) async -> (deleted: Int, failed: [(name: String, error: String)]) {
-        var failed: [(name: String, error: String)] = []
-        var deleted = 0
-        for name in names {
-            if let error = deleteLocalCore(name: name) {
-                failed.append((name, error))
-            } else {
-                deleted += 1
-            }
-        }
-        _ = await localPane.reload()
-        return (deleted, failed)
+    // MARK: - 删除终态轮询（内部）
+
+    /// 启动删除终态轮询（每 0.5s 检查一次 pendingDeletes）。
+    /// 已有轮询在跑或无待追踪任务时 no-op。
+    private func startDeletePollingIfNeeded() {
+        guard deletePolling == nil && !pendingDeletes.isEmpty else { return }
+        deletePolling = Timer.publish(every: 0.5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.tickPendingDeletes() }
     }
 
-    /// 批量删除远程条目;逐个删除,全部完成后刷新面板一次。
-    func deleteRemoteBatch(names: [String]) async -> (deleted: Int, failed: [(name: String, error: String)]) {
-        var failed: [(name: String, error: String)] = []
-        var deleted = 0
-        for name in names {
-            if let error = await deleteRemoteCore(name: name) {
-                failed.append((name, error))
-            } else {
-                deleted += 1
+    /// 检查 pendingDeletes 中的每个 taskID，终态时刷新对应面板。
+    private func tickPendingDeletes() {
+        guard !pendingDeletes.isEmpty else {
+            deletePolling?.cancel()
+            deletePolling = nil
+            return
+        }
+        let terminalStates: Set<DeleteStatusEnum> = [.completed, .failed, .cancelled, .skipped]
+        var toRemove: Set<String> = []
+        var needRefreshLocal = false
+        var needRefreshRemote = false
+
+        for pending in pendingDeletes {
+            do {
+                let snap = try deleteTaskStatus(taskId: pending.taskID)
+                if terminalStates.contains(snap.status) {
+                    toRemove.insert(pending.taskID)
+                    if pending.direction == .local { needRefreshLocal = true }
+                    if pending.direction == .remote { needRefreshRemote = true }
+                    switch snap.status {
+                    case .completed:
+                        Logger.shared.info("删除完成 id=\(pending.taskID) succeeded=\(snap.succeeded)", module: LogModule.sftp)
+                    case .failed:
+                        Logger.shared.warning("删除失败 id=\(pending.taskID) errors=\(snap.errors.count)", module: LogModule.sftp)
+                    case .cancelled:
+                        Logger.shared.info("删除取消 id=\(pending.taskID)", module: LogModule.sftp)
+                    default: break
+                    }
+                }
+            } catch {
+                toRemove.insert(pending.taskID)
+                Logger.shared.warning("删除快照查询失败 id=\(pending.taskID): \(error.localizedDescription)", module: LogModule.sftp)
             }
         }
-        _ = await remotePane.reload()
-        return (deleted, failed)
+
+        if !toRemove.isEmpty {
+            pendingDeletes.removeAll { toRemove.contains($0.taskID) }
+        }
+        if pendingDeletes.isEmpty {
+            deletePolling?.cancel()
+            deletePolling = nil
+        }
+        if needRefreshLocal { pendingReload.local = true }
+        if needRefreshRemote { pendingReload.remote = true }
+        if needRefreshLocal || needRefreshRemote { schedulePendingReload() }
     }
 
     private func checkDownloadConflict(name: String, source: String, destination: String) async throws -> PendingConflict? {

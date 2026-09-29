@@ -737,7 +737,7 @@ private struct TransferSideEntryButton: View {
     var body: some View {
         // 复用通用的侧栏按钮组件，额外传入活动任务数作为角标
         SideEntryButton(
-            title: "传输任务",
+            title: "任务",
             // 上下箭头图标（表示传输/上传下载）
             systemImage: "arrow.up.arrow.down",
             isActive: isActive,

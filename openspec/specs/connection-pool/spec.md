@@ -3,9 +3,7 @@
 ## Purpose
 
 为 Panda SSH 提供显式、按所有者隔离的 SSH Transport 生命周期管理。终端标签、SFTP 标签和后台传输各自独占 Socket；活动连接注册表只承担运行时查找、精确关闭与遥测，不缓存或复用业务连接。
-
 ## Requirements
-
 ### Requirement: 显式连接所有权
 
 系统 SHALL 为终端标签、SFTP 标签和后台传输分别建立由该所有者独占的 SSH Transport。不同所有者即使连接同一主机并使用相同凭据，也 MUST NOT 隐式共享 Socket。系统 MAY 维护仅用于查找、监控和精确关闭的活动连接注册表，但该注册表 MUST NOT 缓存或复用连接。
@@ -78,3 +76,14 @@
 - **GIVEN** 一条 SSH 连接因通道打开失败或 keepalive 连续失败而失效
 - **WHEN** 活动连接注册表同步其状态
 - **THEN** 后续遥测快照将该连接标记为不可用或不再列为活动连接，且 MUST NOT 将其继续报告为健康
+
+### Requirement: 重连期间所有权保持
+
+终端标签的自动重连 SHALL 为该标签建立新 Transport，MUST NOT 复用其他所有者的连接。重连期间旧 Socket SHALL 已释放，同主机其他标签页的连接状态 SHALL 不受影响。
+
+#### Scenario: 重连不影响其他标签
+
+- **GIVEN** 同一主机有两个终端标签，标签 A 开始自动重连
+- **WHEN** 标签 A 正在重连过程中
+- **THEN** 标签 B 的连接保持正常，SHALL NOT 被标签 A 的重连流程影响
+

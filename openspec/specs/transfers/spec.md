@@ -333,8 +333,6 @@
 - **WHEN** 主窗口中的上传任务产生进度更新
 - **THEN** 独立传输窗口中的任务列表与进度正常更新，行为与修复前一致
 
-## ADDED Requirements
-
 ### Requirement: 目录准备与零文件组可观察
 
 目录组 SHALL 保留独立于文件数量的准备状态和结果。空目录及仅含空子目录的上传 SHALL 产生可见目录组，文件任务数 SHALL 为零，远端目录创建成功后组才完成。目录准备失败 SHALL 展示源目录、目标目录和错误，MUST NOT 显示为空列表或成功。只有准备工作时状态刷新 SHALL 仍然有效。
@@ -371,3 +369,113 @@
 
 - **WHEN** 扫描返回带路径上下文的错误
 - **THEN** 操作显示失败，未创建部分可执行文件任务，也未发生远端或本地写入
+
+### Requirement: 统一任务入口与类型展示
+
+侧栏入口及任务页面标题 SHALL 为「任务」。页面 SHALL 统一展示上传、下载、本地删除、远端删除，并明确标注任务类型。原有传输任务的字节进度、速度、任务组与控制操作 SHALL 保持；删除任务 SHALL 使用条目进度，不展示传输速度、暂停或自动重试。任务计数与空状态 SHALL 包含全部任务类型。
+
+#### Scenario: 混合任务
+- **WHEN** 同时有上传、下载、本地删除与远端删除任务
+- **THEN** 「任务」页面展示四类任务，各自呈现适用的进度与操作
+
+#### Scenario: 仅删除任务
+- **WHEN** 没有传输任务但有后台删除任务
+- **THEN** 页面不显示空状态，任务角标包含该删除任务
+
+#### Scenario: 原有传输控制
+- **WHEN** 用户操作上传下载的暂停、继续、取消、重试或任务组控制
+- **THEN** 行为与变更前一致，删除任务不被错误套用传输控制
+
+### Requirement: 各类任务的持续状态反馈
+
+系统 SHALL 在只有单个上传、下载、批量或删除任务运行时持续展示实际进度，无需其他任务发生状态变化。等待覆盖确认、失败、完成或取消 SHALL 及时呈现。无未完成任务时 SHALL 停止周期性刷新。
+
+#### Scenario: 只有字节进度变化
+- **WHEN** 唯一传输任务一直处于运行中，已传输字节持续增加
+- **THEN** 进度与速度持续更新，不等待状态切换才刷新
+
+#### Scenario: 只有目录组任务
+- **WHEN** 唯一目录组及其文件任务更新进度、等待覆盖确认或结束
+- **THEN** 页面分别显示新进度、待决策提示或终态
+
+#### Scenario: 读取期间发生变化
+- **WHEN** 系统读取任务状态的过程中又发生进度或状态更新
+- **THEN** 后续刷新仍能观察到该更新，不将未呈现的更新当作已处理
+
+### Requirement: 准备阶段任务可见
+
+耗时的扫描或批量准备 SHALL 在执行前进入任务列表并计入未完成工作，使用不定进度。转为执行阶段 SHALL 保持操作关联，MUST NOT 短暂消失或重复计数；准备失败 SHALL 展示失败原因。
+
+#### Scenario: 扫描尚无文件任务
+- **WHEN** 目录扫描正在执行，尚未生成传输子任务
+- **THEN** 用户可以在任务页审查准备中的操作，应用停机时也能向它发出取消请求
+
+#### Scenario: 准备交接与失败
+- **WHEN** 准备结束并启动执行，或准备发生错误
+- **THEN** 前者连续呈现同一操作，后者展示失败而不留下永久活动记录
+
+### Requirement: 传输任务包含速度指标
+
+`transfer_status()` 与 `transfer_list()` 返回的 `TransferStatusRecord` SHALL 包含 `speed`（实时速率 bytes/s，滑动窗口 2 秒）、`total_speed`（从开始到当前的平均速率）和 `eta_seconds`（预估剩余秒数，无法计算时为 nil）。速度计算 MUST 在 Rust 侧完成，前端 MUST NOT 自行计算。暂停后恢复时滑动窗口 SHALL 重置。
+
+#### Scenario: 运行中任务返回速度
+
+- **GIVEN** 一个正在传输的任务，已传输 1MB，最近 2 秒内传输了 500KB
+- **WHEN** 调用 `transfer_status(task_id)`
+- **THEN** `speed` 约为 250KB/s，`total_speed` 为总传输量/总时间，`eta_seconds` 为剩余量/speed
+
+#### Scenario: 暂停后恢复重置窗口
+
+- **GIVEN** 任务暂停前 speed 为 100KB/s
+- **WHEN** 任务恢复传输
+- **THEN** 滑动窗口重置，speed 从恢复后的第一个采样开始计算
+
+#### Scenario: 零字节任务
+
+- **GIVEN** 一个 size 为 0 的任务
+- **WHEN** 调用 `transfer_status(task_id)`
+- **THEN** `speed` 为 0，`eta_seconds` 为 nil
+
+### Requirement: 传输任务分组聚合 FFI
+
+系统 SHALL 通过 FFI 暴露 `transfer_groups()` 接口，返回按 `group_id` 聚合的任务组列表。每个 `TransferGroupRecord` SHALL 包含 `group_id`、`name`、`total_count`、`completed_count`、`total_bytes`、`transferred_bytes` 和聚合 `status`。聚合状态优先级：running > queued > paused > failed > done > cancelled。无分组任务 MUST NOT 出现在结果中。
+
+#### Scenario: 混合任务分组
+
+- **GIVEN** 3 个上传任务属于组 "docs"（2 done, 1 running），2 个下载任务无分组
+- **WHEN** 调用 `transfer_groups()`
+- **THEN** 返回 1 个组 "docs"，`total_count: 3`，`completed_count: 2`，`status: running`
+
+#### Scenario: 全部完成的组
+
+- **GIVEN** 组 "images" 的 5 个任务全部 done
+- **WHEN** 调用 `transfer_groups()`
+- **THEN** 该组 `status` 为 `done`
+
+#### Scenario: 无分组任务
+
+- **GIVEN** 所有任务均无 `group_id`
+- **WHEN** 调用 `transfer_groups()`
+- **THEN** 返回空列表
+
+### Requirement: 传输状态变更推送
+
+系统 SHALL 支持通过 `transfer_register_observer()` 注册回调观察者。传输任务状态变更（创建、进度更新、暂停、恢复、完成、失败、取消）时 SHALL 主动调用所有已注册观察者的 `on_transfer_changed()` 方法。观察者 MUST 为 `Send + Sync`。取消注册后 SHALL 不再收到通知。
+
+#### Scenario: 注册后收到通知
+
+- **GIVEN** 已注册一个观察者
+- **WHEN** 传输任务状态变更
+- **THEN** 观察者的 `on_transfer_changed()` 被调用
+
+#### Scenario: 多个观察者
+
+- **GIVEN** 注册了 2 个观察者
+- **WHEN** 传输任务完成
+- **THEN** 两个观察者的回调均被调用
+
+#### Scenario: 取消注册
+
+- **GIVEN** 已注册一个观察者并取消注册
+- **WHEN** 传输任务状态变更
+- **THEN** 该观察者的回调不再被调用

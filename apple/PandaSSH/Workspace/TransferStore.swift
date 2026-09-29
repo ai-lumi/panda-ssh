@@ -178,12 +178,32 @@ protocol TransferSource: TaskRevisionSource {
     /// 查询全部任务当前状态。
     func listTransfers() -> [TransferRecord]
 
+    /// 查询全部任务组聚合状态（来自 core）。
+    func listTransferGroups() -> [TransferGroupRecord]
+
+    /// 取消任务组内所有未终态任务。
+    func cancelTransferGroup(id: String)
+
+    /// 重试任务组内所有失败任务。
+    func retryTransferGroup(id: String)
+
+    /// 暂停任务组内所有运行中或排队中的任务。
+    func pauseTransferGroup(id: String)
+
+    /// 继续任务组内所有已暂停任务。
+    func resumeTransferGroup(id: String)
+
     /// 驱动模拟源前进一个时间步;真实实现为空实现。
     func tick()
 }
 
 extension TransferSource {
     func tick() {}
+    func listTransferGroups() -> [TransferGroupRecord] { [] }
+    func cancelTransferGroup(id: String) {}
+    func retryTransferGroup(id: String) {}
+    func pauseTransferGroup(id: String) {}
+    func resumeTransferGroup(id: String) {}
 }
 
 /// 批量传输源抽象。
@@ -286,6 +306,26 @@ final class FFITransferSource: TransferSource, BatchTransferSource {
 
     func listTransfers() -> [TransferRecord] {
         (try? transferList())?.map { TransferRecord(ffiRecord: $0) } ?? []
+    }
+
+    func listTransferGroups() -> [TransferGroupRecord] {
+        (try? transferGroups()) ?? []
+    }
+
+    func cancelTransferGroup(id: String) {
+        _ = try? transferGroupCancel(groupId: id)
+    }
+
+    func retryTransferGroup(id: String) {
+        _ = try? transferGroupRetry(groupId: id)
+    }
+
+    func pauseTransferGroup(id: String) {
+        _ = try? transferGroupPause(groupId: id)
+    }
+
+    func resumeTransferGroup(id: String) {
+        _ = try? transferGroupResume(groupId: id)
     }
 
     func enqueueBatchUpload(
@@ -454,6 +494,65 @@ final class MockTransferSource: TransferSource, BatchTransferSource {
 
     func listTransfers() -> [TransferRecord] {
         tasks.map { mockRecord($0) }
+    }
+
+    func listTransferGroups() -> [TransferGroupRecord] {
+        let grouped = Dictionary(grouping: tasks.filter { $0.groupID != nil }) { $0.groupID! }
+        return grouped.map { (groupID, members) in
+            let direction: TransferDirectionEnum = members.first?.direction == .upload ? .upload : .download
+            let totalBytes = members.reduce(0 as UInt64) { $0 + $1.size }
+            let transferredBytes = members.reduce(0 as UInt64) { $0 + $1.transferred }
+            let totalCount = UInt32(members.count)
+            let completedCount = UInt32(members.filter { $0.status == .done || $0.status == .cancelled || $0.status == .skipped }.count)
+            let status: TransferStatusEnum = members.reduce(.completed) { partial, task in
+                switch task.status {
+                case .running: return .running
+                case .paused: if partial != .running { return .paused }
+                case .queued: if partial != .running && partial != .paused { return .queued }
+                case .failed: if partial != .running && partial != .paused && partial != .queued { return .failed }
+                default: break
+                }
+                return partial
+            }
+            return TransferGroupRecord(
+                groupId: groupID.uuidString,
+                groupName: members.first?.groupName ?? "",
+                direction: direction,
+                totalCount: totalCount,
+                completedCount: completedCount,
+                totalBytes: totalBytes,
+                transferredBytes: transferredBytes,
+                status: status
+            )
+        }
+    }
+
+    func cancelTransferGroup(id: String) {
+        let uuid = UUID(uuidString: id)
+        for task in tasks where task.groupID == uuid {
+            cancelTransfer(id: task.id)
+        }
+    }
+
+    func retryTransferGroup(id: String) {
+        let uuid = UUID(uuidString: id)
+        for task in tasks where task.groupID == uuid && task.status == .failed {
+            retryTransfer(id: task.id)
+        }
+    }
+
+    func pauseTransferGroup(id: String) {
+        let uuid = UUID(uuidString: id)
+        for task in tasks where task.groupID == uuid {
+            pauseTransfer(id: task.id)
+        }
+    }
+
+    func resumeTransferGroup(id: String) {
+        let uuid = UUID(uuidString: id)
+        for task in tasks where task.groupID == uuid {
+            resumeTransfer(id: task.id)
+        }
     }
 
     func tick() {
@@ -634,6 +733,8 @@ final class TransferStore: ObservableObject {
     static let maxConcurrent = 3
 
     @Published private(set) var tasks: [TransferTask] = []
+    /// 删除任务快照列表；由 `deleteTaskList()` 填充，独立于传输任务。
+    @Published private(set) var deleteTasks: [DeleteTaskSnapshotRecord] = []
     /// 应用停机开始后不再接受新的传输注册，避免取消快照与新任务交错。
     @Published private(set) var isAcceptingNewTasks = true
 
@@ -647,6 +748,8 @@ final class TransferStore: ObservableObject {
     private var lastSeenStatuses: [UUID: TransferStatus] = [:]
     /// Rust 侧传输变更计数器;仅在值变化时重新读取任务列表,避免无变化时重复触发 UI。
     private var lastRevisions: [UInt64?]?
+    /// Rust 侧删除服务变更计数器；nil 表示 Mock 源不支持。
+    private var lastDeleteRevision: UInt64?
 
     init(source: any TransferSource, batchSource: (any BatchTransferSource)? = nil) {
         self.source = source
@@ -664,9 +767,21 @@ final class TransferStore: ObservableObject {
         self.init(source: mock, batchSource: mock)
     }
 
-    /// 进行中 + 排队中的任务数(工具栏徽标用)。
+    /// 进行中 + 排队中的任务数(工具栏徽标用)。包含传输任务和非终态删除任务。
     var activeCount: Int {
-        tasks.count { $0.status == .running || $0.status == .queued }
+        let transferActive = tasks.count { $0.status == .running || $0.status == .queued }
+        let deleteActive = deleteTasks.count { isActiveDeleteStatus($0.status) }
+        return transferActive + deleteActive
+    }
+
+    /// 删除任务的非终态判定。preparing/scanning/queued/running/paused/waitingForDecision/cancelling 均为活跃。
+    private func isActiveDeleteStatus(_ s: DeleteStatusEnum) -> Bool {
+        switch s {
+        case .preparing, .scanning, .queued, .running, .paused, .waitingForDecision, .cancelling:
+            return true
+        case .completed, .failed, .cancelled, .skipped:
+            return false
+        }
     }
 
     /// 按 groupID 聚合的任务组视图;无组任务不在这里出现。
@@ -820,28 +935,31 @@ final class TransferStore: ObservableObject {
         startPollingIfNeeded()
     }
 
-    /// 取消任务组内所有进行中或排队中的任务。
+    /// 取消任务组内所有未终态任务（委托 core FFI）。
     func cancelGroup(id: UUID) {
-        tasks.filter { $0.groupID == id && ($0.status == .running || $0.status == .queued || $0.status == .paused) }
-            .forEach { cancel(id: $0.id) }
+        source.cancelTransferGroup(id: id.uuidString)
+        refresh()
+        adjustPollingFrequency()
     }
 
-    /// 重试任务组内所有失败任务。
+    /// 重试任务组内所有失败任务（委托 core FFI）。
     func retryGroup(id: UUID) {
-        tasks.filter { $0.groupID == id && $0.status == .failed }
-            .forEach { retry(id: $0.id) }
+        source.retryTransferGroup(id: id.uuidString)
+        refresh()
+        startPollingIfNeeded()
     }
 
-    /// 暂停任务组内所有进行中或排队中的任务。
+    /// 暂停任务组内所有运行中或排队中的任务（委托 core FFI）。
     func pauseGroup(id: UUID) {
-        tasks.filter { $0.groupID == id && ($0.status == .running || $0.status == .queued) }
-            .forEach { pause(id: $0.id) }
+        source.pauseTransferGroup(id: id.uuidString)
+        refresh()
     }
 
-    /// 继续任务组内所有已暂停任务。
+    /// 继续任务组内所有已暂停任务（委托 core FFI）。
     func resumeGroup(id: UUID) {
-        tasks.filter { $0.groupID == id && $0.status == .paused }
-            .forEach { resume(id: $0.id) }
+        source.resumeTransferGroup(id: id.uuidString)
+        refresh()
+        startPollingIfNeeded()
     }
 
     /// 取消指定主机的全部活跃传输任务(running/queued/paused)。
@@ -851,13 +969,39 @@ final class TransferStore: ObservableObject {
             .forEach { cancel(id: $0.id) }
     }
 
-    /// 应用级停机：先关闭新任务入口，再按当前快照取消所有活跃的单文件与批量任务。
+    /// 应用级停机：先关闭新任务入口，再按当前快照取消所有活跃的单文件与批量任务，
+    /// 以及所有活跃的删除任务（本地 + 远程）。
     /// 不等待远端确认；远端结果在进程退出后未知，不能自动重放。
     func beginApplicationShutdown() {
         guard isAcceptingNewTasks else { return }
         isAcceptingNewTasks = false
         refresh()
+        // 取消所有活跃的传输任务（单文件 + 批量）
         tasks.filter { Self.isActiveStatus($0.status) }.forEach { cancel(id: $0.id) }
+        // 取消所有活跃的删除任务（本地 + 远程）
+        cancelAllActiveDeleteTasks()
+    }
+
+    /// 枚举 FFI 删除任务列表，取消所有活跃状态（preparing/scanning/running/paused/...）。
+    /// 终端态（completed/failed/cancelled/skipped）跳过。
+    private func cancelAllActiveDeleteTasks() {
+        let activeStates: Set<DeleteStatusEnum> = [
+            .preparing, .scanning, .queued, .running,
+            .paused, .waitingForDecision, .cancelling
+        ]
+        // 仅真实 FFI 源能拿到删除任务；Mock 源跳过
+        guard source.changeRevision() != nil else { return }
+        let snapshots = deleteTaskList()
+        for snap in snapshots {
+            if activeStates.contains(snap.status) {
+                do {
+                    try deleteTaskCancel(taskId: snap.taskId)
+                } catch {
+                    // 单个取消失败不阻塞其余清理
+                    Logger.shared.warning("停机取消删除任务失败 id=\(snap.taskId): \(error.localizedDescription)", module: LogModule.transfer)
+                }
+            }
+        }
     }
 
     private static func isActiveStatus(_ status: TransferStatus) -> Bool {
@@ -897,6 +1041,15 @@ final class TransferStore: ObservableObject {
         tasks = records
             .map { makeTask(from: $0) }
             .filter { !hiddenIDs.contains($0.id) }
+
+        // 仅真实 FFI 源才刷新删除任务列表；Mock 源跳过以避免测试间串扰。
+        if source.changeRevision() != nil {
+            let counter = deleteChangeCounter()
+            if lastDeleteRevision != counter {
+                lastDeleteRevision = counter
+                deleteTasks = deleteTaskList()
+            }
+        }
     }
 
     /// 从 `TransferRecord` 构造 `TransferTask`。
@@ -940,16 +1093,18 @@ final class TransferStore: ObservableObject {
     /// 当前 Timer 的频率（秒）；nil 表示未启动。
     private var currentPollingInterval: Double?
 
-    /// 根据任务状态选择最合适的轮询频率。
+    /// 根据任务状态选择最合适的轮询频率。同时考虑传输任务和删除任务的活跃状态。
     private func optimalPollingInterval() -> Double? {
         let hasRunning = tasks.contains { $0.status == .running }
         let hasQueued = tasks.contains { $0.status == .queued }
         let hasPaused = tasks.contains { $0.status == .paused }
-        if hasRunning || hasQueued || hasPaused {
-            // 5Hz：活跃传输时足够流畅
+        let hasActiveDelete = deleteTasks.contains { isActiveDeleteStatus($0.status) }
+        if hasRunning || hasQueued || hasPaused || hasActiveDelete {
+            // 5Hz：活跃传输或删除时足够流畅
             return 0.2
         }
         let hasTerminal = tasks.contains { [.done, .failed, .cancelled].contains($0.status) }
+            || deleteTasks.contains { [.completed, .failed, .cancelled, .skipped].contains($0.status) }
         if hasTerminal {
             // 1Hz：终态任务仅需偶尔刷新
             return 1.0

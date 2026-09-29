@@ -251,26 +251,13 @@ struct SftpTabView: View {
             Button("删除", role: .destructive) {
                 guard let candidate = deleteCandidate else { return }
                 deleteCandidate = nil
-                // 异步执行批量删除
-                Task {
-                    let result: (deleted: Int, failed: [(name: String, error: String)])
-                    if candidate.local {
-                        // 删除本地文件
-                        result = await session.deleteLocalBatch(names: candidate.names)
-                    } else {
-                        // 删除远程文件
-                        result = await session.deleteRemoteBatch(names: candidate.names)
-                    }
-                    // 根据删除结果显示不同的 toast 消息
-                    if result.failed.isEmpty {
-                        toast.show(candidate.names.count > 1 ? "已删除 \(result.deleted) 项" : "已删除 \(candidate.names[0])")
-                    } else if result.deleted > 0 {
-                        toast.show("已删除 \(result.deleted) 项，\(result.failed.count) 项失败")
-                    } else {
-                        let details = result.failed.map { "\($0.name): \($0.error)" }.joined(separator: "；")
-                        toast.show("删除失败：\(details)")
-                    }
+                // 非阻塞：启动删除任务后立即返回，进度在 TransferPanelView 展示
+                if candidate.local {
+                    let _ = session.deleteLocalBatch(names: candidate.names)
+                } else {
+                    let _ = session.deleteRemoteBatch(names: candidate.names)
                 }
+                toast.show(candidate.names.count > 1 ? "已启动 \(candidate.names.count) 项删除，可在任务页查看进度" : "已启动删除 \(candidate.names[0])，可在任务页查看进度")
             }
             // 「取消」按钮：关闭对话框
             Button("取消", role: .cancel) { deleteCandidate = nil }

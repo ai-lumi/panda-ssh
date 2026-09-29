@@ -311,6 +311,12 @@ RustBuffer uniffi_panda_ffi_fn_func_delete_task_list(RustCallStatus *_Nonnull ou
 RustBuffer uniffi_panda_ffi_fn_func_delete_task_status(RustBuffer task_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_RESET_DELETE_SERVICE_FOR_TEST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_RESET_DELETE_SERVICE_FOR_TEST
+void uniffi_panda_ffi_fn_func_reset_delete_service_for_test(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_LOCAL_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_START_LOCAL_DELETE
 RustBuffer uniffi_panda_ffi_fn_func_start_local_delete(RustBuffer targets, RustCallStatus *_Nonnull out_status
@@ -1301,6 +1307,12 @@ uint16_t uniffi_panda_ffi_checksum_func_delete_task_list(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_TASK_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_DELETE_TASK_STATUS
 uint16_t uniffi_panda_ffi_checksum_func_delete_task_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_RESET_DELETE_SERVICE_FOR_TEST
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_RESET_DELETE_SERVICE_FOR_TEST
+uint16_t uniffi_panda_ffi_checksum_func_reset_delete_service_for_test(void
     
 );
 #endif

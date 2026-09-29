@@ -1,0 +1,7 @@
+version: 1
+name: add-port-forwarding
+created_at: 2026-09-29
+status: proposal
+target_release: v1.1.0
+depends_on:
+  - add-ssh-proxy-jump  # 共享 DirectTcpipChannel 流包装（如果 proxy-jump 先做）

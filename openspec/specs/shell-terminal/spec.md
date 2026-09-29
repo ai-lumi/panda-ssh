@@ -3,9 +3,7 @@
 ## Purpose
 
 基于 PTY 的 SSH 交互式终端：在 SSH 会话上分配伪终端、配置终端模式、设置 TERM 环境变量、支持窗口大小调整，使远程 shell 具备完整的终端语义（ANSI 转义码、行编辑、作业控制）。
-
 ## Requirements
-
 ### Requirement: PTY 分配
 
 系统 SHALL 在打开交互式 shell 会话时，先向服务端请求伪终端（PTY）分配，再请求远程 shell。PTY 请求 MUST 携带终端类型（`TERM=xterm-256color`）、初始窗口尺寸（默认 80×24 列行）和标准终端模式配置。
@@ -45,7 +43,9 @@
 
 系统 SHALL 支持在终端会话存活期间动态调整窗口尺寸。客户端窗口尺寸变化时 MUST 向服务端发送 `window-change` 请求，携带新的列数和行数。
 
-尺寸上报采用去抖策略：会话建立后的首次尺寸 MUST 立即上报；此后的连续尺寸变化（如侧栏显隐动画、窗口拖拽产生的逐帧回调）SHALL 做约 150ms 去抖，仅在尺寸稳定后上报最终值，MUST NOT 逐帧发送——逐帧 `window-change` 会让远端 shell 遭遇 SIGWINCH 风暴，其重绘序列与本地 reflow 交错时会把光标推到屏幕中部（终端上方出现大片空白）。
+若终端视图在 shell 连接建立前已获得有效行列数，系统 MUST 保留最新尺寸，并在该 shell 连接可用时立即向服务端发送一次 `window-change`。此同步 MUST 使用最新的已知尺寸，且不得依赖用户再次缩放窗口。
+
+尺寸上报采用去抖策略：会话建立后的首次尺寸 MUST 立即上报；此后的连续尺寸变化（如侧栏显隐动画、窗口拖拽产生的逐帧回调）SHALL 做约 150ms 去抖，仅在尺寸稳定后上报最终值，MUST NOT 逐帧发送——逐帧 `window-change` 会让远端 shell 遭遇 SIGWINCH 风暴，其重绘序列与本地 reflow 交错时会把光标推到屏幕中部（终端上方出现大片空白）。连接可用前遗留的去抖任务 MUST NOT 在连接同步后重复发送过期尺寸。
 
 本地终端视图的行列适配（SwiftTerm resize/reflow）SHALL 保持实时，不受上报去抖影响。
 
@@ -60,9 +60,15 @@
 - **THEN** 最新尺寸 MUST 最终被服务端正确接收，SHALL NOT 丢失最后一次调整
 - **AND** 连续变化期间 SHALL 去抖上报，不逐帧发送 `window-change`
 
+#### Scenario: 初次布局早于 shell 连接
+
+- **GIVEN** 终端视图已完成有效行列数的初次布局，但 shell 连接尚未建立
+- **WHEN** shell 连接随后可用，且用户没有缩放窗口
+- **THEN** 服务端终端立即收到该最新行列数的一次 `window-change`，全屏程序以正确初始尺寸启动
+
 ### Requirement: 终端数据流
 
-系统 SHALL 支持 PTY shell 的双向数据流。客户端写入的输入字节 MUST 通过 SSH 通道发送到服务端 PTY；服务端 PTY 输出 MUST 被客户端读取并缓存，供上层终端视图消费。
+系统 SHALL 支持 PTY shell 的双向数据流。客户端写入的输入字节 MUST 通过 SSH 通道发送到服务端 PTY；服务端 PTY 输出 MUST 被客户端读取并缓存，供上层终端视图消费。终端缓冲区大小 MUST 在终端初始化时从用户配置读取并应用；若用户未配置或配置无效，则使用默认值 10000 行。
 
 #### Scenario: 用户输入被正确转发
 
@@ -78,6 +84,18 @@
 
 - **WHEN** 当前没有服务端输出
 - **THEN** 读取操作立即返回空数据，SHALL NOT 阻塞调用线程
+
+#### Scenario: 终端使用配置的缓冲区大小初始化
+
+- **GIVEN** 用户在设置中将缓冲区行数设为 25000
+- **WHEN** 打开新的终端标签页
+- **THEN** 该终端的回滚缓冲区上限为 25000 行
+
+#### Scenario: 无效配置回退默认值
+
+- **GIVEN** UserDefaults 中存储了非法值或无配置
+- **WHEN** 打开新的终端标签页
+- **THEN** 该终端使用默认值 10000 行回滚缓冲区
 
 ### Requirement: 终端连接隔离
 
@@ -119,3 +137,14 @@
 - **WHEN** 用户切换到其中一个终端标签页
 - **THEN** 被切换到的终端成为键盘输入目标
 - **AND** 隐藏终端不得抢占该焦点
+
+### Requirement: 重连后 PTY 恢复
+
+自动重连成功建立新 shell Channel 后，系统 SHALL 恢复重连前的 PTY 窗口尺寸（列数和行数）。恢复 SHALL 在新 shell 建立后立即发送 `window-change` 请求。
+
+#### Scenario: 重连后恢复窗口尺寸
+
+- **GIVEN** 终端标签窗口尺寸为 120×40，连接失效后自动重连
+- **WHEN** 重连成功并建立新 shell
+- **THEN** 系统立即发送 `window-change` 请求，将远端 PTY 设为 120×40
+

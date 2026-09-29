@@ -1,26 +1,24 @@
-# 下一版本范围
+# OpenSpec 版本文件
 
-> 决策日期：2026-09-11｜目标版本号：待定｜实施状态：未开始。
+## v1.0.0（已实现）
 
-本文件记录下一版本的提案范围；功能细节与验收要求见各提案，系统当前行为仍以 `openspec/specs/` 为准。
+完整的已实现规格合订本，涵盖 `openspec/specs/` 下所有已归档 changes 和活跃 1.0.0 changes 的累积结果。
 
-## 纳入的提案
+- **文件**：[v1.0.0-specs.md](v1.0.0-specs.md)
+- **基准**：`openspec/specs/`
+- **包含的活跃 changes 合并**：add-tab-close-and-quit-shortcuts、fix-macos-tab-drag-and-titlebar-zoom、fix-settings-experience、fix-initial-terminal-size-sync、migrate-business-logic-to-rust、terminal-mouse-interaction、use-alert-for-connection-close
 
-| 提案 | 新增能力 | 实施状态 |
-| --- | --- | --- |
-| [add-ssh-proxy-jump](changes/add-ssh-proxy-jump/proposal.md) | SSH 单跳／多跳跳板机 | 未开始 |
-| [deepen-snippet-system](changes/deepen-snippet-system/proposal.md) | 多级标签、搜索、终端选文保存、参数化模板 | 未开始 |
-| [improve-connection-reliability](changes/improve-connection-reliability/proposal.md) | 会话恢复、自动重连、端口转发 | 未开始 |
-| [add-command-audit-trail](changes/add-command-audit-trail/proposal.md) | 命令与 SFTP 审计、缺段检查 | 未开始 |
-| [add-execution-plan-authorization](changes/add-execution-plan-authorization/proposal.md) | 执行计划、审批与授权生命周期 | 未开始 |
-| [add-batch-remote-execution](changes/add-batch-remote-execution/proposal.md) | 多主机批量执行与结果保存 | 未开始 |
-| [add-manual-inspection-loop](changes/add-manual-inspection-loop/proposal.md) | 人工触发巡检、指标采集和报告 | 未开始 |
-| [terminal-buffer-size](changes/terminal-buffer-size/proposal.md) | 终端缓冲区配置与设置时的内存估算 | 未开始 |
-| [tab-page-memory-indicator](changes/tab-page-memory-indicator/proposal.md) | 标签页内存估算与展示 | 未开始 |
+## v1.1.0（规划中）
 
-## 范围决策与状态口径
+v1.1.0 版本规划新增或修改的规格，基于活跃 changes 中的 spec delta 整理，尚未开始实施或部分实施中。
 
-- 用户明确下一版本尚未开始实施；2026-09-11 在前七项计划的基础上，将 `terminal-buffer-size` 与 `tab-page-memory-indicator` 一并纳入，共九项。
-- `deepen-snippet-system` 已勾选的五项是既有 CRUD、前置条件和设计决策，不代表深化功能已开始实施。
-- 当前版本归档检查时，上述九项按下一版本计划处理；其未实施任务不计入当前版本的归档欠账。
-- 纳入版本表示排期范围已确定。实施时仍须完成提案评审、TDD 与相应验收；开始实施后同步更新本清单和对应任务记录。
+- **文件**：[v1.1.0-specs.md](v1.1.0-specs.md)
+- **纳入的 changes**：add-app-internationalization、add-batch-remote-execution、add-command-audit-trail、add-execution-plan-authorization、add-manual-inspection-loop、preserve-disconnected-session-tabs、refactor-macos-titlebar-tab-strip、refactor-sftp-view-selection、tab-page-memory-indicator、terminal-buffer-size、fix-ssh-session-failure-diagnostics、**add-ssh-proxy-jump**（从 archive 复活）、**add-port-forwarding**（新建）
+
+> 注 1：v1.1.0 中的 `terminal-buffer-size` change 与 v1.0.0 已合并的 `fix-settings-experience` 版本存在差异（v1.1.0 新增内存占用估算，v1.0.0 明确禁止）；实施前需裁决。
+> 注 2：proxy-jump 和 port-forwarding 已创建正式 change 提案（见 `openspec/changes/add-ssh-proxy-jump/` 和 `openspec/changes/add-port-forwarding/`），包含完整 proposal/design/tasks/specs。两者共享 `DirectTcpipChannel` 流包装，建议先做 proxy-jump。
+> 注 3：add-ssh-proxy-jump 和 add-port-forwarding 的 Phase 0 都是 russh direct-tcpip / tcpip-forward API 验证（spike），如果 spike 失败需升级 russh 版本。
+
+## 原始 changes 目录
+
+所有活跃 changes 仍在 `openspec/changes/` 下独立维护；本文件仅作为导航入口，不替代各 change 自身的 proposal/design/tasks。

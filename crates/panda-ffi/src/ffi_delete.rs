@@ -118,9 +118,10 @@ fn delete_service() -> DeleteService {
     svc
 }
 
-/// 重置删除服务（测试用）。
-#[cfg(test)]
-pub(crate) fn reset_delete_service_for_test() {
+/// 重置删除服务（仅 XCTest 用）。清空全局单例 DeleteService 和变更计数器。
+/// 不能加 `#[cfg(test)]` 因为 uniffi::export 需要在 release 构建时存在符号。
+#[uniffi::export]
+pub fn reset_delete_service_for_test() {
     let mut guard = DELETE_SERVICE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
