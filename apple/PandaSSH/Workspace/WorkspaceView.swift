@@ -142,6 +142,12 @@ struct WorkspaceView: View {
                     // 有活动标签时：关闭活动标签（而非关闭窗口）
                 }
             }
+            // 拦截 Ctrl+Tab / Ctrl+Shift+Tab：在 AppKit 事件层全局截获，
+            // 避免被终端 NSView 抢走焦点导致 SwiftUI .onKeyPress 收不到事件。
+            TabSwitchKeyInterceptor(
+                onNext: { workspace.selectNextTab() },
+                onPrevious: { workspace.selectPreviousTab() }
+            )
         }
     }
 

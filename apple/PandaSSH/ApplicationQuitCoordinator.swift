@@ -25,6 +25,13 @@ final class ApplicationQuitCoordinator {
 
 /// 将系统退出请求转发给应用级协调器。
 final class PandaSSHApplicationDelegate: NSObject, NSApplicationDelegate {
+    /// App 启动完成后立即 swizzle NSHostingView，阻断 AppKit 默认窗口拖拽。
+    /// 必须在窗口创建之后立即执行，确保所有窗口的 SwiftUI 宿主视图都被覆盖。
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 窗口拖拽阻断已在 MainWindowChrome 的配置逻辑中处理
+        // （pandaDisableAllMouseDownCanMoveWindow 遍历 contentView 所有子视图）
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         ApplicationQuitCoordinator.shared.shouldTerminateNow() ? .terminateNow : .terminateCancel
     }

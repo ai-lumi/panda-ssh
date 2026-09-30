@@ -547,6 +547,26 @@ pub fn workspace_group_snapshot() -> GroupSnapshotRecord {
     state.service.group_snapshot().into()
 }
 
+/// 应用分组快照：用 Swift 侧的分组归属和排序替换 Rust 侧状态。
+/// 用于拖拽排序提交后将本地顺序持久化到核心。
+#[uniffi::export]
+pub fn workspace_apply_group_snapshot(snapshot: GroupSnapshotRecord) {
+    let mut state = workspace_state().lock().unwrap();
+    let core_snapshot = panda_core::GroupSnapshot {
+        groups: snapshot
+            .groups
+            .into_iter()
+            .map(|g| panda_core::TabGroup {
+                id: g.id,
+                name: g.name,
+                tab_ids: g.tab_ids,
+            })
+            .collect(),
+        ungrouped_tab_ids: snapshot.ungrouped_tab_ids,
+    };
+    state.service.apply_group_snapshot(&core_snapshot);
+}
+
 /// 获取显示顺序的标签页 id 列表。
 #[uniffi::export]
 pub fn workspace_display_order() -> Vec<String> {

@@ -98,8 +98,8 @@ struct HostDetailView: View {
                     // 然后通过 model.presentTab 将其呈现为活动标签
                     model.presentTab(workspace.openTerminal(hostID: host.id))
                 } label: {
-                    // 按钮标签：图标 "terminal" + 文字 "打开终端"
-                    Label("打开终端", systemImage: "terminal")
+                    // 按钮标签：Apple 官方终端图标 + 文字
+                    Label("打开终端", systemImage: "apple.terminal")
                 }
                 // 使用突出的边框按钮样式（填充背景色，视觉权重高）
                 .buttonStyle(.borderedProminent)
@@ -109,8 +109,8 @@ struct HostDetailView: View {
                     // 点击时调用 workspace.openSFTP 打开 SFTP 文件浏览标签页
                     model.presentTab(workspace.openSFTP(hostID: host.id))
                 } label: {
-                    // 按钮标签：图标 "folder" + 文字 "浏览文件 (SFTP)"
-                    Label("浏览文件 (SFTP)", systemImage: "folder")
+                    // 按钮标签：填充版文件夹图标 + 文字
+                    Label("浏览文件 (SFTP)", systemImage: "folder.fill")
                 }
                 // 使用普通边框按钮样式（仅边框，无填充背景，视觉权重较低）
                 .buttonStyle(.bordered)

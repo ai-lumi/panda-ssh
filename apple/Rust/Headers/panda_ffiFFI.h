@@ -894,6 +894,11 @@ RustBuffer uniffi_panda_ffi_fn_func_workspace_active_tab_id(RustCallStatus *_Non
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_APPLY_GROUP_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_APPLY_GROUP_SNAPSHOT
+void uniffi_panda_ffi_fn_func_workspace_apply_group_snapshot(RustBuffer snapshot, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_BEGIN_APPLICATION_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_FN_FUNC_WORKSPACE_BEGIN_APPLICATION_SHUTDOWN
 RustBuffer uniffi_panda_ffi_fn_func_workspace_begin_application_shutdown(RustCallStatus *_Nonnull out_status
@@ -1985,6 +1990,12 @@ uint16_t uniffi_panda_ffi_checksum_func_tofu_reset(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_ACTIVE_TAB_ID
 #define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_ACTIVE_TAB_ID
 uint16_t uniffi_panda_ffi_checksum_func_workspace_active_tab_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_APPLY_GROUP_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_PANDA_FFI_CHECKSUM_FUNC_WORKSPACE_APPLY_GROUP_SNAPSHOT
+uint16_t uniffi_panda_ffi_checksum_func_workspace_apply_group_snapshot(void
     
 );
 #endif

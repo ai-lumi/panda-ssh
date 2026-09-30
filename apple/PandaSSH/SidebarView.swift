@@ -616,13 +616,13 @@ struct HostRowView: View {
     private var hostMenu: some View {
         // 菜单项：打开终端
         Button { callbacks.openTerminal(host) } label: {
-            // 终端图标 + 文字
-            Label("打开终端", systemImage: "terminal")
+            // 终端图标（Apple 官方终端图标，辨识度高）+ 文字
+            Label("打开终端", systemImage: "apple.terminal")
         }
         // 菜单项：浏览文件（SFTP）
         Button { callbacks.openSFTP(host) } label: {
-            // 文件夹图标
-            Label("浏览文件 (SFTP)", systemImage: "folder")
+            // 填充版文件夹图标（小尺寸下更清晰）
+            Label("浏览文件 (SFTP)", systemImage: "folder.fill")
         }
         // 分隔线：在菜单中分隔不同功能组
         Divider()

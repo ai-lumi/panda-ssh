@@ -407,19 +407,22 @@ final class WorkspaceStore: ObservableObject {
     /// 跨组目标不提交排序（不在本变更范围内）。
     func previewTabMove(_ tabID: UUID, before targetTabID: UUID) {
         guard tabID != targetTabID else { return }
+        var changed = false
 
         if ungroupedTabIDs.contains(tabID), ungroupedTabIDs.contains(targetTabID) {
-            moveTabInUngrouped(tabID, before: targetTabID)
+            changed = moveTabInUngrouped(tabID, before: targetTabID)
         } else if let sourceGroupID = groupID(forTabID: tabID),
                   sourceGroupID == groupID(forTabID: targetTabID) {
-            moveTabInGroup(tabID, before: targetTabID, groupID: sourceGroupID)
+            changed = moveTabInGroup(tabID, before: targetTabID, groupID: sourceGroupID)
         }
         // 跨组目标不提交排序
+        if changed { objectWillChange.send() }
     }
 
-    /// 提交拖放结果：清除拖拽状态，保留当前顺序。
+    /// 提交拖放结果：将当前 Swift 侧的分组状态同步给 Rust，清除拖拽状态。
     func commitTabReorder(_ snapshot: TabReorderSnapshot) {
         activeReorderSnapshot = nil
+        syncGroupStateToRust()
         _ = snapshot
     }
 
@@ -433,6 +436,7 @@ final class WorkspaceStore: ObservableObject {
     func rollbackTabReorder(_ snapshot: TabReorderSnapshot) {
         restoreTabReorder(snapshot)
         activeReorderSnapshot = nil
+        syncGroupStateToRust()
     }
 
     /// 取消当前未提交的拖放。视图层无需持有快照，即可在鼠标抬起、Escape
@@ -441,6 +445,20 @@ final class WorkspaceStore: ObservableObject {
         guard let snapshot = activeReorderSnapshot else { return }
         restoreTabReorder(snapshot)
         activeReorderSnapshot = nil
+        syncGroupStateToRust()
+    }
+
+    /// 将当前 Swift 侧的分组状态全量同步给 Rust 核心，防止下次 syncFromFfi 覆盖。
+    private func syncGroupStateToRust() {
+        let record = GroupSnapshotRecord(
+            groups: groups.map { TabGroupRecord(
+                id: $0.id.uuidString.lowercased(),
+                name: $0.name,
+                tabIds: $0.tabIDs.map { $0.uuidString.lowercased() }
+            )},
+            ungroupedTabIds: ungroupedTabIDs.map { $0.uuidString.lowercased() }
+        )
+        workspaceApplyGroupSnapshot(snapshot: record)
     }
 
     private func restoreTabReorder(_ snapshot: TabReorderSnapshot) {
@@ -451,25 +469,32 @@ final class WorkspaceStore: ObservableObject {
             guard let idx = groups.firstIndex(where: { $0.id == saved.groupID }) else { continue }
             groups[idx].tabIDs = saved.tabIDs.filter { validTabIDs.contains($0) }
         }
+        objectWillChange.send()
     }
 
     /// 在 ungroupedTabIDs 中将 tabID 移动到 targetTabID 前。
-    private func moveTabInUngrouped(_ tabID: UUID, before targetTabID: UUID) {
-        guard let from = ungroupedTabIDs.firstIndex(of: tabID) else { return }
-        guard let to = ungroupedTabIDs.firstIndex(of: targetTabID) else { return }
+    /// 返回是否实际发生了移动。
+    @discardableResult
+    private func moveTabInUngrouped(_ tabID: UUID, before targetTabID: UUID) -> Bool {
+        guard let from = ungroupedTabIDs.firstIndex(of: tabID) else { return false }
+        guard let to = ungroupedTabIDs.firstIndex(of: targetTabID) else { return false }
         ungroupedTabIDs.remove(at: from)
         let adjustedTo = to > from ? to - 1 : to
         ungroupedTabIDs.insert(tabID, at: adjustedTo)
+        return true
     }
 
     /// 在指定分组的 tabIDs 中将 tabID 移动到 targetTabID 前。
-    private func moveTabInGroup(_ tabID: UUID, before targetTabID: UUID, groupID: UUID) {
-        guard let idx = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        guard let from = groups[idx].tabIDs.firstIndex(of: tabID) else { return }
-        guard let to = groups[idx].tabIDs.firstIndex(of: targetTabID) else { return }
+    /// 返回是否实际发生了移动。
+    @discardableResult
+    private func moveTabInGroup(_ tabID: UUID, before targetTabID: UUID, groupID: UUID) -> Bool {
+        guard let idx = groups.firstIndex(where: { $0.id == groupID }) else { return false }
+        guard let from = groups[idx].tabIDs.firstIndex(of: tabID) else { return false }
+        guard let to = groups[idx].tabIDs.firstIndex(of: targetTabID) else { return false }
         groups[idx].tabIDs.remove(at: from)
         let adjustedTo = to > from ? to - 1 : to
         groups[idx].tabIDs.insert(tabID, at: adjustedTo)
+        return true
     }
 
     /// 查询页签所在分组的 ID；未分组返回 nil。

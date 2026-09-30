@@ -120,6 +120,22 @@ pub fn next_active_tab_after_close(tab_ids: &[String], closed_index: usize) -> O
     Some(tab_ids[target].clone())
 }
 
+/// 在 Vec<String> 中将 item 移动到 before_item 之前。
+/// 返回是否实际发生了移动（找不到元素或位置未变时返回 false）。
+fn move_in_vec(vec: &mut Vec<String>, item: &str, before_item: &str) -> bool {
+    let from = vec.iter().position(|id| id == item);
+    let to = vec.iter().position(|id| id == before_item);
+    match (from, to) {
+        (Some(f), Some(t)) if f != t => {
+            let removed = vec.remove(f);
+            let adjusted = if t > f { t - 1 } else { t };
+            vec.insert(adjusted, removed);
+            true
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 终端会话状态机
 // ---------------------------------------------------------------------------
@@ -775,6 +791,59 @@ impl WorkspaceService {
         }
     }
 
+    /// 应用分组快照：用新的分组归属和排序替换当前状态。
+    /// 对快照中不存在的 tab（已关闭的）忽略；对快照中未包含的活跃 tab，
+    /// 追加到 ungrouped_tab_ids 末尾。不修改 tab 列表本身。
+    pub fn apply_group_snapshot(&mut self, snapshot: &GroupSnapshot) {
+        let valid_ids: std::collections::HashSet<&str> = self
+            .tabs
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+
+        // 收集快照中出现的所有 tab_id
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        let mut new_groups: Vec<TabGroup> = Vec::new();
+        for g in &snapshot.groups {
+            let filtered_ids: Vec<String> = g
+                .tab_ids
+                .iter()
+                .filter(|id| valid_ids.contains(id.as_str()) && seen.insert(id.as_str()))
+                .cloned()
+                .collect();
+            // 只有分组内还有 tab 时才保留分组
+            if !filtered_ids.is_empty() || self.groups.iter().any(|existing| existing.id == g.id) {
+                // 如果分组本身存在（即使变空了），也保留它（用户只是把 tab 移走了）
+                // 但如果是全新的空分组，就不创建了
+                let _ = self.groups.iter().any(|existing| existing.id == g.id);
+            }
+            new_groups.push(TabGroup {
+                id: g.id.clone(),
+                name: g.name.clone(),
+                tab_ids: filtered_ids,
+            });
+        }
+
+        // 未分组 tab：过滤掉不存在的和已经在分组里的
+        let mut new_ungrouped: Vec<String> = snapshot
+            .ungrouped_tab_ids
+            .iter()
+            .filter(|id| valid_ids.contains(id.as_str()) && seen.insert(id.as_str()))
+            .cloned()
+            .collect();
+
+        // 确保所有活跃 tab 都被放置（追加未出现的到 ungrouped）
+        for tab in &self.tabs {
+            if !seen.contains(tab.id.as_str()) {
+                new_ungrouped.push(tab.id.clone());
+            }
+        }
+
+        self.groups = new_groups;
+        self.ungrouped_tab_ids = new_ungrouped;
+    }
+
     /// 返回显示顺序的标签页 id：按分组顺序输出各组标签页，再输出未分组标签页。
     pub fn display_order(&self) -> Vec<String> {
         let mut order = Vec::new();
@@ -799,6 +868,33 @@ impl WorkspaceService {
             .iter()
             .find(|g| g.tab_ids.iter().any(|id| id == tab_id))
             .map(|g| g.id.as_str())
+    }
+
+    /// 将 tab_id 移动到 before_tab_id 之前（同一容器内：同分组或均未分组）。
+    /// 跨容器为 no-op。两个 tab 相同或不存在时也为 no-op。
+    /// 返回是否实际发生了移动。
+    pub fn reorder_tab_before(&mut self, tab_id: &str, before_tab_id: &str) -> bool {
+        if tab_id == before_tab_id {
+            return false;
+        }
+        // 先取 group_id 的拥有所有权副本，避免后续借用冲突
+        let gid_a = self.group_id_for_tab(tab_id).map(|s| s.to_string());
+        let gid_b = self.group_id_for_tab(before_tab_id).map(|s| s.to_string());
+
+        match (gid_a.as_ref(), gid_b.as_ref()) {
+            // 两个 tab 都在同一分组
+            (Some(ga), Some(gb)) if ga == gb => {
+                if let Some(group) = self.groups.iter_mut().find(|g| &g.id == ga) {
+                    move_in_vec(&mut group.tab_ids, tab_id, before_tab_id)
+                } else {
+                    false
+                }
+            }
+            // 两个 tab 都未分组
+            (None, None) => move_in_vec(&mut self.ungrouped_tab_ids, tab_id, before_tab_id),
+            // 跨分组或一个在组内一个未分组 → no-op
+            _ => false,
+        }
     }
 
     fn remove_tab_from_any_group(&mut self, tab_id: &str) {

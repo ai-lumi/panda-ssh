@@ -412,6 +412,8 @@ struct MainWindowChrome: NSViewRepresentable {
             if window.isMovableByWindowBackground {
                 window.isMovableByWindowBackground = false
             }
+            // swizzle AppKitWindowHostingView.mouseDownCanMoveWindow → false
+            pandaSwizzleMouseDownCanMoveWindow(in: window.contentView)
             // 测量并更新红绿灯安全宽度
             metrics.update(window: window)
             // 异步再执行一次：某些窗口属性在首次配置后可能发生变化（如按钮位置）
@@ -441,6 +443,48 @@ struct MainWindowChrome: NSViewRepresentable {
                     container.isHidden = false
                 }
             }
+        }
+    }
+}
+
+// MARK: - 阻断 AppKit 默认窗口拖拽的透明 NSView
+// -----------------------------------------------------------------------------
+// 用法：在需要阻断 AppKit 默认窗口拖拽的 SwiftUI 区域放
+// .background(NonWindowDraggingView())
+// 原理：NSView override mouseDownCanMoveWindow 返回 false，
+// AppKit 在 hit-test 时碰到此视图就不会启动 performDrag。
+//
+// 另外，这个视图在首次挂到 window 时会自动 swizzle NSHostingView 类，
+// 让所有 SwiftUI 宿主视图都阻断默认窗口拖拽。
+// -----------------------------------------------------------------------------
+struct NonWindowDraggingView: NSViewRepresentable {
+    func makeNSView(context: Context) -> MouseDownCanMoveBlockerView {
+        let view = MouseDownCanMoveBlockerView()
+        print("🟢 NonWindowDraggingView.makeNSView called")
+        return view
+    }
+    func updateNSView(_ nsView: MouseDownCanMoveBlockerView, context: Context) {}
+
+    /// 关键：这个 NSView 需要：
+    /// 1. mouseDownCanMoveWindow = false → AppKit 检查时窗口不跟动
+    /// 2. isOpaque = true → hit-test 会先找到它（不跳过透明视图）
+    /// 3. 但它不拦截任何鼠标事件——事件继续传递给 SwiftUI 手势系统
+    final class MouseDownCanMoveBlockerView: NSView {
+        override var mouseDownCanMoveWindow: Bool { false }
+        override var isOpaque: Bool { true }
+        // 允许视图接收鼠标事件（默认就 true，但显式声明）
+        override var acceptsFirstResponder: Bool { true }
+
+        // ⚠️ 关键：override mouseDown 但不做任何处理！
+        // 这样 AppKit 检查 mouseDownCanMoveWindow 时返回 false → 窗口不跟动
+        // 然后 mouseDown 事件发给我们，我们不处理 → SwiftUI 的 NSEvent monitor 正常收到
+        override func mouseDown(with event: NSEvent) {
+            // 不做任何事，让事件自然传递
+        }
+
+        // 同样拦截 rightMouseDown 防止右键时窗口跟动
+        override func rightMouseDown(with event: NSEvent) {
+            // 不做任何事
         }
     }
 }
@@ -490,6 +534,50 @@ struct WindowDragView: NSViewRepresentable {
                 // 调用系统窗口拖拽（用户拖动此区域可移动整个窗口）
                 window.performDrag(with: event)
             }
+        }
+    }
+}
+
+// MARK: - AppKit 默认窗口拖拽阻断
+// -----------------------------------------------------------------------------
+// 根因：AppKit 的 mouseDownCanMoveWindow 计算属性在视图 isOpaque=false 时
+// 默认返回 true。SwiftUI 的 AppKitWindowHostingView 及其内部子视图因
+// 透明标题栏窗口默认不透明，导致任何 mouseDown 事件都被 AppKit 立即
+// 转换为窗口拖拽——抢在 SwiftUI 手势之前。
+//
+// 修复：用 ObjC runtime class_addMethod 给 AppKitWindowHostingView 类
+// 添加 mouseDownCanMoveWindow 方法实现，让它永远返回 false。
+//
+// 为什么之前失败：
+//   1. NSClassFromString("NSHostingView") 返回 nil —— 新版 SwiftUI 改名了
+//   2. findNSHostingViewClass 只递归 subviews —— contentView 自己就是
+//      AppKitWindowHostingView，不在 subviews 里
+// 现在用 type(of: contentView) 直接拿运行时类，两个问题都没了。
+// -----------------------------------------------------------------------------
+import ObjectiveC
+
+/// Swizzle contentView 的类（AppKitWindowHostingView），让 mouseDownCanMoveWindow 永远返回 false。
+/// 调用时机：MainWindowChrome 配置窗口时（此时 window.contentView 已存在）。
+/// 幂等——多调安全。
+func pandaSwizzleMouseDownCanMoveWindow(in contentView: NSView?) {
+    guard let contentView else { return }
+    // 直接拿 contentView 的运行时类——它就是 AppKitWindowHostingView
+    let cls = type(of: contentView)
+
+    let sel = NSSelectorFromString("mouseDownCanMoveWindow")
+    let typeEncoding = "c@:" // BOOL mouseDownCanMoveWindow
+
+    // 返回 false 的 block IMP
+    let block: @convention(block) (AnyObject) -> Bool = { _ in false }
+    let newIMP = imp_implementationWithBlock(block as Any)
+
+    let added = class_addMethod(cls, sel, newIMP, typeEncoding)
+    print("🟡 swizzle: cls=\(cls), class_addMethod=\(added)")
+    if !added {
+        // 类已有此方法（罕见），直接替换实现
+        if let method = class_getInstanceMethod(cls, sel) {
+            method_setImplementation(method, newIMP)
+            print("🟡 swizzle: fell back to method_setImplementation")
         }
     }
 }

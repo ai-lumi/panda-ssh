@@ -166,22 +166,21 @@ struct UnifiedWorkspaceTabStrip: View {
                 normalizeBrowseAnchor()
                 revealActiveTab(using: proxy)
             }
-            // .onPreferenceChange 监听子视图上报的每个页签 frame，更新 tabFrames 字典
+            // .onPreferenceChange 监听子视图上报的每个页签 frame，更新 tabFrames 字典。
+            // ⚠️ 关键：只有 frames 真正变化了才赋值！
+            // 否则每次重建都会新建字典实例，@State 赋值触发重建 → GeometryReader → 又发新值 → cycle
             .onPreferenceChange(UnifiedTabFramePreference.self) { frames in
-                tabFrames = frames
-                // frame 更新后重新定位活动页签（不带动画，因为这是布局更新触发的）
-                revealActiveTab(using: proxy, animated: false)
-            }
-            // .onPreferenceChange 监听文档自然宽度变化，更新 measuredDocumentWidth
-            .onPreferenceChange(NaturalDocumentWidthPreference.self) { widthMap in
-                // 取第一个值（文档只有一个宽度报告器）
-                let width = widthMap.values.first ?? 0
-                // 只有宽度变化超过 0.5pt 才更新，避免浮点噪声触发无意义的重绘
-                if abs(width - measuredDocumentWidth) > 0.5 {
-                    measuredDocumentWidth = width
+                if frames != tabFrames {
+                    tabFrames = frames
                 }
             }
         }
+        #if os(macOS)
+        // NonWindowDraggingView 做两件事：
+        // 1. 自身 override mouseDownCanMoveWindow = false 作为局部阻断
+        // 2. 挂到 window 后 swizzle NSHostingView 做全局阻断
+        .background(NonWindowDraggingView())
+        #endif
         // .onDisappear 视图消失时（如窗口关闭），取消正在进行的拖拽重排序
         .onDisappear { dragReorder.cancel(workspace: workspace) }
         // .accessibilityIdentifier 为 UI 测试提供无障碍标识符
@@ -224,24 +223,49 @@ struct UnifiedWorkspaceTabStrip: View {
         }
     }
 
-    /// 创建可拖拽的页签按钮：在普通页签按钮基础上叠加拖拽排序能力
+    /// 创建可拖拽的页签按钮：在普通页签按钮基础上叠加拖拽排序能力。
+    ///
+    /// 关键：.onTapGesture、.contentShape 和 .onDrag 必须在**完全相同的视图层级**上
+    /// 才能正确竞争。如果 .onTapGesture 在子视图而 .onDrag 在父视图，SwiftUI
+    /// 的子视图手势优先规则会让 .onTapGesture 总是先识别，吞掉 mouseDown，
+    /// .onDrag 永远没机会启动。
+    ///
+    /// 所以 .contentShape 和 .onTapGesture 从 tabButton 内部移到了这里，
+    /// 紧挨着 .onDrag，让它们真正同级竞争：
+    ///   快速点击 → .onTapGesture 先赢
+    ///   长按拖动 → .onDrag 先赢
     private func draggableTabButton(_ tab: WorkspaceTab) -> some View {
         tabButton(tab)
             // .id(tab.id) 为每个页签设置唯一 ID，ScrollViewReader 的 scrollTo 依赖此 ID 定位页签
             .id(tab.id)
+            // .contentShape 让整个 HStack 的区域（包括背景）都可点击/拖拽
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            // .onTapGesture 点击页签时选中此页签。
+            // ⚠️ 必须和下面的 .onDrag 在同一视图层级！
+            .onTapGesture {
+                print("🔥 onTap fired for tab \(tab.id)")
+                workspace.select(tabID: tab.id)
+                model.presentTab(tab.id)
+            }
             // .background 放一个 frame 报告器，将页签在文档坐标系中的 frame 上报给父视图
             .background(tabFrameReporter(for: tab.id))
             // 拖拽中的页签半透明显示（opacity 0.5），让用户知道它正在被拖拽
             .opacity(dragReorder.draggingTabID == tab.id ? 0.5 : 1.0)
             // .onDrag 当用户开始拖拽此页签时触发
+            // ⚠️ 必须和上面的 .onTapGesture 在同一视图层级竞争
             .onDrag {
+                print("🔥 onDrag fired for tab \(tab.id)")
                 // 通知 dragReorder 会话开始拖拽此页签
                 dragReorder.begin(tabID: tab.id, workspace: workspace)
                 // 返回 NSItemProvider，携带页签 ID 字符串作为拖拽数据
                 return NSItemProvider(object: tab.id.uuidString as NSString)
             }
             // .onDrop 注册放置代理：当其他页签拖拽到此页签上方时，触发排序逻辑
-            .onDrop(of: [.text], delegate: TabDropDelegate(
+            // ⚠️ UTI 必须同时包含 .text 和 .plainText！
+            // NSString as NSItemProvider 注册的是 kUTTypePlainText（.plainText），
+            // 不是 kUTTypeText（.text）。只写 [.text] 会因为 UTI 不匹配导致
+            // dropEntered/performDrop 永远不被调用。
+            .onDrop(of: [.text, .plainText], delegate: TabDropDelegate(
                 // 放置目标页签 ID
                 targetTabID: tab.id,
                 // 工作区仓库
@@ -290,6 +314,8 @@ struct UnifiedWorkspaceTabStrip: View {
     #endif
 
     /// 创建单个页签按钮：由左侧标签区域 + 右侧关闭按钮组成
+    /// 注意：.onTapGesture 和 .contentShape 已移到 draggableTabButton 外层，
+    /// 与 .onDrag 在同一视图层级竞争。这里只负责渲染视觉元素和关闭按钮。
     private func tabButton(_ tab: WorkspaceTab) -> some View {
         // 判断当前页签是否处于鼠标悬停状态
         let isHovered = hoveredTabID == tab.id
@@ -297,8 +323,6 @@ struct UnifiedWorkspaceTabStrip: View {
         let active = isActive(tab)
 
         // 两个独立组件水平排列，各自管理自己的手势
-        // 标签区域：onTapGesture（低优先级）
-        // 关闭按钮：Button（高优先级），不受父视图 onTapGesture 影响
         return HStack(spacing: 0) {
             // ── 左侧：文本标签区域（状态圆点 + 图标 + 标题）──
             labelArea(for: tab, active: active)
@@ -341,7 +365,9 @@ struct UnifiedWorkspaceTabStrip: View {
         #endif
     }
 
-    /// 左侧标签区域：状态圆点 + 图标 + 标题，点击选中
+    /// 左侧标签区域：状态圆点 + 图标 + 标题
+    /// 点击选中逻辑已提升到 tabButton 的 HStack 层级（与外层 .onDrag 同级），
+    /// 以避免子视图手势优先吞掉拖拽手势。
     private func labelArea(for tab: WorkspaceTab, active: Bool) -> some View {
         // HStack 水平排列状态圆点、图标、标题，间距 6pt
         HStack(spacing: 6) {
@@ -351,8 +377,9 @@ struct UnifiedWorkspaceTabStrip: View {
                 .fill(statusColor(for: tab.id))
                 // .frame(width: 6, height: 6) 固定圆点尺寸为 6x6pt
                 .frame(width: 6, height: 6)
-            // 页签类型图标：终端显示 terminal 图标，SFTP 显示 folder 图标
-            Image(systemName: tab.kind == .terminal ? "terminal" : "folder")
+            // 页签类型图标：终端用 apple.terminal（Apple 官方终端图标，辨识度高），
+            // SFTP 用 folder.fill（填充版文件夹，小尺寸下更清晰）
+            Image(systemName: tab.kind == .terminal ? "apple.terminal" : "folder.fill")
                 // .font(.caption2) 使用 caption2 字号（约 11pt），让图标小一些
                 .font(.caption2)
                 // .foregroundStyle(.secondary) 使用二级灰色，让图标不那么抢眼
@@ -366,15 +393,6 @@ struct UnifiedWorkspaceTabStrip: View {
         .padding(.horizontal, 9)
         // .frame(minHeight: 30) 最小高度 30pt，确保页签有足够的点击区域
         .frame(minHeight: 30)
-        // .contentShape 定义手势命中区域为圆角矩形，与背景形状一致
-        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        // .onTapGesture 点击标签区域时选中此页签
-        .onTapGesture {
-            // 通知 workspace 选中此页签（更新 activeTabID）
-            workspace.select(tabID: tab.id)
-            // 通知 model 呈现此页签的内容（切换工作区显示）
-            model.presentTab(tab.id)
-        }
         // .accessibilityAddTraits 为活动页签添加 .isSelected 无障碍特征
         .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
     }
@@ -819,6 +837,7 @@ private struct TabDropDelegate: DropDelegate {
 
     /// 拖拽进入此页签区域时调用：预览移动效果（不真正提交排序变更）
     func dropEntered(info: DropInfo) {
+        print("📥 dropEntered: target=\(targetTabID)")
         guard let draggingID = dragReorder.draggingTabID,
               draggingID != targetTabID else { return }
         // 预览将 draggingID 页签移动到 targetTabID 之前
@@ -832,6 +851,7 @@ private struct TabDropDelegate: DropDelegate {
 
     /// 拖拽释放时调用：提交排序变更
     func performDrop(info: DropInfo) -> Bool {
+        print("📥 performDrop: target=\(targetTabID)")
         // 通知 dragReorder 提交排序变更
         dragReorder.commit(workspace: workspace)
         return true
@@ -862,19 +882,12 @@ private final class TabDragReorderSession: ObservableObject {
         draggingTabID = tabID
         // 通知 workspace 开始页签重排序（进入预览模式）
         _ = workspace.beginTabReorder(for: tabID)
-        #if os(macOS)
-        // macOS: 注册本地事件监听器，捕获鼠标左键抬起或 Escape 键（keyCode 53）
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .keyDown]) { [weak self, weak workspace] event in
-            // 只处理左键抬起或 Escape 键
-            guard event.type == .leftMouseUp || event.keyCode == 53 else { return event }
-            // 延后一个主循环执行取消，确保 performDrop 有机会先提交
-            DispatchQueue.main.async {
-                guard let self, let workspace else { return }
-                self.cancel(workspace: workspace)
-            }
-            return event
-        }
-        #endif
+
+        // ⚠️ 注意：不再注册全局 leftMouseUp 事件监听器。
+        // 原因：它可能在 NSDraggingSession 处理 drop 之前就收到 leftMouseUp，
+        // 导致 cancel() 在 performDrop 之前执行，把排序恢复回去。
+        // NSDraggingSession 会自己检测鼠标释放并触发 performDrop。
+        // Escape 取消可以用其他方式处理（或暂时不处理）。
     }
 
     /// 提交拖拽排序变更
