@@ -87,13 +87,12 @@ struct UnifiedWorkspaceTabStrip: View {
                     GeometryReader { containerProxy in
                         // 容器可见区域宽度
                         let containerWidth = containerProxy.size.width
-                        // 使用文档自然宽度判断溢出；未测量时回退容器宽度，
-                        // 避免把未测量当成真实零宽去预留整栏空白。
-                        let effectiveContentWidth = measuredDocumentWidth > 0
-                            // 已测量：用真实自然宽度
-                            ? measuredDocumentWidth
-                            // 未测量：回退为容器宽度（假设不溢出）
-                            : containerWidth
+                        // 优先从 tabFrames 计算内容总宽度（在文档坐标系中测量，不受 ScrollView 约束影响），
+                        // 其次 measuredDocumentWidth，最后回退为容器宽度。
+                        let contentWidthFromFrames = TabStripViewportState.contentWidth(from: tabFrames)
+                        let effectiveContentWidth = contentWidthFromFrames > 0
+                            ? contentWidthFromFrames
+                            : (measuredDocumentWidth > 0 ? measuredDocumentWidth : containerWidth)
                         // 根据内容宽度、视口宽度和当前偏移量，计算视口状态
                         // （是否需要滚动、当前偏移是否合法等）
                         let viewport = TabStripViewportState.resolve(
@@ -122,11 +121,13 @@ struct UnifiedWorkspaceTabStrip: View {
                                         // .background 放一个宽度报告器，测量文档自然宽度
                                         .background(documentWidthReporter)
                                 }
-                                // 限制 ScrollView 最大宽度 = 容器宽度 - 两个浏览按钮宽度
-                                .frame(maxWidth: max(0, containerWidth - Self.browseButtonWidth * 2))
+                                // minWidth: 0 让 ScrollView 在 HStack 中成为 flexible 子视图
+                                .frame(minWidth: 0)
                                 // 右浏览按钮（chevron.right），点击向右滚动
                                 browseButton(systemName: "chevron.right", direction: 1, proxy: proxy)
                             }
+                            // HStack 撑满 GeometryReader，ScrollView 用 minWidth: 0 自动分配剩余空间
+                            .frame(maxWidth: .infinity)
                         } else {
                             // ── 内容不溢出：无需滚动 ──
                             // 文档按自然宽度展示，右侧空白区域可拖拽窗口
@@ -146,12 +147,17 @@ struct UnifiedWorkspaceTabStrip: View {
                                     // .macOSWindowDragRegion() 标记为 macOS 窗口拖拽区域（可拖拽窗口移动）
                                     .macOSWindowDragRegion()
                             }
+                            .frame(maxWidth: .infinity)
                         }
                     }
+                    // GeometryReader 撑满 Group 宽度
+                    .frame(maxWidth: .infinity)
                     // 背景中放一个容器宽度报告器，实时追踪容器宽度变化
                     .background(containerWidthReporter)
                 }
             }
+            // Group 撑满 ScrollViewReader 宽度
+            .frame(maxWidth: .infinity)
             // .macOSTabStripWheelBridge 在 macOS 上桥接滚轮事件，实现鼠标滚轮横向翻页签
             .macOSTabStripWheelBridge { input in
                 // 收到滚轮输入后，计算目标偏移并滚动
@@ -172,6 +178,18 @@ struct UnifiedWorkspaceTabStrip: View {
             .onPreferenceChange(UnifiedTabFramePreference.self) { frames in
                 if frames != tabFrames {
                     tabFrames = frames
+                    // frame 更新后重新定位活动页签（不带动画，因为这是布局更新触发的）
+                    revealActiveTab(using: proxy, animated: false)
+                }
+            }
+            // .onPreferenceChange 监听文档自然宽度变化，更新 measuredDocumentWidth。
+            // 这个值用于判断页签栏是否需要横向滚动（内容是否溢出）。
+            .onPreferenceChange(NaturalDocumentWidthPreference.self) { widthMap in
+                // 取第一个值（文档只有一个宽度报告器）
+                let width = widthMap.values.first ?? 0
+                // 只有宽度变化超过 0.5pt 才更新，避免浮点噪声触发无意义的重绘
+                if abs(width - measuredDocumentWidth) > 0.5 {
+                    measuredDocumentWidth = width
                 }
             }
         }
@@ -243,7 +261,6 @@ struct UnifiedWorkspaceTabStrip: View {
             // .onTapGesture 点击页签时选中此页签。
             // ⚠️ 必须和下面的 .onDrag 在同一视图层级！
             .onTapGesture {
-                print("🔥 onTap fired for tab \(tab.id)")
                 workspace.select(tabID: tab.id)
                 model.presentTab(tab.id)
             }
@@ -254,7 +271,6 @@ struct UnifiedWorkspaceTabStrip: View {
             // .onDrag 当用户开始拖拽此页签时触发
             // ⚠️ 必须和上面的 .onTapGesture 在同一视图层级竞争
             .onDrag {
-                print("🔥 onDrag fired for tab \(tab.id)")
                 // 通知 dragReorder 会话开始拖拽此页签
                 dragReorder.begin(tabID: tab.id, workspace: workspace)
                 // 返回 NSItemProvider，携带页签 ID 字符串作为拖拽数据
@@ -592,10 +608,16 @@ struct UnifiedWorkspaceTabStrip: View {
 
     /// 计算当前视口状态（内容宽度、视口宽度、偏移量的综合结果）
     private var currentViewport: TabStripViewportState {
-        // 已测量文档宽度时使用测量值，否则回退到视口宽度
-        let effectiveContentWidth = measuredDocumentWidth > 0
-            ? measuredDocumentWidth
-            : viewportWidth
+        // 优先从 tabFrames 计算内容总宽度（不受 ScrollView 约束影响）
+        let contentWidthFromFrames = TabStripViewportState.contentWidth(from: tabFrames)
+        let effectiveContentWidth: Double
+        if contentWidthFromFrames > 0 {
+            effectiveContentWidth = contentWidthFromFrames
+        } else if measuredDocumentWidth > 0 {
+            effectiveContentWidth = measuredDocumentWidth
+        } else {
+            effectiveContentWidth = viewportWidth
+        }
         return TabStripViewportState.resolve(
             contentWidth: effectiveContentWidth,
             viewportWidth: viewportWidth,
@@ -837,7 +859,6 @@ private struct TabDropDelegate: DropDelegate {
 
     /// 拖拽进入此页签区域时调用：预览移动效果（不真正提交排序变更）
     func dropEntered(info: DropInfo) {
-        print("📥 dropEntered: target=\(targetTabID)")
         guard let draggingID = dragReorder.draggingTabID,
               draggingID != targetTabID else { return }
         // 预览将 draggingID 页签移动到 targetTabID 之前
@@ -851,7 +872,6 @@ private struct TabDropDelegate: DropDelegate {
 
     /// 拖拽释放时调用：提交排序变更
     func performDrop(info: DropInfo) -> Bool {
-        print("📥 performDrop: target=\(targetTabID)")
         // 通知 dragReorder 提交排序变更
         dragReorder.commit(workspace: workspace)
         return true

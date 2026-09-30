@@ -85,55 +85,31 @@ struct UnifiedWorkspaceChrome: View {
 
             // HStack：水平排列子视图（从左到右），spacing: 0 表示子视图之间无间距。
             HStack(spacing: 0) {
-                // 左侧安全预留区：
-                // Color.clear 创建一个透明的色块
+                // 左侧安全预留区（红绿灯 + 窗口拖动）
                 Color.clear
-                    // .frame(width:) 设置这个透明色块的宽度为布局计算出的左侧安全宽度
                     .frame(width: layout.leadingSafeWidth)
-                    // .macOSWindowDragRegion() 让这个透明区域支持拖动窗口
-                    // （macOS 特有功能，iOS 上是空操作）
                     .macOSWindowDragRegion()
 
-                // 如果布局方案决定应该显示侧栏工具按钮（侧栏可见时）
                 if layout.showsSidebarTools {
-                    // 显示侧栏工具按钮组（添加主机、新建分组、隐藏侧栏）
                     sidebarTools
-                        // .frame(width:alignment:) 设置固定宽度和对齐方式
-                        // 宽度由布局计算决定，内容左对齐
                         .frame(width: layout.sidebarToolsWidth, alignment: .leading)
-                        // .overlay(alignment:) 在视图上叠加一层覆盖层
-                        // alignment: .trailing 表示覆盖层靠右对齐
                         .overlay(alignment: .trailing) {
-                            // 在工具按钮右侧画一条竖线分隔符
-                            // Rectangle() 创建一个矩形形状
                             Rectangle()
-                                // .fill 设置填充颜色：primary 颜色的 12% 不透明度
-                                // primary 会自动适配亮色/暗色模式（亮色下是黑色，暗色下是白色）
                                 .fill(Color.primary.opacity(0.12))
-                                // .frame(width:height:) 设置分隔线尺寸：宽 1pt、高 22pt
                                 .frame(width: 1, height: 22)
                         }
-                // 否则，如果布局方案决定应该显示侧栏恢复按钮（侧栏被隐藏时）
                 } else if layout.showsSidebarRecovery {
-                    // 显示侧栏恢复按钮（一个"显示侧栏"的图标按钮）
                     sidebarRecovery
-                        // .frame(width:) 设置固定宽度
                         .frame(width: layout.sidebarRecoveryWidth)
                 }
 
-                // 页签条：显示所有打开的终端标签页
+                // 页签条：自动填充剩余空间
                 UnifiedWorkspaceTabStrip()
-                    // .frame(width:) 设置页签条的宽度，由布局计算决定
-                    .frame(width: layout.tabStripWidth)
+                    .frame(minWidth: 0, maxWidth: .infinity)
 
-                // 窗口拖动只绑定到明确的空白区；不得覆盖页签或按钮，
-                // 否则 AppKit 会在 SwiftUI 拖放启动前接管鼠标拖动。
-                // 右侧安全预留区：
-                // Color.clear 创建一个透明的色块
+                // 右侧窗口拖动预留区
                 Color.clear
-                    // .frame(width:) 设置宽度为布局计算出的右侧安全宽度
                     .frame(width: layout.trailingSafeWidth)
-                    // .macOSWindowDragRegion() 让这个区域支持拖动窗口
                     .macOSWindowDragRegion()
             }
             // .frame(maxWidth:maxHeight:alignment:) 设置整个 HStack 的最大尺寸和对齐方式

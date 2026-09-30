@@ -106,11 +106,11 @@ struct WorkspaceView: View {
             UnifiedWorkspaceChrome(
                 // 顶部工具栏：包含标签栏、流量统计等
                 leadingReservedWidth: chromeMetrics.trafficLightSafeWidth,
-                // 左侧预留宽度：避让 macOS 窗口的红绿灯按钮（关闭/最小化/全屏）
-                trailingReservedWidth: 80,
-                // 右侧预留宽度：80 点
+                // 右侧不预留额外宽度，让 TabStrip 自动撑满剩余空间。
+                // 窗口拖动区域已由左侧安全区（红绿灯）和 TabStrip 内部
+                // 的 trailing macOSWindowDragRegion 提供，无需 Chrome 再留 80pt 空白。
+                trailingReservedWidth: 0,
                 sidebarWidth: chromeMetrics.sidebarWidth
-                // 侧栏宽度
             )
             Divider()
             // 工具栏和内容区之间的分隔线（一条细灰线）
