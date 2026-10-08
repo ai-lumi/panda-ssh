@@ -138,16 +138,43 @@ struct MacOSUnifiedSplitHost<Sidebar: View, Detail: View>: NSViewControllerRepre
     /// 分栏策略（宽度、是否折叠等配置）
     let policy: MacOSUnifiedSplitHostPolicy
 
+    // NSHostingController 会切断 SwiftUI 环境对象传递链，
+    // 必须在 representable 层显式持有所有环境依赖，
+    // 再手动注入到 NSHostingController 的 rootView 上。
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var workspace: WorkspaceStore
+    @EnvironmentObject private var toast: ToastCenter
+    @EnvironmentObject private var chromeMetrics: MacOSWorkspaceChromeMetrics
+    @Environment(\.transferStore) private var transfers
+
+    /// 用所有环境依赖包装 rootView，供 NSHostingController 继承。
+    private func wrapEnvironment<V: View>(_ view: V) -> AnyView {
+        AnyView(
+            view
+                .environmentObject(model)
+                .environmentObject(workspace)
+                .environmentObject(toast)
+                .environmentObject(chromeMetrics)
+                .environment(\.transferStore, transfers)
+        )
+    }
+
     /// 首次创建 AppKit 控制器时调用，初始化分栏控制器
     func makeNSViewController(context _: Context) -> Controller {
-        // 将 SwiftUI 视图包装为 AnyView 后传入控制器
-        Controller(sidebar: AnyView(sidebar), detail: AnyView(detail), policy: policy)
+        Controller(
+            sidebar: wrapEnvironment(sidebar),
+            detail: wrapEnvironment(detail),
+            policy: policy
+        )
     }
 
     /// SwiftUI 状态变化时调用，更新控制器中的视图内容和分栏策略
     func updateNSViewController(_ controller: Controller, context _: Context) {
-        // 将最新的 SwiftUI 视图和策略同步给 AppKit 控制器
-        controller.update(sidebar: AnyView(sidebar), detail: AnyView(detail), policy: policy)
+        controller.update(
+            sidebar: wrapEnvironment(sidebar),
+            detail: wrapEnvironment(detail),
+            policy: policy
+        )
     }
 
     /// 内部控制器类，继承自 NSSplitViewController，管理实际的左右分栏布局
